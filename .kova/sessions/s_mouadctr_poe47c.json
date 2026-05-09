@@ -1,0 +1,20 @@
+{
+  "id": "s_mouadctr_poe47c",
+  "title": "casual-smoke",
+  "projectRoot": "C:\\Users\\allan\\Desktop\\Kova_ADE",
+  "createdAt": "2026-05-06T16:43:10.766Z",
+  "updatedAt": "2026-05-06T16:43:10.805Z",
+  "events": [
+    {
+      "kind": "user",
+      "content": "ola",
+      "timestamp": "2026-05-06T16:43:10.805Z"
+    },
+    {
+      "kind": "assistant",
+      "content": "Oi. Estou pronto para trabalhar no projeto com o harness no centro do fluxo.\n\nMe mande uma task concreta, por exemplo:\n/review adicione um teste simples para o comando connect\nou\ncorrija o bug X em apps/cli sem aplicar automaticamente\n\nUse /connect para trocar provider e /status para ver a sessao atual.",
+      "status": "chat",
+      "timestamp": "2026-05-06T16:43:10.805Z"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@kova/cli",
+  "version": "1.0.0",
+  "description": "Kova standalone CLI",
+  "type": "module",
+  "bin": {
+    "kova": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "test": "node dist/index.js --help"
+  },
+  "dependencies": {
+    "@kova/kova-runner": "workspace:*",
+    "@kova/memory": "workspace:*",
+    "@kova/observability": "workspace:*",
+    "@kova/shared": "workspace:*",
+    "chalk": "^5.4.1",
+    "ora": "^8.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,17 @@
+
+> @kova/context@1.0.0 test C:\Users\allan\Desktop\Kova_ADE\packages\context
+> vitest run
+
+
+[7m[1m[36m RUN [39m[22m[27m [36mv1.6.1[39m [90mC:/Users/allan/Desktop/Kova_ADE/packages/context[39m
+
+ [32m✓[39m __tests__/token-budget.test.ts [2m ([22m[2m7 tests[22m[2m)[22m[90m 8[2mms[22m[39m
+ [32m✓[39m __tests__/grep-search.test.ts [2m ([22m[2m8 tests[22m[2m)[22m[90m 36[2mms[22m[39m
+ [32m✓[39m __tests__/dependency-graph.test.ts [2m ([22m[2m7 tests[22m[2m)[22m[90m 66[2mms[22m[39m
+ [32m✓[39m __tests__/context-engine.test.ts [2m ([22m[2m7 tests[22m[2m)[22m[90m 143[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m4 passed[39m[22m[90m (4)[39m
+[2m      Tests [22m [1m[32m29 passed[39m[22m[90m (29)[39m
+[2m   Start at [22m 20:42:28
+[2m   Duration [22m 993ms[2m (transform 292ms, setup 0ms, collect 789ms, tests 253ms, environment 1ms, prepare 719ms)[22m
+

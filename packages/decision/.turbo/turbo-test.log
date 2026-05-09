@@ -1,0 +1,17 @@
+
+> @kova/decision@1.0.0 test C:\Users\allan\Desktop\Kova_ADE\packages\decision
+> vitest run
+
+
+[7m[1m[36m RUN [39m[22m[27m [36mv1.6.1[39m [90mC:/Users/allan/Desktop/Kova_ADE/packages/decision[39m
+
+ [32m✓[39m __tests__/score.test.ts [2m ([22m[2m8 tests[22m[2m)[22m[90m 6[2mms[22m[39m
+ [32m✓[39m __tests__/feedback.test.ts [2m ([22m[2m7 tests[22m[2m)[22m[90m 7[2mms[22m[39m
+ [32m✓[39m __tests__/review-gate.test.ts [2m ([22m[2m3 tests[22m[2m)[22m[90m 6[2mms[22m[39m
+ [32m✓[39m __tests__/decision-engine.test.ts [2m ([22m[2m10 tests[22m[2m)[22m[90m 9[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m4 passed[39m[22m[90m (4)[39m
+[2m      Tests [22m [1m[32m28 passed[39m[22m[90m (28)[39m
+[2m   Start at [22m 20:42:22
+[2m   Duration [22m 612ms[2m (transform 257ms, setup 1ms, collect 586ms, tests 28ms, environment 1ms, prepare 783ms)[22m
+

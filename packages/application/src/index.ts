@@ -1,0 +1,6 @@
+export { CodeApplicationEngine } from './application-engine'
+export type { ApplyResult } from './application-engine'
+export { createCheckpoint, restoreCheckpoint, listCheckpoints, deleteCheckpoint } from './checkpoint'
+export type { CheckpointMeta } from './checkpoint'
+export { isSafeZone } from './safe-zones'
+export type { SafeZoneConfig } from './safe-zones'

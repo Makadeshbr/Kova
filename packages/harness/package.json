@@ -1,0 +1,19 @@
+{
+  "name": "@kova/harness",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kova/shared": "workspace:*",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "vitest": "^1.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

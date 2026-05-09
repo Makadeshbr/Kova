@@ -1,0 +1,41 @@
+{
+  "name": "@kova/electron",
+  "version": "0.1.0",
+  "description": "Kova Desktop",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "test": "vitest run --config vitest.config.ts",
+    "dist": "pnpm build && electron-builder",
+    "dist:win": "pnpm build && electron-builder --win",
+    "dist:mac": "pnpm build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@kova/adapters": "workspace:*",
+    "@kova/agent": "workspace:*",
+    "@kova/application": "workspace:*",
+    "@kova/context": "workspace:*",
+    "@kova/decision": "workspace:*",
+    "@kova/execution": "workspace:*",
+    "@kova/memory": "workspace:*",
+    "@kova/orchestrator": "workspace:*",
+    "@kova/project": "workspace:*",
+    "@kova/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.0.0",
+    "electron-vite": "^3.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0",
+    "vitest": "^1.0.0"
+  }
+}

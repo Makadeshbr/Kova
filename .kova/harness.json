@@ -1,0 +1,15 @@
+{
+  "validation": {
+    "build": "auto",
+    "test": "auto",
+    "lint": "auto",
+    "security": "auto",
+    "architecture": "auto"
+  },
+  "policy": {
+    "autoApplyThreshold": 90,
+    "suggestThreshold": 70,
+    "rejectBelow": 70,
+    "requireRealValidationForAutoApply": true
+  }
+}

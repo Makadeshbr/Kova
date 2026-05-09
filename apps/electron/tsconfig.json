@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@kova/shared": ["../../packages/shared/src/index.ts"],
+      "@kova/agent": ["../../packages/agent/src/index.ts"],
+      "@kova/execution": ["../../packages/execution/src/index.ts"],
+      "@kova/adapters": ["../../packages/adapters/src/index.ts"],
+      "@kova/orchestrator": ["../../packages/orchestrator/src/index.ts"],
+      "@kova/project": ["../../packages/project/src/index.ts"],
+      "@kova/context": ["../../packages/context/src/index.ts"],
+      "@kova/memory": ["../../packages/memory/src/index.ts"],
+      "@kova/application": ["../../packages/application/src/index.ts"],
+      "@kova/decision": ["../../packages/decision/src/index.ts"]
+    },
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  },
+  "include": ["src/**/*", "electron.vite.config.ts", "electron-builder.config.cjs"]
+}

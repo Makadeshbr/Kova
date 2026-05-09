@@ -1,0 +1,31 @@
+{
+  "name": "@kova/kova-runner",
+  "version": "1.0.0",
+  "description": "CLI runner invoked by the Kova IDE to validate code via the harness pipeline",
+  "bin": {
+    "kova-runner": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --no-splitting",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kova/agent": "workspace:*",
+    "@kova/shared": "workspace:*",
+    "@kova/adapters": "workspace:*",
+    "@kova/application": "workspace:*",
+    "@kova/context": "workspace:*",
+    "@kova/orchestrator": "workspace:*",
+    "@kova/project": "workspace:*",
+    "@kova/decision": "workspace:*",
+    "@kova/execution": "workspace:*",
+    "@kova/memory": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
