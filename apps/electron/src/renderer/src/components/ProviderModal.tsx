@@ -87,15 +87,36 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
           <button onClick={onClose} style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 16, padding: '4px 8px' }}>✕</button>
         </div>
 
-        <Field label="Provider LLM">
-          <select value={form.defaultProvider} onChange={set('defaultProvider')} style={{ ...FIELD, cursor: 'pointer' }}>
-            <optgroup label="Local (grátis)">
-              {PROVIDERS.filter(p => p.local).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </optgroup>
-            <optgroup label="Cloud (API key)">
-              {PROVIDERS.filter(p => !p.local).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </optgroup>
-          </select>
+        <Field label="Intelligence Engine">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10, marginTop: 4 }}>
+            {PROVIDERS.map(p => {
+              const isSelected = form.defaultProvider === p.value
+              return (
+                <button
+                  key={p.value}
+                  onClick={() => {
+                    setForm(prev => ({ ...prev, defaultProvider: p.value, model: DEFAULT_MODELS[p.value] ?? '' }))
+                    setModelMode('preset')
+                    setModels([])
+                  }}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6,
+                    padding: '12px', background: isSelected ? 'var(--cyan-glow)' : 'var(--bg-1)',
+                    border: `1px solid ${isSelected ? 'var(--cyan)' : 'var(--border)'}`,
+                    borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+                    transition: 'all 0.2s', position: 'relative'
+                  }}
+                >
+                  {isSelected && (
+                    <div style={{ position: 'absolute', top: 8, right: 8, width: 14, height: 14, borderRadius: '50%', background: 'var(--cyan)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontSize: 10, fontWeight: 'bold' }}>✓</div>
+                  )}
+                  <span style={{ fontSize: 16, color: isSelected ? 'var(--cyan)' : 'var(--text-3)' }}>{p.label.split(' ')[0]}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: isSelected ? 'var(--text-1)' : 'var(--text-2)' }}>{p.label.split(' ').slice(1).join(' ')}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text-3)' }}>{p.local ? 'Local' : 'Cloud'}</span>
+                </button>
+              )
+            })}
+          </div>
         </Field>
 
         {hint && (
@@ -178,7 +199,7 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
           {models.length > 1 && <p style={{ fontSize: 11, color: 'var(--teal)', marginTop: 4 }}>{models.length} modelos detectados</p>}
         </Field>
 
-        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', paddingTop: 12 }}>
           <Field label="Máx. Iterações">
             <input type="number" min={1} max={20} value={form.maxIterations}
               onChange={e => setForm(prev => ({ ...prev, maxIterations: Number(e.target.value) }))}
@@ -190,9 +211,9 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
           </label>
         </div>
 
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 4, borderTop: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 16, borderTop: '1px solid var(--border)' }}>
           <button onClick={onClose} style={{ background: 'var(--bg-active)', color: 'var(--text-2)', padding: '8px 16px', borderRadius: 6 }}>Cancelar</button>
-          <button onClick={() => onSave(form)} style={{ background: 'var(--amber)', color: '#000', padding: '8px 16px', fontWeight: 600, borderRadius: 6 }}>Salvar</button>
+          <button onClick={() => onSave(form)} style={{ background: 'var(--cyan)', color: '#000', padding: '8px 16px', fontWeight: 600, borderRadius: 6 }}>Salvar</button>
         </div>
       </div>
     </div>

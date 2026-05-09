@@ -35,10 +35,10 @@ interface ComposerOption<T extends string> {
 }
 
 const CHAT_MODE_OPTIONS: ComposerOption<ChatMode>[] = [
-  { value: 'patch', label: 'Patch', detail: 'Edita codigo e valida', accent: 'var(--teal)' },
-  { value: 'chat', label: 'Chat', detail: 'Responde sem alterar arquivos', accent: 'var(--purple)' },
-  { value: 'plan', label: 'Plan', detail: 'Leitura e plano tecnico', accent: 'var(--yellow)' },
-  { value: 'review', label: 'Review', detail: 'Analise read-only', accent: 'var(--amber)' },
+  { value: 'patch', label: '/patch', detail: 'Edita código e valida', accent: 'var(--cyan)' },
+  { value: 'chat', label: '/chat', detail: 'Responde sem alterar arquivos', accent: 'var(--cyan)' },
+  { value: 'plan', label: '/plan', detail: 'Leitura e plano técnico', accent: 'var(--cyan)' },
+  { value: 'review', label: '/review', detail: 'Análise read-only', accent: 'var(--cyan)' },
 ]
 
 const PERMISSION_OPTIONS: ComposerOption<PermissionMode>[] = [
@@ -58,34 +58,31 @@ function Avatar(): React.ReactElement {
 }
 
 function UserBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
-  // Parse @refs and /plan from the message for visual confirmation
   const atRefs = extractAtRefs(msg.content)
   const isPlan = /^\/plan(\s|$)/i.test(msg.content.trimStart())
-  // Strip @refs from display text so chips don't duplicate
   const displayText = msg.content.trim()
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 24 }}>
       <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
-        {/* @ref and /plan chips */}
         {(atRefs.length > 0 || isPlan) && (
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {isPlan && (
-              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: 'var(--amber-dim)', color: 'var(--amber)', fontFamily: 'var(--font-mono)', fontWeight: 600, border: '1px solid rgba(193,122,46,0.3)' }}>
+              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'var(--bg-3)', color: 'var(--text-2)', fontFamily: 'var(--font-mono)', fontWeight: 600, border: '1px solid var(--border)' }}>
                 /plan
               </span>
             )}
             {atRefs.map(ref => (
-              <span key={ref} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: 'var(--purple-dim)', color: 'var(--purple)', fontFamily: 'var(--font-mono)', border: '1px solid rgba(127,119,221,0.3)' }}>
+              <span key={ref} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'var(--bg-3)', color: 'var(--text-2)', fontFamily: 'var(--font-mono)', border: '1px solid var(--border)' }}>
                 @ {ref.split(/[/\\]/).pop()}
               </span>
             ))}
           </div>
         )}
         <div style={{
-          padding: '10px 14px',
-          background: 'var(--amber-dim)', border: '1px solid rgba(193,122,46,0.2)',
-          borderRadius: '12px 12px 2px 12px',
+          padding: '12px 16px',
+          background: 'var(--bg-3)', border: '1px solid var(--border)',
+          borderRadius: '12px',
           color: 'var(--text-1)', fontSize: 13, lineHeight: 1.6,
           whiteSpace: 'pre-wrap', wordBreak: 'break-word',
         }}>
@@ -185,12 +182,12 @@ function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
     return <AgentResultCard msg={msg.structured} />
   }
   return (
-    <div style={{ display: 'flex', gap: 10, marginBottom: 16 }} className="animate-fade-in">
-      <Avatar />
+    <div style={{ display: 'flex', gap: 12, marginBottom: 24 }} className="animate-fade-in">
+      <div style={{ width: 24, height: 24, borderRadius: '4px', background: 'var(--bg-3)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cyan)', fontSize: 12, flexShrink: 0, marginTop: 4 }}>
+        🤖
+      </div>
       <div style={{
-        flex: 1, minWidth: 0, padding: '10px 14px',
-        background: 'var(--bg-2)', border: '1px solid var(--border)',
-        borderRadius: '2px 12px 12px 12px',
+        flex: 1, minWidth: 0, padding: '4px 0',
         color: 'var(--text-1)', fontSize: 13, lineHeight: 1.7,
         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
       }}>
@@ -527,13 +524,16 @@ export function ChatArea({
               {/* Thinking dots — initial state, no text yet */}
               {!streamingText && events.length === 0 && !isActive && (
                 <div style={{
-                  display: 'inline-flex', gap: 4, padding: '12px 14px',
-                  background: 'var(--bg-2)', border: '1px solid var(--border)',
-                  borderRadius: '2px 12px 12px 12px',
+                  display: 'inline-flex', gap: 6, alignItems: 'center',
+                  color: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-mono)'
                 }}>
-                  {[0, 1, 2].map(i => (
-                    <div key={i} style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--text-3)', animation: `pulse-amber 1.2s ${i * 0.2}s infinite` }} />
-                  ))}
+                  <span>⟳</span>
+                  <span>Thinking...</span>
+                  <div style={{ display: 'flex', gap: 4, marginLeft: 4 }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i} style={{ width: 4, height: 4, borderRadius: '50%', background: 'var(--cyan)', animation: `pulse-amber 1.2s ${i * 0.2}s infinite` }} />
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -604,8 +604,9 @@ export function ChatArea({
             disabled={!value.trim() || !projectRoot}
             className="kova-send-button"
             style={{
-              background: value.trim() && projectRoot ? 'var(--amber)' : 'var(--bg-active)',
+              background: value.trim() && projectRoot ? 'var(--cyan)' : 'var(--bg-active)',
               color:      value.trim() && projectRoot ? '#000' : 'var(--text-3)',
+              borderRadius: '8px',
               transition: 'background 0.15s, color 0.15s',
             }}
           >↑</button>

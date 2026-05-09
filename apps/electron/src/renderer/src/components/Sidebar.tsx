@@ -32,25 +32,25 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
   }, [tab, projectRoot])
 
   const filesTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent',
+    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
     color: tab === 'files' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'files' ? '2px solid var(--amber)' : '2px solid transparent',
+    borderBottom: tab === 'files' ? '2px solid var(--cyan)' : '2px solid transparent',
     fontSize: 11, fontWeight: tab === 'files' ? 600 : 400,
     borderRadius: 0, transition: 'color 0.15s',
   }), [tab])
 
   const historyTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent',
+    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
     color: tab === 'history' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'history' ? '2px solid var(--amber)' : '2px solid transparent',
+    borderBottom: tab === 'history' ? '2px solid var(--cyan)' : '2px solid transparent',
     fontSize: 11, fontWeight: tab === 'history' ? 600 : 400,
     borderRadius: 0, transition: 'color 0.15s',
   }), [tab])
 
   const sessionsTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent',
+    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
     color: tab === 'sessions' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'sessions' ? '2px solid var(--amber)' : '2px solid transparent',
+    borderBottom: tab === 'sessions' ? '2px solid var(--cyan)' : '2px solid transparent',
     fontSize: 11, fontWeight: tab === 'sessions' ? 600 : 400,
     borderRadius: 0, transition: 'color 0.15s',
   }), [tab])
@@ -59,7 +59,8 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
     <div style={{ width: 220, background: 'var(--bg-2)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
       {projectRoot && (
         <div style={{ padding: '10px 12px 6px', borderBottom: '1px solid var(--border)' }}>
-          <p style={{ fontSize: 11, color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.05em', marginBottom: 4 }}>EXPLORER</p>
+          <p style={{ fontSize: 11, color: 'var(--text-1)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {projectRoot.replace(/\\/g, '/').split('/').at(-1)}
           </p>
           {(sessionUsage.contextTokens > 0 || sessionUsage.contextFiles.length > 0) && (
@@ -71,7 +72,7 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
                 </span>
               </div>
               <div style={{ height: 4, background: 'var(--bg-active)', borderRadius: 3, overflow: 'hidden' }}>
-                <div style={{ width: `${contextPercent || 3}%`, height: '100%', background: 'var(--amber)', borderRadius: 3 }} />
+                <div style={{ width: `${contextPercent || 3}%`, height: '100%', background: 'var(--cyan)', borderRadius: 3 }} />
               </div>
               {sessionUsage.contextFiles.length > 0 && (
                 <p style={{ marginTop: 5, fontSize: 10, color: 'var(--text-ghost)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -85,11 +86,11 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
       )}
 
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)' }}>
-        <button style={filesTabStyle} onClick={() => setTab('files')}>Files</button>
+        <button style={filesTabStyle} onClick={() => setTab('files')}>📁 Files</button>
         <button style={historyTabStyle} onClick={() => setTab('history')}>
-          Log {history.length > 0 && `(${history.length})`}
+          🕒 Log {history.length > 0 && `(${history.length})`}
         </button>
-        <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>Sessões</button>
+        <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>💾 Sessões</button>
       </div>
 
       {tab === 'files' && (

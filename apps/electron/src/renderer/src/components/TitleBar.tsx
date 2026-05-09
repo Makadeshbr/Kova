@@ -48,10 +48,23 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
   const noDragStyle: DragStyle = { WebkitAppRegion: 'no-drag' }
 
   return (
-    <div style={dragStyle as React.CSSProperties}>
-      {/* Logo + status */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, ...noDragStyle } as React.CSSProperties}>
-        <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '0.1em', color: 'var(--amber)' }}>KOVA</span>
+    <div style={{ ...dragStyle, justifyContent: 'space-between' } as React.CSSProperties}>
+      {/* Left: Project folder button */}
+      <div style={{ display: 'flex', alignItems: 'center', flex: 1, minWidth: 0, ...noDragStyle } as React.CSSProperties}>
+        <button onClick={onOpenFolder} style={{
+          background: 'transparent', color: projectName ? 'var(--text-1)' : 'var(--text-3)',
+          padding: '4px 8px', fontSize: 12, fontWeight: projectName ? 600 : 400,
+          maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span style={{ fontSize: 14, color: projectName ? 'var(--cyan)' : 'var(--text-3)' }}>{projectName ? '📁' : '+'}</span>
+          {projectName ? projectName : 'Abrir projeto'}
+        </button>
+      </div>
+
+      {/* Center: Logo + status */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flex: 1 }}>
+        <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: '0.15em', color: 'var(--cyan)' }}>KOVA</span>
         {status && (
           <span style={{
             width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
@@ -61,60 +74,45 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
         )}
       </div>
 
-      <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 10px' }} />
+      {/* Right: Model picker + Window controls */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, flex: 1, ...noDragStyle } as React.CSSProperties}>
+        <div style={{ position: 'relative' }}>
+          <button
+            ref={modelBtnRef}
+            onClick={() => setShowPicker(v => !v)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              background: showPicker ? 'var(--bg-active)' : 'transparent',
+              border: `1px solid ${showPicker ? 'var(--border-focus)' : 'transparent'}`,
+              borderRadius: 6, padding: '4px 10px', color: 'var(--text-2)', fontSize: 12,
+              transition: 'all 0.15s', cursor: 'pointer',
+            }}
+          >
+            <span style={{
+              width: 7, height: 7, borderRadius: '50%', background: dotColor, flexShrink: 0,
+              animation: modelConnected && isActive(status) ? 'pulse-amber 1.5s infinite' : 'none',
+              boxShadow: modelConnected ? `0 0 8px ${dotColor}` : 'none',
+            }} />
+            <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {modelLabel}
+            </span>
+          </button>
 
-      {/* Project folder button */}
-      <button onClick={onOpenFolder} style={{
-        background: 'transparent', color: projectName ? 'var(--text-2)' : 'var(--text-3)',
-        padding: '2px 8px', fontSize: 12, maxWidth: 200,
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        ...noDragStyle,
-      } as React.CSSProperties}>
-        {projectName ? `> ${projectName}` : '+ Abrir projeto'}
-      </button>
+          {showPicker && settings && (
+            <ModelPicker
+              settings={settings}
+              activeModel={activeModel}
+              onSelect={(m) => { onSelectModel(m); setShowPicker(false) }}
+              onOpenSettings={() => { onOpenSettings(); setShowPicker(false) }}
+              onClose={() => setShowPicker(false)}
+              anchorRef={modelBtnRef as React.RefObject<HTMLElement>}
+            />
+          )}
+        </div>
 
-      <div style={{ flex: 1 }} />
-
-      {/* Model picker */}
-      <div style={{ position: 'relative', ...noDragStyle } as React.CSSProperties}>
-        <button
-          ref={modelBtnRef}
-          onClick={() => setShowPicker(v => !v)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 7,
-            background: showPicker ? 'var(--bg-active)' : 'transparent',
-            border: `1px solid ${showPicker ? 'var(--border-focus)' : 'var(--border)'}`,
-            borderRadius: 6, padding: '4px 10px', color: 'var(--text-2)', fontSize: 12,
-            transition: 'all 0.15s', cursor: 'pointer',
-          }}
-        >
-          <span style={{
-            width: 7, height: 7, borderRadius: '50%', background: dotColor, flexShrink: 0,
-            animation: modelConnected && isActive(status) ? 'pulse-amber 1.5s infinite' : 'none',
-            boxShadow: modelConnected ? `0 0 6px ${dotColor}` : 'none',
-          }} />
-          <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {modelLabel}
-          </span>
-          <span style={{ color: 'var(--text-ghost)', fontSize: 10 }}>v</span>
-        </button>
-
-        {showPicker && settings && (
-          <ModelPicker
-            settings={settings}
-            activeModel={activeModel}
-            onSelect={(m) => { onSelectModel(m); setShowPicker(false) }}
-            onOpenSettings={() => { onOpenSettings(); setShowPicker(false) }}
-            onClose={() => setShowPicker(false)}
-            anchorRef={modelBtnRef as React.RefObject<HTMLElement>}
-          />
-        )}
-      </div>
-
-      {/* Settings + window controls */}
-      <div style={{ display: 'flex', gap: 2, marginLeft: 6, ...noDragStyle } as React.CSSProperties}>
-        <button onClick={onOpenSettings} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 8px', fontSize: 15 }} title="Configurações">⚙</button>
+        <button onClick={onOpenSettings} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 8px', fontSize: 14 }} title="Configurações">⚙</button>
         {!isMac && <>
+          <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
           <button onClick={() => window.kova.windowMinimize()} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 10px' }}>─</button>
           <button onClick={() => window.kova.windowMaximize()} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 10px' }}>□</button>
           <button onClick={() => window.kova.windowClose()} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 10px' }}>✕</button>
