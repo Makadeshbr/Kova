@@ -449,7 +449,8 @@ function buildRecord(iteration, output, harnessResult, decision, context, startM
     harnessResult,
     decision,
     duration: Date.now() - startMs,
-    tokensUsed: output.tokensUsed + context.tokensUsed
+    tokensUsed: output.tokensUsed + context.tokensUsed,
+    contextFiles: context.files.map((f) => ({ path: f.path }))
   };
 }
 function generateProofPack(state, contract) {
@@ -477,13 +478,21 @@ function generateProofPack(state, contract) {
       }
     }
   }
+  const contextFileMap = /* @__PURE__ */ new Map();
+  for (const iter of state.iterationHistory) {
+    for (const f of iter.contextFiles ?? []) {
+      if (!contextFileMap.has(f.path)) {
+        contextFileMap.set(f.path, { path: f.path, reason: `No contexto da itera\xE7\xE3o ${iter.iteration}` });
+      }
+    }
+  }
+  const analyzedFiles = Array.from(contextFileMap.values());
   return {
     objective: contract.objective,
     iterations: state.currentIteration,
     totalTokens: state.totalTokens,
     changes,
-    analyzedFiles: [],
-    // Será preenchido pelo ContextEngine se tivéssemos acesso aqui
+    analyzedFiles,
     validationsRun,
     validationsNotRun,
     residualRisk,

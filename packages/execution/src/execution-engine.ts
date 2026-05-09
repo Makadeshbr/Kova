@@ -342,6 +342,7 @@ function buildRecord(
     decision,
     duration: Date.now() - startMs,
     tokensUsed: output.tokensUsed + context.tokensUsed,
+    contextFiles: context.files.map(f => ({ path: f.path })),
   }
 }
 
@@ -373,12 +374,23 @@ function generateProofPack(state: ExecutionState, contract: ExecutionContract): 
     }
   }
 
+  // Collect context files from all iterations, deduplicating by path
+  const contextFileMap = new Map<string, { path: string; reason: string }>()
+  for (const iter of state.iterationHistory) {
+    for (const f of iter.contextFiles ?? []) {
+      if (!contextFileMap.has(f.path)) {
+        contextFileMap.set(f.path, { path: f.path, reason: `No contexto da iteração ${iter.iteration}` })
+      }
+    }
+  }
+  const analyzedFiles = Array.from(contextFileMap.values())
+
   return {
     objective: contract.objective,
     iterations: state.currentIteration,
     totalTokens: state.totalTokens,
     changes,
-    analyzedFiles: [], // Será preenchido pelo ContextEngine se tivéssemos acesso aqui
+    analyzedFiles,
     validationsRun,
     validationsNotRun,
     residualRisk,

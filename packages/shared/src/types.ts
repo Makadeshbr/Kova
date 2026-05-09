@@ -126,6 +126,8 @@ export interface IterationRecord {
   decision: DecisionResult
   duration: number
   tokensUsed: number
+  /** Arquivos que estavam no contexto desta iteração (sem conteúdo) */
+  contextFiles?: Array<{ path: string }>
 }
 
 export interface FileChange {
