@@ -655,8 +655,10 @@ export class EngineManager {
         }
         this.emit({ type: 'stream_end', structuredMessage: structuredMsg })
         engineStreamEndObserved = true
-      } else if (state.status === 'failed' && !signal?.aborted) {
-        // No files changed but engine failed — flush any streamed text
+      } else {
+        // No files changed (analysis-only run, or agent replied with text only).
+        // The streamingText was already sent via token events — we must still
+        // emit stream_end so isThinking resets and the UI is not left frozen.
         if (!engineStreamEndObserved) {
           this.emit({ type: 'stream_end' })
           engineStreamEndObserved = true

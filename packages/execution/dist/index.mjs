@@ -172,7 +172,9 @@ function contractViolationsToHarnessResult(violations, iteration) {
 function inferAllowedPaths(task) {
   if (task.affectedFiles.length === 0) return ["**"];
   const dirs = task.affectedFiles.map((p) => p.replace(/\\/g, "/")).map((p) => p.includes("/") ? `${p.slice(0, p.lastIndexOf("/"))}/**` : p);
-  return [.../* @__PURE__ */ new Set([...task.affectedFiles, ...dirs])];
+  const base = [.../* @__PURE__ */ new Set([...task.affectedFiles, ...dirs])];
+  const testPatterns = ["**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/test/**", "**/tests/**"];
+  return [...base, ...testPatterns];
 }
 function isStackCompatible(path, stack) {
   const allowed = STACK_EXTENSIONS[stack] ?? STACK_EXTENSIONS.generic;
@@ -236,7 +238,7 @@ var ExecutionEngine = class {
     if (this.abortController) {
       this.abortController.abort();
     }
-    if (this.lastCheckpointId) {
+    if (this.lastCheckpointId && this.state?.status !== "completed") {
       await this.deps.applicationEngine.rollback(this.lastCheckpointId);
     }
     if (this.state) {

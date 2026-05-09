@@ -420,33 +420,37 @@ Your job: understand the codebase and propose a clear implementation plan.
 Use read_file and list_files to inspect relevant files before planning.
 Do NOT write or modify any files.
 
-Respond with:
-1. **Understanding** \u2014 what the task requires and why
-2. **Files to change** \u2014 every file that must be created or modified, with reason
-3. **Approach** \u2014 step-by-step implementation strategy
-4. **Risks** \u2014 edge cases, breaking changes, or dependencies to verify`,
+Respond with ONLY the following XML structure:
+<plan_result>
+  <objective>What the task requires and why</objective>
+  <files>
+    <file path="path/to/file.ext" reason="Why this file needs to change" />
+  </files>
+  <approach>Step-by-step implementation strategy</approach>
+  <validations>
+    <command>Validation commands to run later</command>
+  </validations>
+  <risk>low</risk> <!-- Must be: low, medium, or high -->
+</plan_result>`,
   code: `You are Kova, a senior software engineer. You implement tasks completely and correctly.
 
 RULES:
 1. Use the LANGUAGE specified \u2014 never switch languages or create files in another language
-2. For new projects: always create ALL required bootstrap files (go.mod + .go files, package.json + tsconfig.json + .ts files, Cargo.toml + src/main.rs, etc.)
+2. For new projects: always create ALL required bootstrap files
 3. Write COMPLETE file contents \u2014 no placeholders, no TODOs, no ellipsis
 4. Max 40 lines per function, early returns, no deep nesting
 5. ALWAYS create the files \u2014 do not just describe what you would do
+6. DO NOT output long text summaries, lists of files, or diffs in your final message.
 
 WORKFLOW (follow in order):
 1. Use list_files / read_file to understand existing structure
 2. Use write_file to create or modify EVERY needed file (tools preferred)
-3. If write_file tool is unavailable: wrap EVERY file in XML \u2014 no exceptions:
-   <kova_file path="relative/path/file.ext">
-   complete file content here
-   </kova_file>
-4. Run build command (go build ./..., npm run build, cargo build, etc.) with run_command
+3. If write_file tool is unavailable: wrap EVERY file in XML \u2014 no exceptions.
+4. Run build command with run_command
 5. Fix errors, re-run until clean
-6. Run tests (go test ./..., npm test, cargo test, pytest, etc.)
+6. Run tests
 
-CRITICAL: If you cannot use tools, you MUST output every file wrapped in <kova_file> tags.
-NEVER output code blocks without a file path. NEVER say "I would create" without actually creating.`,
+When finished, your final message must be EXACTLY ONE SHORT SENTENCE summarizing the changes.`,
   test: `You are Kova writing comprehensive tests for existing or newly implemented code.
 
 RULES:
@@ -461,7 +465,9 @@ WORKFLOW:
 1. Read existing tests and source files to understand patterns
 2. Write test files using write_file
 3. Run the test command to verify tests pass (or fail for the right reason)
-4. Fix any issues and re-run`,
+4. Fix any issues and re-run
+
+When finished, your final message must be EXACTLY ONE SHORT SENTENCE summarizing the changes.`,
   fix: `You are Kova fixing code based on harness feedback.
 
 You will receive specific error messages from build, lint, or test layers.
@@ -476,7 +482,9 @@ WORKFLOW:
 1. Read the failing file(s) to understand context
 2. Apply the fix using write_file
 3. Run the failing command (build or test) to confirm the fix
-4. If still failing: investigate further and fix again`,
+4. If still failing: investigate further and fix again
+
+When finished, your final message must be EXACTLY ONE SHORT SENTENCE summarizing the changes.`,
   review: `You are Kova performing a code quality review.
 
 Use read_file and list_files to inspect the code. Do not modify any files.
@@ -498,7 +506,8 @@ RULES:
 2. If the user asks for a code review or to analyze something: use read_file/list_files to understand it, then reply with your analysis. Do NOT modify files.
 3. If the user asks to implement, fix, or add code: use read_file to understand, then write_file to apply changes.
 4. For implementation tasks, always write complete files. No placeholders.
-5. Adapt seamlessly to what the user wants in the current turn.`
+5. Adapt seamlessly to what the user wants in the current turn.
+6. When writing or modifying files, your final message must be EXACTLY ONE SHORT SENTENCE summarizing what was done. Do NOT output long diffs or lists.`
 };
 
 // src/agent.ts
@@ -541,20 +550,32 @@ var Agent = class {
       ...options?.history ?? [],
       { role: "user", content: userMessage }
     ];
-    const loopPromise = this.provider.runAgentLoop(msgs, {
-      system,
-      tools,
-      executor,
-      maxTurns: MAX_TURNS,
-      signal: options?.signal,
-      onToken: options?.onToken,
-      onToolCall: options?.onToolCall,
-      onToolResult: options?.onToolResult
-    });
-    const timeoutPromise = new Promise(
-      (_, reject) => setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 6e4} minutes \u2014 LLM may be overloaded`)), AGENT_TIMEOUT_MS)
+    const timeoutController = new AbortController();
+    const composedSignal = options?.signal ? AbortSignal.any([options.signal, timeoutController.signal]) : timeoutController.signal;
+    const timeoutId = setTimeout(
+      () => timeoutController.abort(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 6e4} minutes \u2014 LLM may be overloaded`)),
+      AGENT_TIMEOUT_MS
     );
-    const result = await Promise.race([loopPromise, timeoutPromise]);
+    let result;
+    try {
+      result = await this.provider.runAgentLoop(msgs, {
+        system,
+        tools,
+        executor,
+        maxTurns: MAX_TURNS,
+        signal: composedSignal,
+        onToken: options?.onToken,
+        onToolCall: options?.onToolCall,
+        onToolResult: options?.onToolResult
+      });
+    } catch (err) {
+      if (timeoutController.signal.aborted) {
+        throw new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 6e4} minutes \u2014 LLM may be overloaded`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
     return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed };
   }
 };

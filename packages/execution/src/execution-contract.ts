@@ -158,7 +158,11 @@ function inferAllowedPaths(task: TaskDefinition): string[] {
   const dirs = task.affectedFiles
     .map(p => p.replace(/\\/g, '/'))
     .map(p => p.includes('/') ? `${p.slice(0, p.lastIndexOf('/'))}/**` : p)
-  return [...new Set([...task.affectedFiles, ...dirs])]
+  const base = [...new Set([...task.affectedFiles, ...dirs])]
+  // Always allow standard test file patterns so the agent can create tests
+  // even when the test file lives outside the explicit affected-files directories.
+  const testPatterns = ['**/__tests__/**', '**/*.test.*', '**/*.spec.*', '**/test/**', '**/tests/**']
+  return [...base, ...testPatterns]
 }
 
 function isStackCompatible(path: string, stack: string): boolean {

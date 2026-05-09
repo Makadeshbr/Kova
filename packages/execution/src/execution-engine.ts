@@ -93,7 +93,9 @@ export class ExecutionEngine {
     if (this.abortController) {
       this.abortController.abort()
     }
-    if (this.lastCheckpointId) {
+    // Only roll back if the engine hasn't already reached a completed state.
+    // Calling abort() after forceApply() succeeded must not undo applied changes.
+    if (this.lastCheckpointId && this.state?.status !== 'completed') {
       await this.deps.applicationEngine.rollback(this.lastCheckpointId)
     }
     if (this.state) {

@@ -1,5 +1,5 @@
 import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage } from '@kova/shared'
-import type { AgentProvider } from './providers/provider'
+import type { AgentProvider, LLMResponse } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
 import { MODE_PROMPTS } from './modes'
 
@@ -49,17 +49,36 @@ export class Agent {
       { role: 'user', content: userMessage }
     ]
 
-    const loopPromise = this.provider.runAgentLoop(msgs, {
-      system, tools, executor, maxTurns: MAX_TURNS,
-      signal: options?.signal,
-      onToken: options?.onToken,
-      onToolCall: options?.onToolCall,
-      onToolResult: options?.onToolResult
-    })
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 60_000} minutes — LLM may be overloaded`)), AGENT_TIMEOUT_MS),
+    // Race the agent loop against a hard timeout. Crucially: when the timeout
+    // fires we abort the loop's own signal so any in-flight tool call
+    // (e.g. write_file) is cancelled and cannot write stale content to disk.
+    const timeoutController = new AbortController()
+    const composedSignal = options?.signal
+      ? AbortSignal.any([options.signal, timeoutController.signal])
+      : timeoutController.signal
+
+    const timeoutId = setTimeout(
+      () => timeoutController.abort(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 60_000} minutes — LLM may be overloaded`)),
+      AGENT_TIMEOUT_MS,
     )
-    const result = await Promise.race([loopPromise, timeoutPromise])
+
+    let result: LLMResponse
+    try {
+      result = await this.provider.runAgentLoop(msgs, {
+        system, tools, executor, maxTurns: MAX_TURNS,
+        signal: composedSignal,
+        onToken: options?.onToken,
+        onToolCall: options?.onToolCall,
+        onToolResult: options?.onToolResult,
+      })
+    } catch (err) {
+      if (timeoutController.signal.aborted) {
+        throw new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 60_000} minutes — LLM may be overloaded`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+    }
 
     return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed }
   }
