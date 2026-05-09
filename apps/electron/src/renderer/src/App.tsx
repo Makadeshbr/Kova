@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition, KovaSettings, StartTaskParams } from './types'
+import type { StructuredAgentMessage } from '@kova/shared'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
@@ -10,7 +11,11 @@ import { StatusBar } from './components/StatusBar'
 import { ProviderModal } from './components/ProviderModal'
 
 export interface ChatMessage {
-  id: string; role: 'user' | 'assistant'; content: string; isTask: boolean
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  isTask: boolean
+  structured?: StructuredAgentMessage
 }
 
 export type ChatMode = 'chat' | 'plan' | 'patch' | 'review'
@@ -149,8 +154,13 @@ export function App(): React.ReactElement {
         }
         if (event.type === 'stream_end') {
           const text = prev.streamingText.trim()
-          const newMessages = text
-            ? [...prev.messages, { id: Date.now().toString(), role: 'assistant' as const, content: text, isTask: false }]
+          const structured = event.structuredMessage
+          // If we got a structuredMessage, always add a message for the card (even if no streamed text)
+          const assistantMsg: ChatMessage = {
+            id: Date.now().toString(), role: 'assistant', content: text || '', isTask: !!structured, structured,
+          }
+          const newMessages = (text || structured)
+            ? [...prev.messages, assistantMsg]
             : prev.messages
           return { ...prev, streamingText: '', isThinking: false, messages: newMessages, executionEvents: [...prev.executionEvents, event].slice(-160) }
         }

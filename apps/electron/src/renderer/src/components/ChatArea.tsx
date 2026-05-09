@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { ChatMessage, ChatMode, PermissionMode, QueuedMessage, SessionUsage } from '../App'
+import type { AgentResultMessage } from '@kova/shared'
 import { FileCard } from './FileCard'
 
 interface Props {
@@ -95,7 +96,94 @@ function UserBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
   )
 }
 
+// Visual result card for structured AgentResultMessage
+function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactElement {
+  const [expandedValidations, setExpandedValidations] = useState(false)
+  const statusColor = msg.decision === 'apply' ? 'var(--teal)' : msg.decision === 'needs_review' ? 'var(--yellow)' : 'var(--red)'
+  const statusIcon  = msg.decision === 'apply' ? '✓' : msg.decision === 'needs_review' ? '⏸' : '✗'
+  const riskColor = msg.risk === 'low' ? 'var(--teal)' : msg.risk === 'medium' ? 'var(--yellow)' : 'var(--red)'
+
+  const created  = msg.filesChanged.filter(f => f.status === 'created').length
+  const modified = msg.filesChanged.filter(f => f.status === 'modified').length
+  const deleted  = msg.filesChanged.filter(f => f.status === 'deleted').length
+  const parts: string[] = []
+  if (created)  parts.push(`+${created} criado${created  !== 1 ? 's' : ''}`)
+  if (modified) parts.push(`~${modified} modificado${modified !== 1 ? 's' : ''}`)
+  if (deleted)  parts.push(`−${deleted} deletado${deleted  !== 1 ? 's' : ''}`)
+
+  const passedV = msg.validations.filter(v => v.status === 'passed')
+  const failedV = msg.validations.filter(v => v.status === 'failed')
+
+  return (
+    <div className="animate-fade-in" style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+      <Avatar />
+      <div style={{ flex: 1, minWidth: 0, border: '1px solid var(--border)', borderRadius: '2px 12px 12px 12px', overflow: 'hidden' }}>
+
+        {/* Header */}
+        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border)', background: 'var(--bg-1)' }}>
+          <span style={{ color: statusColor, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>{statusIcon}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: 'var(--text-1)', fontSize: 13, fontWeight: 600 }}>{msg.title}</div>
+            <div style={{ color: 'var(--text-3)', fontSize: 11, marginTop: 2 }}>{msg.summary}</div>
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+            {parts.map(p => (
+              <span key={p} style={{ fontSize: 10, color: 'var(--text-2)', background: 'var(--bg-3)', padding: '1px 7px', borderRadius: 10, fontFamily: 'var(--font-mono)' }}>{p}</span>
+            ))}
+            <span style={{ fontSize: 10, color: riskColor, background: 'var(--bg-3)', padding: '1px 7px', borderRadius: 10, fontFamily: 'var(--font-mono)' }}>risco: {msg.risk}</span>
+          </div>
+        </div>
+
+        {/* Validation pills */}
+        {msg.validations.length > 0 && (
+          <div style={{ padding: '6px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Validações:</span>
+            {(expandedValidations ? msg.validations : msg.validations.slice(0, 4)).map((v, i) => (
+              <span key={i} style={{
+                fontSize: 10, padding: '1px 7px', borderRadius: 10, fontFamily: 'var(--font-mono)',
+                color: v.status === 'passed' ? 'var(--teal)' : v.status === 'failed' ? 'var(--red)' : 'var(--text-3)',
+                background: v.status === 'passed' ? 'var(--teal-dim)' : v.status === 'failed' ? 'var(--red-dim)' : 'var(--bg-active)',
+              }}>{v.command} {v.status === 'passed' ? '✓' : v.status === 'failed' ? '✗' : '—'}</span>
+            ))}
+            {msg.validations.length > 4 && (
+              <button onClick={() => setExpandedValidations(e => !e)} style={{ fontSize: 10, color: 'var(--text-3)', background: 'transparent', padding: '1px 4px' }}>
+                {expandedValidations ? 'menos' : `+${msg.validations.length - 4} mais`}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* File list */}
+        {msg.filesChanged.length > 0 && (
+          <div style={{ padding: '8px 10px', background: 'var(--bg-2)' }}>
+            {msg.filesChanged.map((f, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px', borderRadius: 6, marginBottom: 2 }}>
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 6, fontFamily: 'var(--font-mono)', fontWeight: 700, flexShrink: 0,
+                  color: f.status === 'created' ? 'var(--teal)' : f.status === 'deleted' ? 'var(--red)' : 'var(--yellow)',
+                  background: f.status === 'created' ? 'var(--teal-dim)' : f.status === 'deleted' ? 'var(--red-dim)' : 'var(--yellow-dim)',
+                }}>{f.status === 'created' ? '+' : f.status === 'deleted' ? '−' : '~'}</span>
+                <span style={{ color: 'var(--text-2)', fontSize: 12, fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.path}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Notes */}
+        {msg.notes.length > 0 && (
+          <div style={{ padding: '6px 14px', background: 'var(--bg-1)', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>
+            {msg.notes.join(' · ')}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
+  if (msg.structured?.kind === 'agent_result') {
+    return <AgentResultCard msg={msg.structured} />
+  }
   return (
     <div style={{ display: 'flex', gap: 10, marginBottom: 16 }} className="animate-fade-in">
       <Avatar />

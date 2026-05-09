@@ -622,25 +622,44 @@ export class EngineManager {
       const state = await this.engine.run(task)
       const last = state.iterationHistory.at(-1)
       const files = last?.changes ?? []
-      const fileList = files.map(c => `${c.type === 'create' ? '+' : '~'} ${c.path}`).join('\n')
       const score = last?.harnessResult.score ?? 0
 
-      // In Unified Session, the text was already streamed.
-      // If there are files, we just display the summary at the end.
       if (files.length > 0) {
-        if (state.status === 'completed') {
-          this.onChatResponse?.(`OK: Modificacoes aplicadas - score ${score}\n\n${fileList}`)
-        } else if (state.status === 'paused') {
-          this.onChatResponse?.(`Aguardando revisao - score ${score}\n\n${fileList}`)
-        } else {
-          const reason = last?.decision.reason ?? 'Maximo de tentativas atingido'
-          this.onChatResponse?.(`Falhou: ${reason}\n\nArquivos no disco:\n${fileList}`)
+        // Emit a structured result so the renderer renders a visual card
+        const title = state.status === 'completed' ? 'Tarefa concluída'
+          : state.status === 'paused' ? 'Aguardando revisão'
+          : 'Tarefa falhou'
+        const summary = state.status === 'completed'
+          ? 'Modificações aplicadas com sucesso.'
+          : state.status === 'paused'
+          ? 'Revisão necessária antes de aplicar.'
+          : (last?.decision.reason ?? 'Máximo de tentativas atingido.')
+
+        const structuredMsg: import('@kova/shared').AgentResultMessage = {
+          kind: 'agent_result',
+          title,
+          summary,
+          filesChanged: files.map(c => ({
+            path: c.path,
+            displayName: basename(c.path),
+            status: c.type === 'create' ? 'created' : c.type === 'delete' ? 'deleted' : 'modified',
+          })),
+          validations: last?.harnessResult.layers.map(l => ({
+            command: l.name,
+            status: l.skipped ? 'skipped' : l.passed ? 'passed' : 'failed',
+            durationMs: l.duration,
+          })) ?? [],
+          risk: score >= 90 ? 'low' : score >= 70 ? 'medium' : 'high',
+          decision: state.status === 'completed' ? 'apply' : state.status === 'paused' ? 'needs_review' : 'reject',
+          notes: last?.decision.reason ? [last.decision.reason] : [],
         }
-      } else {
-        // If no files changed, we don't need to print anything since the text was streamed.
-        // But if the stream failed or returned empty, we could fallback.
-        if (state.status === 'failed' && !signal?.aborted) {
-          this.onChatResponse?.('Execucao falhou ou foi abortada.')
+        this.emit({ type: 'stream_end', structuredMessage: structuredMsg })
+        engineStreamEndObserved = true
+      } else if (state.status === 'failed' && !signal?.aborted) {
+        // No files changed but engine failed — flush any streamed text
+        if (!engineStreamEndObserved) {
+          this.emit({ type: 'stream_end' })
+          engineStreamEndObserved = true
         }
       }
     } catch (err) {

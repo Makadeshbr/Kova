@@ -186,12 +186,18 @@ Allowed behavior:
 - Use existing project structure, instructions, and local conventions as the source of truth.
 - Prefer a small, safe implementation plan over broad refactors.
 
-Respond in the user's language with:
-1. Goal
-2. Relevant files and why
-3. Proposed steps
-4. Validation commands to run later
-5. Risks or questions`;
+Respond with ONLY the following XML structure:
+<plan_result>
+  <objective>What the task requires and why</objective>
+  <files>
+    <file path="path/to/file.ext" reason="Why this file needs to change" />
+  </files>
+  <approach>Step-by-step implementation strategy</approach>
+  <validations>
+    <command>Validation commands to run later</command>
+  </validations>
+  <risk>low</risk> <!-- Must be: low, medium, or high -->
+</plan_result>`;
 }
 function inferRunMode(message, explicit) {
   if (explicit) return explicit;
