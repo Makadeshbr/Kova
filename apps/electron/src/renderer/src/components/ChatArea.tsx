@@ -113,7 +113,6 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
-      <Avatar />
       <div style={{ flex: 1, minWidth: 0, border: '1px solid var(--border)', borderRadius: '2px 12px 12px 12px', overflow: 'hidden' }}>
 
         {/* Header */}
@@ -177,6 +176,45 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
   )
 }
 
+function renderMarkdownWithCodeBlocks(text: string) {
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const match = part.match(/```(\w*)\n([\s\S]*?)```/);
+      const language = match ? match[1] : '';
+      const code = match ? match[2] : part.slice(3, -3);
+      
+      return (
+        <div key={index} style={{ background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', marginBottom: 16, marginTop: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-2)' }}>{language || 'code'}</span>
+            <button style={{ color: 'var(--text-2)', background: 'transparent' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>content_copy</span>
+            </button>
+          </div>
+          <div style={{ padding: 16, overflowX: 'auto' }}>
+            <pre style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-1)', margin: 0 }}>
+              <code>{code}</code>
+            </pre>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-0)' }}>
+            <button style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'var(--cyan)', color: '#000', borderRadius: 4, fontSize: 12, fontWeight: 500 }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>check</span> Apply
+            </button>
+            <button style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'transparent', border: '1px solid var(--border-focus)', color: 'var(--cyan)', borderRadius: 4, fontSize: 12 }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>difference</span> Diff
+            </button>
+            <button style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-2)', borderRadius: 4, fontSize: 12 }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>info</span> Explain
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
 function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
   if (msg.structured?.kind === 'agent_result') {
     return <AgentResultCard msg={msg.structured} />
@@ -188,7 +226,7 @@ function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
         color: 'var(--text-1)', fontSize: 13, lineHeight: 1.7,
         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
       }}>
-        {msg.content}
+        {renderMarkdownWithCodeBlocks(msg.content)}
       </div>
     </div>
   )
@@ -230,7 +268,6 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
-      <Avatar />
       <div style={{ flex: 1, minWidth: 0, border: '1px solid var(--border)', borderRadius: '2px 12px 12px 12px', overflow: 'hidden' }}>
 
         {/* Header */}
