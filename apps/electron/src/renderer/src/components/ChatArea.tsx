@@ -183,9 +183,6 @@ function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
   }
   return (
     <div style={{ display: 'flex', gap: 12, marginBottom: 24 }} className="animate-fade-in">
-      <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'var(--cyan-dim)', border: '1px solid var(--cyan-glow)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cyan)', flexShrink: 0, marginTop: 2 }}>
-        <span className="material-symbols-outlined" style={{ fontSize: 18 }}>smart_toy</span>
-      </div>
       <div style={{
         flex: 1, minWidth: 0, padding: '4px 0',
         color: 'var(--text-1)', fontSize: 13, lineHeight: 1.7,

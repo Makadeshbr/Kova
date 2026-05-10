@@ -524,27 +524,34 @@ ${f.content}
       const state = await this.engine.run(task);
       const last = state.iterationHistory.at(-1);
       const files = last?.changes ?? [];
-      const fileList = files.map((c) => `${c.type === "create" ? "+" : "~"} ${c.path}`).join("\n");
       const score = last?.harnessResult.score ?? 0;
       if (files.length > 0) {
-        if (state.status === "completed") {
-          this.onChatResponse?.(`OK: Modificacoes aplicadas - score ${score}
-
-${fileList}`);
-        } else if (state.status === "paused") {
-          this.onChatResponse?.(`Aguardando revisao - score ${score}
-
-${fileList}`);
-        } else {
-          const reason = last?.decision.reason ?? "Maximo de tentativas atingido";
-          this.onChatResponse?.(`Falhou: ${reason}
-
-Arquivos no disco:
-${fileList}`);
-        }
+        const title = state.status === "completed" ? "Tarefa concluída" : state.status === "paused" ? "Aguardando revisão" : "Tarefa falhou";
+        const summary = state.status === "completed" ? "Modificações aplicadas com sucesso." : state.status === "paused" ? "Revisão necessária antes de aplicar." : last?.decision.reason ?? "Máximo de tentativas atingido.";
+        const structuredMsg = {
+          kind: "agent_result",
+          title,
+          summary,
+          filesChanged: files.map((c) => ({
+            path: c.path,
+            displayName: path.basename(c.path),
+            status: c.type === "create" ? "created" : c.type === "delete" ? "deleted" : "modified"
+          })),
+          validations: last?.harnessResult.layers.map((l) => ({
+            command: l.name,
+            status: l.skipped ? "skipped" : l.passed ? "passed" : "failed",
+            durationMs: l.duration
+          })) ?? [],
+          risk: score >= 90 ? "low" : score >= 70 ? "medium" : "high",
+          decision: state.status === "completed" ? "apply" : state.status === "paused" ? "needs_review" : "reject",
+          notes: last?.decision.reason ? [last.decision.reason] : []
+        };
+        this.emit({ type: "stream_end", structuredMessage: structuredMsg });
+        engineStreamEndObserved = true;
       } else {
-        if (state.status === "failed" && !signal?.aborted) {
-          this.onChatResponse?.("Execucao falhou ou foi abortada.");
+        if (!engineStreamEndObserved) {
+          this.emit({ type: "stream_end" });
+          engineStreamEndObserved = true;
         }
       }
     } catch (err) {
