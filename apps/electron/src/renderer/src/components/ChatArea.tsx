@@ -183,8 +183,8 @@ function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
   }
   return (
     <div style={{ display: 'flex', gap: 12, marginBottom: 24 }} className="animate-fade-in">
-      <div style={{ width: 24, height: 24, borderRadius: '4px', background: 'var(--bg-3)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cyan)', fontSize: 12, flexShrink: 0, marginTop: 4 }}>
-        🤖
+      <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'var(--cyan-dim)', border: '1px solid var(--cyan-glow)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cyan)', flexShrink: 0, marginTop: 2 }}>
+        <span className="material-symbols-outlined" style={{ fontSize: 18 }}>smart_toy</span>
       </div>
       <div style={{
         flex: 1, minWidth: 0, padding: '4px 0',
@@ -527,7 +527,7 @@ export function ChatArea({
                   display: 'inline-flex', gap: 6, alignItems: 'center',
                   color: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-mono)'
                 }}>
-                  <span>⟳</span>
+                  <span className="material-symbols-outlined" style={{ fontSize: 16, animation: 'spin 2s linear infinite' }}>sync</span>
                   <span>Thinking...</span>
                   <div style={{ display: 'flex', gap: 4, marginLeft: 4 }}>
                     {[0, 1, 2].map(i => (
@@ -571,7 +571,9 @@ export function ChatArea({
 
         <div className="kova-composer">
           <div className="kova-chat-toolbar">
-            <button type="button" title="Adicionar arquivo ou imagem" className="kova-icon-button">+</button>
+            <button type="button" title="Adicionar arquivo ou imagem" className="kova-icon-button">
+              <span className="material-symbols-outlined" style={{ fontSize: 18 }}>add</span>
+            </button>
             <ComposerMenu label="Modo" value={activeMode} options={CHAT_MODE_OPTIONS} onChange={onModeChange} />
             <ComposerMenu label="Acesso" value={permissionMode} options={PERMISSION_OPTIONS} onChange={onPermissionModeChange} />
             <label className={`kova-context-toggle${includeProjectContext ? ' active' : ''}`}>
@@ -608,8 +610,11 @@ export function ChatArea({
               color:      value.trim() && projectRoot ? '#000' : 'var(--text-3)',
               borderRadius: '8px',
               transition: 'background 0.15s, color 0.15s',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
             }}
-          >↑</button>
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>send</span>
+          </button>
         </div>
         </div>
         <p style={{ marginTop: 6, fontSize: 10, color: 'var(--text-ghost)', textAlign: 'center' }}>

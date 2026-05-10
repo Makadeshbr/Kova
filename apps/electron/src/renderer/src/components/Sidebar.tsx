@@ -86,11 +86,15 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
       )}
 
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)' }}>
-        <button style={filesTabStyle} onClick={() => setTab('files')}>📁 Files</button>
-        <button style={historyTabStyle} onClick={() => setTab('history')}>
-          🕒 Log {history.length > 0 && `(${history.length})`}
+        <button style={filesTabStyle} onClick={() => setTab('files')}>
+          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>folder_open</span> Files
         </button>
-        <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>💾 Sessões</button>
+        <button style={historyTabStyle} onClick={() => setTab('history')}>
+          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>history</span> Log {history.length > 0 && `(${history.length})`}
+        </button>
+        <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>
+          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>dataset</span> Sessões
+        </button>
       </div>
 
       {tab === 'files' && (

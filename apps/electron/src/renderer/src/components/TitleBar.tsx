@@ -57,7 +57,7 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
           maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           display: 'flex', alignItems: 'center', gap: 6,
         }}>
-          <span style={{ fontSize: 14, color: projectName ? 'var(--cyan)' : 'var(--text-3)' }}>{projectName ? '📁' : '+'}</span>
+          <span className="material-symbols-outlined" style={{ fontSize: 16, color: projectName ? 'var(--cyan)' : 'var(--text-3)' }}>folder_open</span>
           {projectName ? projectName : 'Abrir projeto'}
         </button>
       </div>

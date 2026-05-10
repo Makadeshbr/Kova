@@ -1,41 +1,41 @@
 :root {
-  --bg-0: #0A0B0D;
-  --bg-1: #0E0F12;
-  --bg-2: #13151A;
-  --bg-3: #191C22;
+  --bg-0: #090F12;
+  --bg-1: #0E1417;
+  --bg-2: #161D1F;
+  --bg-3: #1A2123;
   --bg-hover: rgba(255,255,255,0.04);
   --bg-active: rgba(255,255,255,0.07);
 
-  --cyan: #00C8DC;
-  --cyan-dim: rgba(0,200,220,0.12);
-  --cyan-glow: rgba(0,200,220,0.06);
+  --cyan: #A4E6FF;
+  --cyan-dim: rgba(164,230,255,0.15);
+  --cyan-glow: rgba(164,230,255,0.06);
 
-  --amber: #D4912A;
-  --amber-dim: rgba(212,145,42,0.14);
-  --amber-glow: rgba(212,145,42,0.08);
+  --amber: #FEB127;
+  --amber-dim: rgba(254,177,39,0.14);
+  --amber-glow: rgba(254,177,39,0.08);
   
-  --teal: #3ECFB2;
-  --teal-dim: rgba(62,207,178,0.12);
-  --purple: #9D8FEE;
-  --purple-dim: rgba(157,143,238,0.12);
-  --red: #E05252;
-  --red-dim: rgba(224,82,82,0.12);
-  --yellow: #E8C76A;
-  --yellow-dim: rgba(232,199,106,0.12);
+  --teal: #B7EAFF;
+  --teal-dim: rgba(183,234,255,0.12);
+  --purple: #B9C8DE;
+  --purple-dim: rgba(185,200,222,0.12);
+  --red: #FFB4AB;
+  --red-dim: rgba(255,180,171,0.12);
+  --yellow: #FFD59C;
+  --yellow-dim: rgba(255,213,156,0.12);
 
-  --text-1: #E6E8EE;
-  --text-2: #A8AABB;
-  --text-3: #6A6C7E;
-  --text-ghost: #3D3F50;
-  --border: rgba(255,255,255,0.08);
-  --border-focus: rgba(0,200,220,0.35);
+  --text-1: #DDE3E7;
+  --text-2: #BBC9CF;
+  --text-3: #859399;
+  --text-ghost: #3C494E;
+  --border: rgba(133,147,153,0.3);
+  --border-focus: rgba(164,230,255,0.5);
 
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
 
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "Menlo", "Consolas", "Courier New", monospace;
+  --font-ui: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Menlo", "Consolas", "Courier New", monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
