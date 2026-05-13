@@ -1,14 +1,15 @@
 import React, { useState } from 'react'
-import type { FileChange } from '../types'
+import type { DiffReviewSelection, FileChange } from '../types'
 import { EXT_LANG, EXT_COLOR, fileIconInfo, getExt, getFileName, getFolder } from '../file-utils'
 
 interface Props {
   changes: FileChange[]
   onClose: () => void
+  onApplySelection?: (selection: DiffReviewSelection) => void
 }
 
 type DiffLineType = 'add' | 'remove' | 'same'
-interface DiffLine { text: string; type: DiffLineType }
+interface DiffLine { text: string; type: DiffLineType; hunkId?: string }
 
 const TYPE_META = {
   create: { label: 'Novo', color: 'var(--teal)', bg: 'var(--teal-dim)' },
@@ -53,12 +54,17 @@ function diffLines(before: string[], after: string[]): DiffLine[] {
 
 function buildDiffLines(change: FileChange): DiffLine[] {
   if (change.type === 'delete') {
-    return (change.before ?? '').split('\n').map(text => ({ text, type: 'remove' as const }))
+    return (change.before ?? '').split('\n').map((text, index) => ({ text, type: 'remove' as const, hunkId: `${change.path}:remove:${index + 1}` }))
   }
   if (change.type === 'create' || !change.before) {
-    return (change.diff ?? '').split('\n').map(text => ({ text, type: 'add' as const }))
+    return (change.diff ?? '').split('\n').map((text, index) => ({ text, type: 'add' as const, hunkId: `${change.path}:add:${index + 1}` }))
   }
-  return diffLines(change.before.split('\n'), (change.diff ?? '').split('\n'))
+  let changeIndex = 0
+  return diffLines(change.before.split('\n'), (change.diff ?? '').split('\n')).map(line => {
+    if (line.type === 'same') return line
+    changeIndex += 1
+    return { ...line, hunkId: `${change.path}:${line.type}:${changeIndex}` }
+  })
 }
 
 function FileIcon({ name }: { name: string }): React.ReactElement {
@@ -109,7 +115,9 @@ function FileEntry({ change, isSelected, onClick }: { change: FileChange; isSele
   )
 }
 
-function CodeView({ change }: { change: FileChange }): React.ReactElement {
+function CodeView({
+  change, approvedHunks, onToggleHunk,
+}: { change: FileChange; approvedHunks: Set<string>; onToggleHunk: (id: string) => void }): React.ReactElement {
   const name = getFileName(change.path)
   const e = getExt(change.path)
   const diffed = buildDiffLines(change)
@@ -137,6 +145,15 @@ function CodeView({ change }: { change: FileChange }): React.ReactElement {
             <span style={{ color: LINE_MARKER_COLOR[line.type], width: 14, flexShrink: 0, userSelect: 'none', textAlign: 'center' }}>
               {LINE_MARKER[line.type]}
             </span>
+            {line.hunkId ? (
+              <input
+                type="checkbox"
+                checked={approvedHunks.has(line.hunkId)}
+                onChange={() => onToggleHunk(line.hunkId!)}
+                title="Aprovar este trecho"
+                style={{ width: 18, flexShrink: 0, margin: '3px 6px 0 0' }}
+              />
+            ) : <span style={{ width: 24, flexShrink: 0 }} />}
             <span style={{ color: 'var(--text-2)', whiteSpace: 'pre', flex: 1, padding: '0 8px' }}>{line.text}</span>
           </div>
         ))}
@@ -145,15 +162,50 @@ function CodeView({ change }: { change: FileChange }): React.ReactElement {
   )
 }
 
-export function FilesViewer({ changes, onClose }: Props): React.ReactElement {
+export function FilesViewer({ changes, onClose, onApplySelection }: Props): React.ReactElement {
   const [selected, setSelected] = useState(0)
+  const [fileDecisions, setFileDecisions] = useState<Record<string, 'approve' | 'reject' | 'partial'>>(() =>
+    Object.fromEntries(changes.map(change => [change.path, 'approve'])),
+  )
+  const [approvedHunks, setApprovedHunks] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(changes.map(change => [change.path, buildDiffLines(change).map(line => line.hunkId).filter(Boolean) as string[]])),
+  )
   const active = changes[selected]
+  const activeApproved = new Set(active ? approvedHunks[active.path] ?? [] : [])
+  const selection: DiffReviewSelection = {
+    files: changes.map(change => ({
+      path: change.path,
+      decision: fileDecisions[change.path] ?? 'approve',
+      approvedHunkIds: approvedHunks[change.path] ?? [],
+    })),
+  }
+
+  function setDecision(path: string, decision: 'approve' | 'reject' | 'partial'): void {
+    setFileDecisions(prev => ({ ...prev, [path]: decision }))
+  }
+
+  function toggleHunk(path: string, id: string): void {
+    setFileDecisions(prev => ({ ...prev, [path]: 'partial' }))
+    setApprovedHunks(prev => {
+      const current = new Set(prev[path] ?? [])
+      if (current.has(id)) current.delete(id)
+      else current.add(id)
+      return { ...prev, [path]: [...current] }
+    })
+  }
 
   return (
     <div style={{ height: 360, display: 'flex', flexDirection: 'column', background: 'var(--bg-2)', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)', gap: 10 }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Arquivos gerados</span>
         <span style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--bg-active)', padding: '1px 8px', borderRadius: 10 }}>{changes.length}</span>
+        {active && (
+          <>
+            <button onClick={() => setDecision(active.path, 'approve')} style={{ marginLeft: 'auto', fontSize: 11 }}>Aprovar arquivo</button>
+            <button onClick={() => setDecision(active.path, 'reject')} style={{ fontSize: 11 }}>Rejeitar arquivo</button>
+            {onApplySelection && <button onClick={() => onApplySelection(selection)} style={{ fontSize: 11, color: 'var(--teal)' }}>Aplicar aprovado</button>}
+          </>
+        )}
         <button onClick={onClose} style={{ marginLeft: 'auto', background: 'transparent', color: 'var(--text-3)', padding: '2px 8px', fontSize: 14 }}>✕</button>
       </div>
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
@@ -162,7 +214,7 @@ export function FilesViewer({ changes, onClose }: Props): React.ReactElement {
             <FileEntry key={i} change={c} isSelected={i === selected} onClick={() => setSelected(i)} />
           ))}
         </div>
-        {active ? <CodeView change={active} /> : (
+        {active ? <CodeView change={active} approvedHunks={activeApproved} onToggleHunk={(id) => toggleHunk(active.path, id)} /> : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-3)', fontSize: 12 }}>
             Selecione um arquivo
           </div>

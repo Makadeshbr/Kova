@@ -1,38 +1,45 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('node:child_process', () => ({ exec: vi.fn() }))
+vi.mock('@kova/shared', async importOriginal => {
+  const actual = await importOriginal<typeof import('@kova/shared')>()
+  return { ...actual, runCommandInvocation: vi.fn() }
+})
 
-import { exec } from 'node:child_process'
+import { runCommandInvocation } from '@kova/shared'
 import { runTestsLayer } from '../../src/layers/tests'
 
-const mockExec = vi.mocked(exec)
+const mockRun = vi.mocked(runCommandInvocation)
 
-type ExecCb = (err: Error | null, stdout: string, stderr: string) => void
+function commandResult(overrides: Partial<Awaited<ReturnType<typeof runCommandInvocation>>> = {}) {
+  return {
+    command: 'vitest run',
+    cwd: '/tmp',
+    kind: 'test' as const,
+    stdout: '',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 5,
+    startedAt: new Date().toISOString(),
+    timedOut: false,
+    ...overrides,
+  }
+}
 
 function mockSuccess() {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    ;(args[args.length - 1] as ExecCb)(null, '', '')
-  })
+  mockRun.mockResolvedValue(commandResult())
 }
 
 function mockFailure(stdout: string) {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    const err = Object.assign(new Error('Tests failed'), { code: 1, killed: false, stdout })
-    ;(args[args.length - 1] as ExecCb)(err, stdout, '')
-  })
+  mockRun.mockResolvedValue(commandResult({ exitCode: 1, stdout }))
 }
 
 function mockTimeout() {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    const err = Object.assign(new Error('timeout'), { killed: true, code: null, stdout: '' })
-    ;(args[args.length - 1] as ExecCb)(err, '', '')
-  })
+  mockRun.mockResolvedValue(commandResult({ exitCode: 1, timedOut: true }))
 }
 
 const FAILURE_OUTPUT = `
- ✗ __tests__/foo.test.ts (3 tests | 1 failed) 10ms
-   ✗ myFunc > deve retornar valor correto
-     → expected 1 to be 2
+ FAILED myFunc > deve retornar valor correto
+     -> expected 1 to be 2
 
  Test Files  1 failed (1)
        Tests  1 failed | 2 passed (3)
@@ -57,14 +64,14 @@ describe('runTestsLayer', () => {
     expect(result.errors[0].message).toContain('myFunc > deve retornar valor correto')
   })
 
-  it('deve retornar erro genérico quando output não tem nomes de testes', async () => {
+  it('deve retornar erro generico quando output nao tem nomes de testes', async () => {
     mockFailure('Tests  2 failed | 1 passed (3)')
     const result = await runTestsLayer({ command: 'vitest run', projectRoot: '/tmp' })
     expect(result.passed).toBe(false)
     expect(result.errors[0].message).toContain('2 test(s) falharam')
   })
 
-  it('deve retornar erro crítico quando timeout', async () => {
+  it('deve retornar erro critico quando timeout', async () => {
     mockTimeout()
     const result = await runTestsLayer({ command: 'vitest run', projectRoot: '/tmp', timeoutMs: 5000 })
     expect(result.passed).toBe(false)

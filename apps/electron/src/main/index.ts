@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import path from 'node:path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { EngineManager } from './engine-manager'
+import { buildContentSecurityPolicy } from './content-security-policy'
 
 const isDev = !app.isPackaged
 let mainWindow: BrowserWindow | null = null
@@ -28,6 +29,19 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Content-Security-Policy: restricts what the renderer can load.
+  // - 'self': local app files and dev server
+  // - 'unsafe-inline': required for xterm.js and injected styles
+  // - No external scripts, no eval(), no data: URIs for scripts
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [buildContentSecurityPolicy(isDev)],
+      },
+    })
   })
 
   if (isDev) {

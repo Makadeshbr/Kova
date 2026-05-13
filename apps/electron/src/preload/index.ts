@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ExecutionEvent, ExecutionState, TaskDefinition } from '@kova/shared'
+import type { DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition } from '@kova/shared'
 import type { StartTaskParams } from '../main/engine-manager'
 import type { KovaSettings } from '../main/ipc-handlers'
 
@@ -18,7 +18,7 @@ const kovaAPI = {
 
   pause: (): Promise<void> => ipcRenderer.invoke('kova:pause'),
   abort: (): Promise<void> => ipcRenderer.invoke('kova:abort'),
-  forceApply: (): Promise<void> => ipcRenderer.invoke('kova:force-apply'),
+  forceApply: (selection?: DiffReviewSelection): Promise<void> => ipcRenderer.invoke('kova:force-apply', selection),
   getState: (): Promise<ExecutionState | null> => ipcRenderer.invoke('kova:get-state'),
   getSettings: (): Promise<KovaSettings> => ipcRenderer.invoke('kova:get-settings'),
   saveSettings: (settings: KovaSettings): Promise<void> => ipcRenderer.invoke('kova:save-settings', settings),
@@ -74,6 +74,48 @@ const kovaAPI = {
   listSessions: (root: string): Promise<any[]> => ipcRenderer.invoke('kova:list-sessions', root),
   saveSession: (root: string, session: any): Promise<void> => ipcRenderer.invoke('kova:save-session', root, session),
   deleteSession: (root: string, id: string): Promise<void> => ipcRenderer.invoke('kova:delete-session', root, id),
+
+  // ─── Terminal / PTY ───────────────────────────────────────────────────────
+  terminalOpen: (id: string, command: string, cwd: string) => ipcRenderer.invoke('kova:terminal-open', id, command, cwd),
+  terminalInput: (id: string, data: string): void => { ipcRenderer.invoke('kova:terminal-input', id, data) },
+  terminalResize: (id: string, cols: number, rows: number): void => { ipcRenderer.invoke('kova:terminal-resize', id, cols, rows) },
+  terminalKill: (id: string): void => { ipcRenderer.invoke('kova:terminal-kill', id) },
+  terminalApprove: (id: string, approved: boolean): void => { ipcRenderer.invoke('kova:terminal-approve', id, approved) },
+
+  onTerminalData: (cb: (id: string, data: string) => void): (() => void) => {
+    const h = (_: Electron.IpcRendererEvent, payload: {id: string; data: string}) => cb(payload.id, payload.data)
+    ipcRenderer.on('kova:terminal-data', h)
+    return () => ipcRenderer.removeListener('kova:terminal-data', h)
+  },
+  onTerminalStarted: (cb: (id: string, command: string, cwd: string) => void): (() => void) => {
+    const h = (_: Electron.IpcRendererEvent, p: {id: string; command: string; cwd: string}) => cb(p.id, p.command, p.cwd)
+    ipcRenderer.on('kova:terminal-started', h)
+    return () => ipcRenderer.removeListener('kova:terminal-started', h)
+  },
+  onTerminalExit: (cb: (id: string, exitCode: number) => void): (() => void) => {
+    const h = (_: Electron.IpcRendererEvent, payload: {id: string; exitCode: number}) => cb(payload.id, payload.exitCode)
+    ipcRenderer.on('kova:terminal-exit', h)
+    return () => ipcRenderer.removeListener('kova:terminal-exit', h)
+  },
+  onInteractiveRequest: (cb: (id: string, command: string, reason: string) => void): (() => void) => {
+    const h = (_: Electron.IpcRendererEvent, p: {id: string; command: string; reason: string}) => cb(p.id, p.command, p.reason)
+    ipcRenderer.on('kova:interactive-request', h)
+    return () => ipcRenderer.removeListener('kova:interactive-request', h)
+  },
+
+  getPendingLearnings: (root: string): Promise<Array<{
+    candidateDescription: string; type: string; scope: string; tags: string[]
+    stack?: string; source: string; reason: string; classification: string; queuedAt: string
+  }>> => ipcRenderer.invoke('kova:get-pending-learnings', root),
+  getContradictedLearnings: (root: string): Promise<Array<{
+    id: string; description: string; type: string; scope: string; status: string
+    confidence: number; contradictions: number; tags: string[]; stack?: string
+  }>> => ipcRenderer.invoke('kova:get-contradicted-learnings', root),
+  getInvalidatedLearnings: (root: string): Promise<Array<{
+    id: string; description: string; type: string; scope: string; status: string
+    confidence: number; contradictions: number; tags: string[]; stack?: string
+    invalidatedAt?: string; invalidationReason?: string
+  }>> => ipcRenderer.invoke('kova:get-invalidated-learnings', root),
 
   windowMinimize: () => ipcRenderer.send('kova:window-minimize'),
   windowMaximize: () => ipcRenderer.send('kova:window-maximize'),

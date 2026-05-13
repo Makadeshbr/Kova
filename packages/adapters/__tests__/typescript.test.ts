@@ -16,10 +16,10 @@ afterEach(() => {
 })
 
 describe('TypeScriptAdapter.detect', () => {
-  it('deve retornar true para pasta com package.json', () => {
+  it('deve retornar false para pasta com apenas package.json — JS puro nao e TypeScript', () => {
     const dir = makeTmpDir()
     writeFileSync(join(dir, 'package.json'), '{}')
-    expect(TypeScriptAdapter.detect(dir)).toBe(true)
+    expect(TypeScriptAdapter.detect(dir)).toBe(false)
   })
 
   it('deve retornar false para pasta vazia', () => {
@@ -30,6 +30,13 @@ describe('TypeScriptAdapter.detect', () => {
   it('deve retornar true para pasta com tsconfig.json', () => {
     const dir = makeTmpDir()
     writeFileSync(join(dir, 'tsconfig.json'), '{}')
+    expect(TypeScriptAdapter.detect(dir)).toBe(true)
+  })
+
+  it('deve retornar true para pasta com tsconfig.json e package.json', () => {
+    const dir = makeTmpDir()
+    writeFileSync(join(dir, 'tsconfig.json'), '{}')
+    writeFileSync(join(dir, 'package.json'), '{}')
     expect(TypeScriptAdapter.detect(dir)).toBe(true)
   })
 })

@@ -26,6 +26,48 @@ function result(layers: LayerResult[]): HarnessResult {
 }
 
 describe('calculateScore — hard fails', () => {
+  it('usa Evidence Score do harness quando disponivel', () => {
+    const r: HarnessResult = {
+      passed: true,
+      score: 100,
+      layers: [layer('build', true), layer('tests', true)],
+      duration: 100,
+      iteration: 1,
+      evidenceScore: {
+        score: 82,
+        validationConfidence: 'partial',
+        validation: {
+          executedLayers: ['build', 'tests'],
+          passedLayers: ['build', 'tests'],
+          failedLayers: [],
+          skippedLayers: [],
+          totalWeight: 50,
+          passedWeight: 50,
+        },
+        risk: {
+          filesChanged: 1,
+          changedLines: 20,
+          patchSize: 'small',
+          riskLevel: 'low',
+          penalty: 0,
+          reasons: [],
+        },
+        completeness: {
+          hasCompilationCheck: true,
+          hasTestEvidence: true,
+          hasSecurityEvidence: false,
+          partial: true,
+          penalty: 3,
+          reasons: ['sem camada security executada'],
+        },
+        blockers: [],
+        notes: ['validationConfidence=partial'],
+      },
+    }
+
+    expect(calculateScore(r)).toBe(82)
+  })
+
   it('deve retornar 0 quando build falha', () => {
     const r = result([layer('build', false), layer('tests', true), layer('lint', true)])
     expect(calculateScore(r)).toBe(0)

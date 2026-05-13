@@ -10,6 +10,7 @@ const BASE_WEIGHTS: Record<string, number> = {
 }
 
 export function calculateScore(result: HarnessResult): number {
+  if (result.evidenceScore) return result.evidenceScore.score
   if (hasHardFail(result)) return 0
 
   const weights = adaptWeights(result)

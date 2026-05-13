@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import type { FileChange, PatchRecord } from '@kova/shared'
+import type { DiffReviewSelection, FileChange, PatchRecord } from '@kova/shared'
 import { createCheckpoint, restoreCheckpoint } from './checkpoint'
 import { isSafeZone, type SafeZoneConfig } from './safe-zones'
 import { GitHelper } from './git-helper'
+import { applyDiffReviewSelection } from './diff-review'
 
 export interface ApplyResult {
   applied: boolean
@@ -22,9 +23,14 @@ export class CodeApplicationEngine {
     return changes.map(c => formatChangePreview(c)).join('\n\n---\n\n')
   }
 
-  async apply(changes: FileChange[], taskId: string, harnessScore = 0): Promise<ApplyResult> {
+  async apply(changes: FileChange[], taskId: string, harnessScore = 0, selection?: DiffReviewSelection): Promise<ApplyResult> {
+    const reviewedChanges = applyDiffReviewSelection(changes, selection)
+    if (changes.length > 0 && reviewedChanges.length === 0) {
+      return { applied: false, patches: [], checkpointId: '', reason: 'human_required: todos os arquivos foram rejeitados no review' }
+    }
+
     // Only block modifications to safe zones — creating new files is allowed
-    const safeFile = changes.find(c => c.type !== 'create' && isSafeZone(c.path, this.safeZoneConfig))
+    const safeFile = reviewedChanges.find(c => c.type !== 'create' && isSafeZone(c.path, this.safeZoneConfig))
     if (safeFile) {
       return {
         applied: false, patches: [], checkpointId: '',
@@ -32,7 +38,7 @@ export class CodeApplicationEngine {
       }
     }
 
-    const externalChange = detectExternalChange(changes, this.projectRoot)
+    const externalChange = detectExternalChange(reviewedChanges, this.projectRoot)
     if (externalChange) {
       return {
         applied: false, patches: [], checkpointId: '',
@@ -41,16 +47,16 @@ export class CodeApplicationEngine {
     }
 
     const meta = createCheckpoint({
-      taskId, files: changes.map(c => c.path),
+      taskId, files: reviewedChanges.map(c => c.path),
       projectRoot: this.projectRoot, harnessScore,
     })
 
     try {
-      const patches = writeChanges(changes, this.projectRoot, taskId)
+      const patches = writeChanges(reviewedChanges, this.projectRoot, taskId)
       
       // Tenta fazer o commit no git
       const git = new GitHelper(this.projectRoot)
-      const gitHash = git.commit(changes.map(c => c.path), taskId, harnessScore)
+      const gitHash = git.commit(reviewedChanges.map(c => c.path), taskId, harnessScore)
 
       // Retorna o hash do git com prefixo se tiver sucesso, senao fallback pro checkpoint kova
       const checkpointId = gitHash ? `git:${gitHash}` : `kova:${meta.id}`

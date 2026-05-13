@@ -1,14 +1,14 @@
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
 import type { LayerResult, HarnessError, HarnessWarning } from '@kova/shared'
 import { parseTestFailures } from './error-parsers'
-
-const execAsync = promisify(exec)
+import { makePolicyError, runLayerCommand } from './command-result'
 
 export interface TestsLayerConfig {
   command: string
   projectRoot: string
+  cwd?: string
   timeoutMs?: number
+  signal?: AbortSignal
+  onLine?: (line: string, stream: 'stdout' | 'stderr') => void
 }
 
 interface TestParseResult {
@@ -21,68 +21,44 @@ interface TestParseResult {
 
 export async function runTestsLayer(config: TestsLayerConfig): Promise<LayerResult> {
   if (!config.command.trim()) {
-    return { name: 'tests', passed: true, errors: [], warnings: [], duration: 0, skipped: true }
+    return { name: 'tests', passed: true, errors: [], warnings: [], duration: 0, durationMs: 0, skipped: true, skippedReason: 'command_not_configured' }
   }
 
-  const startedAt = new Date().toISOString()
-  const start = Date.now()
   const timeout = config.timeoutMs ?? 60_000
+  const { base, passed, timedOut } = await runLayerCommand(config, 'tests', 'test', timeout)
+  if (config.signal?.aborted) throwAbort()
 
-  try {
-    const result = await execAsync(config.command, { cwd: config.projectRoot, timeout })
-
-    return {
-      name: 'tests',
-      passed: true,
-      errors: [],
-      warnings: [],
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout: result.stdout ?? '',
-      stderr: result.stderr ?? '',
-      exitCode: 0,
-      startedAt,
-    }
-  } catch (error) {
-    const err = error as { killed?: boolean; stdout?: string; stderr?: string; code?: number }
-    const stdout = err.stdout ?? ''
-    const stderr = err.stderr ?? ''
-    const exitCode = err.code ?? 1
-
-    if (err.killed) {
-      return {
-        name: 'tests',
-        passed: false,
-        errors: [makeTimeoutError(timeout)],
-        warnings: [],
-        duration: Date.now() - start,
-        skipped: false,
-        command: config.command,
-        stdout,
-        stderr,
-        exitCode,
-        startedAt,
-      }
-    }
-
-    // vitest escreve output no stdout; outros runners podem usar stderr
-    const output = (stdout.trim() ? stdout : stderr)
-    const parsed = parseOutput(output)
-    return {
-      name: 'tests',
-      passed: false,
-      errors: buildErrors(parsed),
-      warnings: buildWarnings(parsed),
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout,
-      stderr,
-      exitCode,
-      startedAt,
-    }
+  if (passed) {
+    return { name: 'tests', passed: true, errors: [], warnings: [], skipped: false, ...base }
   }
+
+  if (timedOut) {
+    return { name: 'tests', passed: false, errors: [makeTimeoutError(timeout)], warnings: [], skipped: false, ...base }
+  }
+
+  const output = (base.stdout?.trim() ? base.stdout : base.stderr) ?? ''
+  if (isPolicyOutput(output)) {
+    return { name: 'tests', passed: false, errors: [makePolicyError('tests', output)], warnings: [], skipped: false, ...base }
+  }
+  const parsed = parseOutput(output)
+  return {
+    name: 'tests',
+    passed: false,
+    errors: buildErrors(parsed),
+    warnings: buildWarnings(parsed),
+    skipped: false,
+    ...base,
+  }
+}
+
+function throwAbort(): never {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  throw err
+}
+
+function isPolicyOutput(output: string): boolean {
+  return /bloquead|blocked|policy|manifest/i.test(output)
 }
 
 function parseOutput(output: string): TestParseResult {
@@ -128,7 +104,7 @@ function makeTimeoutError(timeoutMs: number): HarnessError {
     type: 'logic',
     severity: 'critical',
     fixable: false,
-    message: `Tests timeout após ${timeoutMs}ms`,
+    message: `Tests timeout apos ${timeoutMs}ms`,
     humanMessage: `Tests demoraram mais de ${timeoutMs}ms`,
     file: '',
   }

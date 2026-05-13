@@ -1,6 +1,6 @@
-import React, { useState, useCallback } from 'react'
+import React, { useCallback, useState } from 'react'
 import type { KovaSettings } from '../types'
-import { PROVIDERS, HINTS, API_KEY_CONFIG, DEFAULT_MODELS, KNOWN_MODELS } from '../provider-config'
+import { API_KEY_CONFIG, DEFAULT_MODELS, HINTS, KNOWN_MODELS, PROVIDERS } from '../provider-config'
 
 interface Props {
   settings: KovaSettings
@@ -9,14 +9,19 @@ interface Props {
 }
 
 const FIELD: React.CSSProperties = {
-  width: '100%', padding: '8px 10px', borderRadius: 6,
-  fontSize: 13, background: 'var(--bg-3)', border: '1px solid var(--border)', color: 'var(--text-1)',
+  width: '100%',
+  padding: '8px 10px',
+  borderRadius: 6,
+  fontSize: 13,
+  background: 'var(--bg-3)',
+  border: '1px solid var(--border)',
+  color: 'var(--text-1)',
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</label>
+      <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</label>
       {children}
     </div>
   )
@@ -33,7 +38,6 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
   const [models, setModels] = useState<string[]>([])
   const [detecting, setDetecting] = useState(false)
   const [detectError, setDetectError] = useState('')
-  // 'preset' = using dropdown; 'custom' = user typing a model not in the list
   const [modelMode, setModelMode] = useState<'preset' | 'custom'>(() =>
     settings.model && KNOWN_MODELS[settings.defaultProvider]
       ? (KNOWN_MODELS[settings.defaultProvider].includes(settings.model) ? 'preset' : 'custom')
@@ -55,40 +59,47 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
   const detectModels = useCallback(async () => {
     const url = serverUrl(form)
     if (!url) return
-    setDetecting(true); setDetectError(''); setModels([])
+    setDetecting(true)
+    setDetectError('')
+    setModels([])
     try {
       const res = await fetch(`${url.replace(/\/+$/, '')}/models`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { data?: Array<{ id: string }> }
-      const ids = (data.data ?? []).map((m: { id: string }) => m.id).filter(Boolean)
+      const ids = (data.data ?? []).map(m => m.id).filter(Boolean)
       if (ids.length === 0) throw new Error('Servidor rodando mas sem modelos. Carregue um modelo no LM Studio.')
       setModels(ids)
       if (ids.length === 1) setForm(prev => ({ ...prev, model: ids[0] }))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setDetectError(msg.toLowerCase().includes('fetch') || msg.toLowerCase().includes('network')
-        ? `Servidor não encontrado em ${url}. Verifique se está rodando.` : msg)
-    } finally { setDetecting(false) }
+        ? `Servidor nao encontrado em ${url}. Verifique se esta rodando.`
+        : msg)
+    } finally {
+      setDetecting(false)
+    }
   }, [form])
 
-  const isLocal = PROVIDERS.find(p => p.value === form.defaultProvider)?.local ?? false
+  const provider = PROVIDERS.find(p => p.value === form.defaultProvider)
+  const isLocal = provider?.local ?? false
   const hint = HINTS[form.defaultProvider]
   const apiKeyCfg = API_KEY_CONFIG[form.defaultProvider]
   const knownModels = KNOWN_MODELS[form.defaultProvider]
   const canDetect = isLocal && !!serverUrl(form)
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div style={{ width: 500, background: 'var(--bg-2)', borderRadius: 8, border: '1px solid var(--border)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
-
+    <div
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div style={{ width: 560, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100vh - 32px)', overflow: 'auto', background: 'var(--bg-2)', borderRadius: 8, border: '1px solid var(--border)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: 15, fontWeight: 600 }}>Configurações</h2>
-          <button onClick={onClose} style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 16, padding: '4px 8px' }}>✕</button>
+          <h2 style={{ fontSize: 15, fontWeight: 700 }}>Configuracoes</h2>
+          <button onClick={onClose} aria-label="Fechar" style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 16, padding: '4px 8px' }}>x</button>
         </div>
 
         <Field label="Intelligence Engine">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10, marginTop: 4 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(156px, 1fr))', gap: 10, marginTop: 4 }}>
             {PROVIDERS.map(p => {
               const isSelected = form.defaultProvider === p.value
               return (
@@ -100,19 +111,27 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
                     setModels([])
                   }}
                   style={{
-                    display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6,
-                    padding: '12px', background: isSelected ? 'var(--cyan-glow)' : 'var(--bg-1)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    gap: 7,
+                    minHeight: 92,
+                    padding: 12,
+                    background: isSelected ? 'var(--cyan-glow)' : 'var(--bg-1)',
                     border: `1px solid ${isSelected ? 'var(--cyan)' : 'var(--border)'}`,
-                    borderRadius: 8, cursor: 'pointer', textAlign: 'left',
-                    transition: 'all 0.2s', position: 'relative'
+                    borderRadius: 8,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'border-color 0.2s, background 0.2s',
+                    position: 'relative',
                   }}
                 >
                   {isSelected && (
-                    <div style={{ position: 'absolute', top: 8, right: 8, width: 14, height: 14, borderRadius: '50%', background: 'var(--cyan)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontSize: 10, fontWeight: 'bold' }}>✓</div>
+                    <span style={{ position: 'absolute', top: 8, right: 8, color: 'var(--cyan)', fontSize: 10, fontWeight: 800 }}>SELECTED</span>
                   )}
-                  <span style={{ fontSize: 16, color: isSelected ? 'var(--cyan)' : 'var(--text-3)' }}>{p.label.split(' ')[0]}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: isSelected ? 'var(--text-1)' : 'var(--text-2)' }}>{p.label.split(' ').slice(1).join(' ')}</span>
-                  <span style={{ fontSize: 10, color: 'var(--text-3)' }}>{p.local ? 'Local' : 'Cloud'}</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: isSelected ? 'var(--text-1)' : 'var(--text-2)' }}>{p.label}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.35 }}>{p.description}</span>
+                  <span style={{ fontSize: 10, color: isSelected ? 'var(--cyan)' : 'var(--text-3)', fontWeight: 700 }}>{p.local ? 'LOCAL' : 'CLOUD'}</span>
                 </button>
               )
             })}
@@ -138,82 +157,107 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
 
         {apiKeyCfg && (
           <Field label={apiKeyCfg.label}>
-            <input type="password" value={String(form[apiKeyCfg.key] ?? '')} onChange={set(apiKeyCfg.key)}
-              placeholder={apiKeyCfg.placeholder} style={FIELD} autoComplete="off" />
+            <input
+              type="password"
+              value={apiKeyCfg.key === 'nvidiaKey' && form.hasNvidiaKey && !form.nvidiaKey ? form.nvidiaKeyPreview : String(form[apiKeyCfg.key] ?? '')}
+              onChange={set(apiKeyCfg.key)}
+              placeholder={apiKeyCfg.placeholder}
+              style={FIELD}
+              autoComplete="off"
+            />
           </Field>
+        )}
+
+        {form.defaultProvider === 'nvidia' && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', color: 'var(--text-2)', fontSize: 13, paddingTop: 6 }}>
+            <input type="checkbox" checked={form.nvidiaEnableThinking ?? true} onChange={e => setForm(prev => ({ ...prev, nvidiaEnableThinking: e.target.checked }))} />
+            Habilitar modo reasoning
+          </label>
         )}
 
         <Field label="Modelo">
           {isLocal ? (
             <div style={{ display: 'flex', gap: 8 }}>
               {models.length > 0
-                ? <select value={form.model} onChange={set('model')} style={{ ...FIELD, flex: 1, cursor: 'pointer' }}>
+                ? (
+                  <select value={form.model} onChange={set('model')} style={{ ...FIELD, flex: 1, cursor: 'pointer' }}>
                     <option value="">Usar modelo carregado</option>
                     {models.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
-                : <input type="text" value={form.model} onChange={set('model')} placeholder="Clique ⟳ Detectar" style={{ ...FIELD, flex: 1 }} />
+                )
+                : <input type="text" value={form.model} onChange={set('model')} placeholder="Clique em Detectar" style={{ ...FIELD, flex: 1 }} />
               }
               {canDetect && (
-                <button onClick={detectModels} disabled={detecting}
-                  style={{ background: 'var(--bg-3)', color: detecting ? 'var(--text-3)' : 'var(--teal)', border: '1px solid var(--border)', padding: '8px 12px', borderRadius: 6, fontSize: 12, flexShrink: 0 }}>
-                  {detecting ? '...' : '⟳'}
+                <button
+                  onClick={detectModels}
+                  disabled={detecting}
+                  style={{ background: 'var(--bg-3)', color: detecting ? 'var(--text-3)' : 'var(--teal)', border: '1px solid var(--border)', padding: '8px 12px', borderRadius: 6, fontSize: 12, flexShrink: 0 }}
+                >
+                  {detecting ? '...' : 'Detectar'}
                 </button>
               )}
             </div>
           ) : knownModels ? (
-            // Cloud provider with known model list
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {modelMode === 'preset'
-                ? <select value={form.model} onChange={set('model')} style={{ ...FIELD, cursor: 'pointer', borderColor: !form.model ? 'var(--amber)' : undefined }}>
-                    <option value="">— selecione o modelo —</option>
+                ? (
+                  <select value={form.model} onChange={set('model')} style={{ ...FIELD, cursor: 'pointer', borderColor: !form.model ? 'var(--amber)' : undefined }}>
+                    <option value="">Selecione o modelo</option>
                     {knownModels.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
-                : <>
-                    <input type="text" value={form.model} onChange={set('model')}
+                )
+                : (
+                  <>
+                    <input
+                      type="text"
+                      value={form.model}
+                      onChange={set('model')}
                       placeholder="Cole o ID exato da API (ex: gemini-3.1-pro)"
-                      style={{ ...FIELD, borderColor: !form.model ? 'var(--amber)' : undefined }} autoFocus />
+                      style={{ ...FIELD, borderColor: !form.model ? 'var(--amber)' : undefined }}
+                      autoFocus
+                    />
                     <p style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5 }}>
-                      ⚠ Use o ID exato da API do provider (não o nome de exibição).
-                      Erros de nome causam erro 400. Consulte a documentação:
-                      {' '}
-                      {form.defaultProvider === 'anthropic' && <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>docs.anthropic.com/models</a>}
-                      {form.defaultProvider === 'openai' && <a href="https://platform.openai.com/docs/models" target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>platform.openai.com/docs/models</a>}
-                      {form.defaultProvider === 'gemini' && <a href="https://ai.google.dev/gemini-api/docs/models" target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>ai.google.dev/gemini-api/docs/models</a>}
-                      {form.defaultProvider === 'deepseek' && <a href="https://api-docs.deepseek.com" target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>api-docs.deepseek.com</a>}
-                      {form.defaultProvider === 'openrouter' && <a href="https://openrouter.ai/models" target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>openrouter.ai/models</a>}
+                      Use o ID exato da API do provider, nao o nome de exibicao. Erros de nome causam erro 400.
                     </p>
                   </>
+                )
               }
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => setModelMode(modelMode === 'preset' ? 'custom' : 'preset')}
-                  style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--bg-active)', padding: '3px 8px', borderRadius: 4 }}>
-                  {modelMode === 'preset' ? '+ Modelo personalizado / mais recente' : '← Voltar para lista'}
+                <button
+                  onClick={() => setModelMode(modelMode === 'preset' ? 'custom' : 'preset')}
+                  style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--bg-active)', padding: '3px 8px', borderRadius: 4 }}
+                >
+                  {modelMode === 'preset' ? '+ Modelo personalizado / mais recente' : 'Voltar para lista'}
                 </button>
               </div>
             </div>
           ) : (
-            // openai-compatible or unknown — free text
-            <input type="text" value={form.model} onChange={set('model')} placeholder="nome exato do modelo (obrigatório)" style={FIELD} />
+            <input type="text" value={form.model} onChange={set('model')} placeholder="nome exato do modelo (obrigatorio)" style={FIELD} />
           )}
           {detectError && <p style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{detectError}</p>}
           {models.length > 1 && <p style={{ fontSize: 11, color: 'var(--teal)', marginTop: 4 }}>{models.length} modelos detectados</p>}
         </Field>
 
         <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', paddingTop: 12 }}>
-          <Field label="Máx. Iterações">
-            <input type="number" min={1} max={20} value={form.maxIterations}
+          <Field label="Max. iteracoes">
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={form.maxIterations}
               onChange={e => setForm(prev => ({ ...prev, maxIterations: Number(e.target.value) }))}
-              style={{ ...FIELD, width: 80 }} />
+              style={{ ...FIELD, width: 88 }}
+            />
           </Field>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', color: 'var(--text-2)', fontSize: 13, paddingBottom: 2 }}>
             <input type="checkbox" checked={form.autoApply} onChange={set('autoApply')} />
-            Auto-aplicar (score ≥ 90)
+            Auto-aplicar (score maior ou igual a 90)
           </label>
         </div>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 16, borderTop: '1px solid var(--border)' }}>
           <button onClick={onClose} style={{ background: 'var(--bg-active)', color: 'var(--text-2)', padding: '8px 16px', borderRadius: 6 }}>Cancelar</button>
-          <button onClick={() => onSave(form)} style={{ background: 'var(--cyan)', color: '#000', padding: '8px 16px', fontWeight: 600, borderRadius: 6 }}>Salvar</button>
+          <button onClick={() => onSave(form)} style={{ background: 'var(--cyan)', color: '#000', padding: '8px 16px', fontWeight: 700, borderRadius: 6 }}>Salvar</button>
         </div>
       </div>
     </div>

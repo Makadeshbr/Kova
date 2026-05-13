@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import type { ExecutionEvent, ExecutionState, TaskDefinition, KovaSettings, StartTaskParams } from './types'
-import type { StructuredAgentMessage } from '@kova/shared'
+import { useEngineEvents } from './hooks/useEngineEvents'
+import { useSessionPersistence } from './hooks/useSessionPersistence'
+import type { ExecutionEvent, ExecutionState, TaskDefinition, StartTaskParams } from './types'
+import type { KovaSettings } from '../../main/ipc-handlers'
+import { buildTokenBudgetedHistory } from '../../main/history-utils'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
@@ -9,32 +12,22 @@ import { FilesViewer } from './components/FilesViewer'
 import { FileEditor } from './components/FileEditor'
 import { StatusBar } from './components/StatusBar'
 import { ProviderModal } from './components/ProviderModal'
+// TerminalPanel uses xterm which is a large native-like module.
+// Lazy-load it so xterm never blocks the initial app render.
+const TerminalPanel = React.lazy(() => import('./components/TerminalPanel').then(m => ({ default: m.TerminalPanel })))
+import type { TerminalSessionInfo, PendingApproval } from './app-state'
+// All shared state types live in app-state.ts to avoid circular imports with hooks
+import type {
+  AppState, ChatMessage, ChatMode, QueuedMessage,
+  SessionUsage, ReasoningState, PermissionMode,
+} from './app-state'
+export type { AppState, ChatMessage, ChatMode, PermissionMode, QueuedMessage, SessionUsage, ReasoningState }
 
-export interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  isTask: boolean
-  structured?: StructuredAgentMessage
-}
-
-export type ChatMode = 'chat' | 'plan' | 'patch' | 'review'
-export type PermissionMode = 'auto-review' | 'ask' | 'full-access'
-
-export interface QueuedMessage {
-  id: string
-  content: string
-  mode: ChatMode
-  permissionMode: PermissionMode
-  includeProjectContext: boolean
-}
-
-export interface SessionUsage {
-  contextTokens: number
-  completionTokens: number
-  contextFiles: string[]
-  learningsCount: number
-  maxContextTokens: number | null
+const EMPTY_REASONING: ReasoningState = {
+  active: false,
+  text: '',
+  startedAt: null,
+  endedAt: null,
 }
 
 function localServerUrl(s: KovaSettings): string | null {
@@ -43,33 +36,16 @@ function localServerUrl(s: KovaSettings): string | null {
   return null
 }
 
-interface AppState {
-  projectRoot: string | null
-  task: TaskDefinition | null
-  executionState: ExecutionState | null
-  settings: KovaSettings | null
-  messages: ChatMessage[]
-  executionEvents: ExecutionEvent[]
-  streamingText: string   // tokens accumulating in real time
-  isThinking: boolean
-  showSettings: boolean
-  showDiff: boolean
-  activeModel: string | null
-  modelConnected: boolean
-  openFilePath: string | null
-  fileRefreshKey: number
-  sessionId: string | null
-  sessionUsage: SessionUsage
-  queuedMessages: QueuedMessage[]
-  activeMode: ChatMode
-  permissionMode: PermissionMode
-  includeProjectContext: boolean
-}
+// AppState is defined in app-state.ts — imported and re-exported above
 
 const EMPTY_USAGE: SessionUsage = {
   contextTokens: 0,
   completionTokens: 0,
   contextFiles: [],
+  selectedFiles: [],
+  blockedFiles: [],
+  rejectedFiles: [],
+  contextWarnings: [],
   learningsCount: 0,
   maxContextTokens: null,
 }
@@ -77,104 +53,37 @@ const EMPTY_USAGE: SessionUsage = {
 export function App(): React.ReactElement {
   const [state, setState] = useState<AppState>({
     projectRoot: null, task: null, executionState: null, settings: null,
-    messages: [], executionEvents: [], streamingText: '',
+    messages: [], executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING,
     isThinking: false, showSettings: false, showDiff: false,
     activeModel: null, modelConnected: false, openFilePath: null, fileRefreshKey: 0,
     sessionId: null,
     sessionUsage: EMPTY_USAGE,
     queuedMessages: [],
     activeMode: 'patch',
-    permissionMode: 'auto-review',
-    includeProjectContext: true,
+    terminalSessions: [],
+    pendingApproval: null,
   })
 
+  useEngineEvents(setState)
+
+  // Terminal / PTY lifecycle events
   useEffect(() => {
-    window.kova.getSettings().then(s => {
-      setState(prev => ({ ...prev, settings: s }))
-      const url = localServerUrl(s)
-      if (url) window.kova.detectModel(url).then(m => { if (m) setState(prev => ({ ...prev, activeModel: m, modelConnected: true })) })
+    const unsubStart = window.kova.onTerminalStarted((id, command, cwd) => {
+      setState(prev => ({
+        ...prev,
+        terminalSessions: [...prev.terminalSessions.filter(s => s.id !== id), { id, command, cwd }],
+      }))
     })
-    const unsubs = [
-      window.kova.onStateUpdate((executionState: ExecutionState) =>
-        setState(prev => {
-          const finished = ['completed', 'failed', 'paused'].includes(executionState.status)
-          // Refresh sidebar when entering validating (files just written) or on completion/pause
-          const shouldRefresh = ['validating', 'applying', 'completed', 'paused', 'failed'].includes(executionState.status)
-            && !['validating', 'applying', 'completed', 'paused', 'failed'].includes(prev.executionState?.status ?? '')
-          return {
-            ...prev, executionState,
-            isThinking: finished ? false : prev.isThinking,
-            fileRefreshKey: shouldRefresh ? prev.fileRefreshKey + 1 : prev.fileRefreshKey,
-          }
-        })
-      ),
-      window.kova.onTaskStructured((task: TaskDefinition) => setState(prev => ({ ...prev, task }))),
-      window.kova.onError((msg: string) => setState(prev => ({
-        ...prev, isThinking: false,
-        messages: [...prev.messages, { id: Date.now().toString(), role: 'assistant', content: msg, isTask: false }],
-      }))),
-      window.kova.onModelDetected((model: string) => setState(prev => ({ ...prev, activeModel: model, modelConnected: true }))),
-      window.kova.onChatResponse((msg: string) => setState(prev => {
-        // Dedup: stream_end may have already added this content as a message
-        const last = prev.messages[prev.messages.length - 1]
-        if (last?.role === 'assistant' && last.content.trim() === msg.trim()) {
-          return { ...prev, isThinking: false }
-        }
-        return {
-          ...prev, isThinking: false,
-          messages: [...prev.messages, { id: Date.now().toString(), role: 'assistant', content: msg, isTask: false }],
-        }
-      })),
-      window.kova.onExecutionEvent((event: ExecutionEvent) => setState(prev => {
-        if (event.type === 'context_loaded' && event.context) {
-          return {
-            ...prev,
-            sessionUsage: {
-              contextTokens: event.context.tokensUsed,
-              completionTokens: prev.sessionUsage.completionTokens,
-              contextFiles: event.context.files,
-              learningsCount: event.context.learningsCount ?? 0,
-              maxContextTokens: event.context.maxTokens ?? null,
-            },
-            executionEvents: [...prev.executionEvents, event].slice(-200),
-          }
-        }
-        if (event.type === 'token_usage') {
-          return {
-            ...prev,
-            sessionUsage: {
-              ...prev.sessionUsage,
-              completionTokens: prev.sessionUsage.completionTokens + (event.tokensUsed ?? 0),
-            },
-            executionEvents: [...prev.executionEvents, event].slice(-200),
-          }
-        }
-        if (event.type === 'token' && event.token) {
-          return { ...prev, streamingText: prev.streamingText + event.token, executionEvents: [...prev.executionEvents, event].slice(-160) }
-        }
-        if (event.type === 'stream_end') {
-          const text = prev.streamingText.trim()
-          const structured = event.structuredMessage
-          // If we got a structuredMessage, always add a message for the card (even if no streamed text)
-          const assistantMsg: ChatMessage = {
-            id: Date.now().toString(), role: 'assistant', content: text || '', isTask: !!structured, structured,
-          }
-          const newMessages = (text || structured)
-            ? [...prev.messages, assistantMsg]
-            : prev.messages
-          return { ...prev, streamingText: '', isThinking: false, messages: newMessages, executionEvents: [...prev.executionEvents, event].slice(-160) }
-        }
-        // Refresh file tree on any file mutation or apply completion
-        const isFileMutation = event.type === 'tool_call' && (event.toolName === 'write_file' || event.toolName === 'delete_file')
-        const shouldRefresh = isFileMutation || event.type === 'file_mutation' || event.type === 'apply_completed'
-        return {
-          ...prev,
-          executionEvents: [...prev.executionEvents, event].slice(-200),
-          fileRefreshKey: shouldRefresh ? prev.fileRefreshKey + 1 : prev.fileRefreshKey,
-        }
-      })),
-    ]
-    return () => unsubs.forEach(u => u())
+    const unsubExit = window.kova.onTerminalExit((id, exitCode) => {
+      setState(prev => ({
+        ...prev,
+        terminalSessions: prev.terminalSessions.map(s => s.id === id ? { ...s, exitCode } : s),
+      }))
+    })
+    const unsubApproval = window.kova.onInteractiveRequest((id, command, reason) => {
+      setState(prev => ({ ...prev, pendingApproval: { id, command, reason } }))
+    })
+    return () => { unsubStart(); unsubExit(); unsubApproval() }
   }, [])
 
   useEffect(() => {
@@ -196,22 +105,19 @@ export function App(): React.ReactElement {
     window.kova.detectModel(url).then(m => setState(prev => ({ ...prev, activeModel: m || null, modelConnected: !!m })))
   }, [state.settings?.defaultProvider, state.settings?.compatibleUrl, state.settings?.ollamaUrl])
 
-  // Autosave de sessões quando o Kova termina de pensar
-  useEffect(() => {
-    if (!state.projectRoot || state.messages.length === 0 || state.isThinking) return
-    const id = state.sessionId || Date.now().toString()
-    if (!state.sessionId) setState(prev => ({ ...prev, sessionId: id }))
-    
-    const title = state.messages.find(m => m.role === 'user')?.content.slice(0, 30) || 'Nova Sessão'
-    const session = {
-      id, title, updatedAt: new Date().toISOString(),
-      messages: state.messages, task: state.task, sessionUsage: state.sessionUsage,
-      executionState: state.executionState, events: state.executionEvents
-    }
-    window.kova.saveSession(state.projectRoot, session).catch(console.error)
-  }, [state.messages, state.isThinking, state.executionState, state.sessionUsage])
+  useSessionPersistence({
+    projectRoot: state.projectRoot,
+    messages: state.messages,
+    isThinking: state.isThinking,
+    sessionId: state.sessionId,
+    task: state.task,
+    sessionUsage: state.sessionUsage,
+    executionState: state.executionState,
+    executionEvents: state.executionEvents,
+    onSessionIdCreated: (id) => setState(prev => ({ ...prev, sessionId: id })),
+  })
 
-  const buildTaskParams = useCallback((objective: string, overrides?: Partial<Pick<QueuedMessage, 'mode' | 'permissionMode' | 'includeProjectContext'>>): StartTaskParams => {
+  const buildTaskParams = useCallback((objective: string, overrides?: Partial<Pick<QueuedMessage, 'mode'>>): StartTaskParams => {
     const s = state.settings!
     const apiKeyMap: Record<string, string> = {
       anthropic: s.anthropicKey,
@@ -234,18 +140,22 @@ export function App(): React.ReactElement {
       autoApply: s.autoApply,
       maxIterations: s.maxIterations,
       mode: overrides?.mode ?? state.activeMode,
-      permissionMode: overrides?.permissionMode ?? state.permissionMode,
-      includeProjectContext: overrides?.includeProjectContext ?? state.includeProjectContext,
+      permissionMode: 'auto-review',  // always default, no longer user-selectable
+      includeProjectContext: true,     // always include context
       queuedCount: state.queuedMessages.length,
+      openedFiles: state.openFilePath ? [state.openFilePath] : [],
     }
-  }, [state.settings, state.projectRoot, state.activeModel, state.activeMode, state.permissionMode, state.includeProjectContext, state.queuedMessages.length])
+  }, [state.settings, state.projectRoot, state.activeModel, state.activeMode, state.queuedMessages.length, state.openFilePath])
 
   const sendNow = useCallback(async (text: string, queued?: QueuedMessage) => {
     if (!state.settings || !state.projectRoot) return
-    const history = state.messages.slice(-10).map(m => ({ role: m.role, content: m.content }))
+    const mode = queued?.mode ?? state.activeMode
+    // review/plan use focused history (task turns only); chat/patch carry full history
+    const taskOnly = mode === 'review' || mode === 'plan'
+    const history = buildTokenBudgetedHistory(state.messages, { taskOnly })
     setState(prev => ({
       ...prev, isThinking: true, executionState: null, task: null,
-      executionEvents: [], showDiff: false, streamingText: '',
+      executionEvents: [], showDiff: false, streamingText: '', reasoning: EMPTY_REASONING,
       messages: [...prev.messages, { id: Date.now().toString(), role: 'user', content: text, isTask: false }],
     }))
     await window.kova.sendMessage(text, history, buildTaskParams(text, queued))
@@ -258,15 +168,15 @@ export function App(): React.ReactElement {
       id: `${Date.now()}`,
       content: text,
       mode: state.activeMode,
-      permissionMode: state.permissionMode,
-      includeProjectContext: state.includeProjectContext,
+      permissionMode: 'auto-review',
+      includeProjectContext: true,
     }
     if (isBusy) {
       setState(prev => ({ ...prev, queuedMessages: [...prev.queuedMessages, queued] }))
       return
     }
     await sendNow(text, queued)
-  }, [state.settings, state.projectRoot, state.isThinking, state.executionState, state.activeMode, state.permissionMode, state.includeProjectContext, sendNow])
+  }, [state.settings, state.projectRoot, state.isThinking, state.executionState, state.activeMode, sendNow])
 
   useEffect(() => {
     const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
@@ -281,7 +191,7 @@ export function App(): React.ReactElement {
     if (folder) setState(prev => ({
       ...prev, projectRoot: folder, openFilePath: null,
       executionEvents: [], executionState: null, task: null,
-      isThinking: false, streamingText: '', showDiff: false,
+      isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false,
       messages: [], sessionId: null,
       sessionUsage: EMPTY_USAGE,
       queuedMessages: [],
@@ -296,7 +206,7 @@ export function App(): React.ReactElement {
       task: session.task || null,
       executionState: session.executionState || null,
       executionEvents: session.events || [],
-      isThinking: false, streamingText: '', showDiff: false, openFilePath: null,
+      isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false, openFilePath: null,
       sessionUsage: session.sessionUsage || EMPTY_USAGE,
     }))
   }, [])
@@ -370,22 +280,23 @@ export function App(): React.ReactElement {
               messages={state.messages} executionState={state.executionState} task={state.task}
               isThinking={state.isThinking} isRunning={isRunning}
               streamingText={state.streamingText}
+              reasoning={state.reasoning}
               events={state.executionEvents}
               projectRoot={state.projectRoot} onSend={handleSend} onOpenFolder={handleOpenFolder}
               queuedMessages={state.queuedMessages}
               activeMode={state.activeMode}
-              permissionMode={state.permissionMode}
-              includeProjectContext={state.includeProjectContext}
               sessionUsage={state.sessionUsage}
               activeModel={state.activeModel}
               onModeChange={(activeMode) => setState(prev => ({ ...prev, activeMode }))}
-              onPermissionModeChange={(permissionMode) => setState(prev => ({ ...prev, permissionMode }))}
-              onIncludeProjectContextChange={(includeProjectContext) => setState(prev => ({ ...prev, includeProjectContext }))}
               onClearQueue={() => setState(prev => ({ ...prev, queuedMessages: [] }))}
             />
           )}
           {hasChanges && state.showDiff && !state.openFilePath && (
-            <FilesViewer changes={lastIteration!.changes} onClose={() => setState(prev => ({ ...prev, showDiff: false }))} />
+            <FilesViewer
+              changes={lastIteration!.changes}
+              onClose={() => setState(prev => ({ ...prev, showDiff: false }))}
+              onApplySelection={(selection) => window.kova.forceApply(selection)}
+            />
           )}
         </div>
         <HarnessDashboard
@@ -398,11 +309,25 @@ export function App(): React.ReactElement {
           onAbort={() => {
             window.kova.abort()
             // Reset renderer state immediately — don't wait for main process confirmation
-            setState(prev => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: '' }))
+            setState(prev => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING }))
           }}
           onApply={() => window.kova.forceApply()}
+          onRepair={() => {
+            void handleSend('As validações falharam. Investigue a causa, faça a menor correção possível e rode a validação novamente. Não mude a arquitetura.')
+          }}
         />
       </div>
+      <React.Suspense fallback={null}>
+        <TerminalPanel
+          sessions={state.terminalSessions}
+          pendingApproval={state.pendingApproval}
+          onClose={(id) => setState(prev => ({ ...prev, terminalSessions: prev.terminalSessions.filter(s => s.id !== id) }))}
+          onApprove={(id, approved) => {
+            setState(prev => ({ ...prev, pendingApproval: null }))
+            window.kova.terminalApprove(id, approved)
+          }}
+        />
+      </React.Suspense>
       <StatusBar executionState={state.executionState} sessionUsage={state.sessionUsage} />
       {state.showSettings && state.settings && (
         <ProviderModal settings={state.settings} onSave={handleSaveSettings} onClose={() => setState(prev => ({ ...prev, showSettings: false }))} />

@@ -8,7 +8,7 @@
  *  - This prevents auto_apply from firing when a project has no validation tooling
  *
  * Scope split:
- *  - No-changes from agent (ExecutionEngine) → validationConfidence not set → auto_apply ✓
+ *  - No-changes from agent (ExecutionEngine) -> validationConfidence:none -> suggest
  *  - No validation commands in project (harness pipeline) → validationConfidence: 'none' → suggest ✓
  */
 import { describe, it, expect } from 'vitest'
@@ -77,7 +77,7 @@ describe('decide — validationConfidence:none overrides score to suggest range'
 describe('decide — without validationConfidence, empty layers still requires evidence', () => {
   it('suggests review when no validation evidence is present', () => {
     // When the agent makes no changes, ExecutionEngine.validateOutput returns {score:100, layers:[]}.
-    // Without validationConfidence, decide trusts calculateScore → 100 → auto_apply.
+    // Empty evidence must still be capped to review territory.
     const d = decide(emptyHarness(), [])  // no validationConfidence
     expect(d.decision).toBe('suggest')
     expect(d.decision).not.toBe('auto_apply')
@@ -116,6 +116,37 @@ describe('decide — validationConfidence:full enables auto_apply normally', () 
     const d = decide(r, [])
     expect(d.decision).toBe('auto_apply')
     expect(d.score).toBe(100)
+  })
+})
+
+describe('decide — failed real validation requires repair', () => {
+  it('does not suggest when tests fail even if proportional score reaches 70', () => {
+    const layer = (name: LayerResult['name'], passed: boolean): LayerResult => ({
+      name, passed, errors: passed ? [] : [{
+        layer: name,
+        type: 'logic',
+        severity: 'high',
+        fixable: true,
+        message: 'test failed',
+        humanMessage: 'test failed',
+        file: 'src/index.test.ts',
+      }],
+      warnings: [],
+      duration: 10,
+      skipped: false,
+    })
+    const r: HarnessResult = {
+      passed: false,
+      score: 70,
+      layers: [layer('build', true), layer('tests', false), layer('rules', true), layer('security', true), layer('lint', true)],
+      duration: 50,
+      iteration: 1,
+      validationConfidence: 'full',
+    }
+    const d = decide(r, [])
+    expect(d.decision).toBe('reject')
+    expect(d.score).toBeLessThan(70)
+    expect(d.reason).toContain('repair loop')
   })
 })
 

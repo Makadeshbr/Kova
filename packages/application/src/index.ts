@@ -1,5 +1,6 @@
 export { CodeApplicationEngine } from './application-engine'
 export type { ApplyResult } from './application-engine'
+export { applyDiffReviewSelection, approveAllSelection, buildReviewHunks, createDiffReviewDecision } from './diff-review'
 export { createCheckpoint, restoreCheckpoint, listCheckpoints, deleteCheckpoint } from './checkpoint'
 export type { CheckpointMeta } from './checkpoint'
 export { isSafeZone } from './safe-zones'

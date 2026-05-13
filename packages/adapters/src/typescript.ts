@@ -6,10 +6,7 @@ export const TypeScriptAdapter: StackAdapter = {
   name: 'typescript',
 
   detect(projectRoot: string): boolean {
-    return (
-      existsSync(join(projectRoot, 'package.json')) ||
-      existsSync(join(projectRoot, 'tsconfig.json'))
-    )
+    return existsSync(join(projectRoot, 'tsconfig.json'))
   },
 
   commands: {

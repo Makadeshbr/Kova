@@ -1,11 +1,12 @@
 import type {
   AgentContext, AgentMode, AgentOutput, DecisionResult, ExecutionContract,
-  ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
-  IterationRecord, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation
+  DiffReviewSelection, ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
+  IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation
 } from '@kova/shared'
 import { createOrchestratorConfig } from '@kova/orchestrator'
 import type { OrchestratorConfig, OrchestratorResult } from '@kova/orchestrator'
 import { decide } from '@kova/decision'
+import { recordTrace } from '@kova/observability'
 import { createInitialState, withIteration, withStatus } from './state'
 import { shouldStop, type StopOptions } from './stop-conditions'
 import {
@@ -13,6 +14,9 @@ import {
   createExecutionContract,
   validateContractChanges,
 } from './execution-contract'
+import { generateProofPack } from './proof-pack'
+
+type InteractiveCommandRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
 
 interface IAgent {
   execute(task: TaskDefinition, context: AgentContext, mode: AgentMode, options?: {
@@ -20,6 +24,7 @@ interface IAgent {
     onToken?: (token: string) => void
     onToolCall?: (name: string, input: Record<string, unknown>) => void
     onToolResult?: (name: string, result: string) => void
+    interactiveRunner?: InteractiveCommandRunner
   }): Promise<AgentOutput>
 }
 
@@ -28,12 +33,16 @@ interface IOrchestrator {
 }
 
 interface IContextEngine {
-  buildContext(task: TaskDefinition, projectRoot: string, options?: { harnessErrors?: HarnessError[] }): Promise<AgentContext>
+  buildContext(task: TaskDefinition, projectRoot: string, options?: { harnessErrors?: HarnessError[]; explicitFiles?: string[]; openedFiles?: string[]; diff?: string }): Promise<AgentContext>
 }
 
 interface IApplicationEngine {
-  apply(changes: FileChange[], taskId: string, score?: number): Promise<{ applied: boolean; checkpointId: string; reason?: string }>
+  apply(changes: FileChange[], taskId: string, score?: number, selection?: DiffReviewSelection): Promise<{ applied: boolean; checkpointId: string; reason?: string }>
   rollback(checkpointId: string): Promise<void>
+}
+
+interface IMemoryRecorder {
+  recordFromIteration(task: TaskDefinition, iterations: IterationRecord[]): Learning[]
 }
 
 export interface ExecutionDependencies {
@@ -41,6 +50,8 @@ export interface ExecutionDependencies {
   orchestrator: IOrchestrator
   contextEngine: IContextEngine
   applicationEngine: IApplicationEngine
+  /** Optional: when present, auto-records verified learnings after auto_apply. */
+  memory?: IMemoryRecorder
 }
 
 export interface ExecutionEngineOptions extends StopOptions {
@@ -49,8 +60,15 @@ export interface ExecutionEngineOptions extends StopOptions {
   autoApply?: boolean
   history?: AgentMessage[]
   skipPlan?: boolean
+  explicitFiles?: string[]
+  openedFiles?: string[]
+  diff?: string
   onStateChange?: (state: ExecutionState) => void
   onEvent?: (event: ExecutionEvent) => void
+  /** Called for each stdout/stderr line from a harness subprocess in real-time. */
+  onHarnessLine?: (layer: string, line: string, stream: 'stdout' | 'stderr') => void
+  /** Injected by EngineManager to allow agent tools to run interactive PTY sessions. */
+  interactiveRunner?: InteractiveCommandRunner
 }
 
 export class ExecutionEngine {
@@ -104,17 +122,22 @@ export class ExecutionEngine {
     }
   }
 
-  async forceApply(): Promise<void> {
+  async forceApply(selection?: DiffReviewSelection): Promise<void> {
     const last = this.state?.iterationHistory.at(-1)
     if (!last || !this.task) throw new Error('Sem changes para aplicar')
+    if (last.changes.length === 0) throw new Error('Sem changes para aplicar')
 
     const score = last.harnessResult.score
-    const result = await this.deps.applicationEngine.apply(last.changes, this.task.id, score)
+    const result = await this.deps.applicationEngine.apply(last.changes, this.task.id, score, selection)
 
     if (result.applied) {
       this.lastCheckpointId = result.checkpointId
       this.state = withStatus(this.state!, 'completed')
       this.emit()
+      // Auto-record learnings on forceApply too — same as auto_apply path
+      try {
+        this.deps.memory?.recordFromIteration(this.task, this.state!.iterationHistory)
+      } catch { /* memory is always best-effort */ }
       return
     }
 
@@ -178,7 +201,9 @@ export class ExecutionEngine {
     if (this.state!.status === 'completed' || this.state!.status === 'failed' || this.state!.status === 'paused') {
       const proofPack = generateProofPack(this.state!, this.contract ?? createExecutionContract(this.task!))
       this.state = { ...this.state!, proofPack }
+      this.emit()
       this.event({ type: 'proof_pack', proofPack, message: 'Proof Pack gerado' })
+      try { recordTrace(this.state!, this.options.projectRoot) } catch { /* traces are best-effort */ }
     }
 
     return this.state!
@@ -200,14 +225,32 @@ export class ExecutionEngine {
 
     this.state = withStatus(this.state!, 'structuring')
     this.emit()
-    const context = await this.deps.contextEngine.buildContext(task, this.options.projectRoot, { harnessErrors: previousErrors })
+    const context = await this.deps.contextEngine.buildContext(task, this.options.projectRoot, {
+      harnessErrors: previousErrors,
+      explicitFiles: this.options.explicitFiles,
+      openedFiles: this.options.openedFiles,
+      diff: this.options.diff,
+    })
     this.event({
       type: 'context_loaded',
       message: `${context.files.length} context files`,
       context: {
         files: context.files.map(file => file.path),
         tokensUsed: context.tokensUsed,
+        maxTokens: context.pack?.budget.maxTokens,
         learningsCount: context.learnings.length,
+        selectedFiles: context.pack?.selectedFiles.slice(0, 12).map(file => ({
+          path: file.path,
+          score: file.score,
+          confidence: file.confidence,
+          reason: file.reason,
+          evidence: file.evidence,
+          source: file.source,
+          kind: file.kind,
+        })),
+        blockedFiles: context.pack?.blockedFiles,
+        rejectedFiles: context.pack?.rejectedFiles.slice(0, 20),
+        warnings: context.pack?.warnings,
       },
     })
 
@@ -216,10 +259,20 @@ export class ExecutionEngine {
       const err = new Error('Aborted'); err.name = 'AbortError'; throw err
     }
 
+    const reasoning = createReasoningEvents((event) => this.event(event))
+    reasoning.start()
+
     const agentOptions = {
       history: this.options.history,
       signal: this.abortController.signal,
-      onToken: (token: string) => this.event({ type: 'token', token }),
+      interactiveRunner: this.options.interactiveRunner,
+      onToken: (token: string) => {
+        reasoning.end()
+        this.event({ type: 'token', token })
+      },
+      onReasoningStart: () => reasoning.start(),
+      onReasoningDelta: (delta: string) => reasoning.delta(delta),
+      onReasoningEnd: () => reasoning.end(),
       onToolCall: (name: string, input: Record<string, unknown>) => {
         const preview = name === 'write_file' ? String(input.path ?? '') : name === 'run_command' ? String(input.command ?? '') : ''
         this.event({ type: 'tool_call', toolName: name, toolInput: input, message: preview ? `${name}: ${preview}` : name })
@@ -234,22 +287,48 @@ export class ExecutionEngine {
       }
     }
 
-    if (isFirst && !this.options.skipPlan) {
-      this.state = withStatus(this.state!, 'planning')
+    let codeOutput!: AgentOutput
+    try {
+      if (isFirst && !this.options.skipPlan) {
+        this.state = withStatus(this.state!, 'planning')
+        this.emit()
+        this.event({ type: 'agent_started', mode: 'plan', message: 'Planning started' })
+        await this.deps.agent.execute(task, context, 'plan', agentOptions)
+        reasoning.end()
+        this.event({ type: 'stream_end', message: '' })
+        this.event({ type: 'agent_completed', mode: 'plan', message: 'Planning completed' })
+      }
+
+      this.state = withStatus(this.state!, 'coding')
       this.emit()
-      this.event({ type: 'agent_started', mode: 'plan', message: 'Planning started' })
-      await this.deps.agent.execute(task, context, 'plan', agentOptions)
+      const mode: AgentMode = isFirst ? (this.options.skipPlan ? 'unified' : 'code') : 'fix'
+      this.event({ type: 'agent_started', mode, message: `${mode} started` })
+      codeOutput = await this.deps.agent.execute(task, context, mode, agentOptions)
+      reasoning.end()
       this.event({ type: 'stream_end', message: '' })
-      this.event({ type: 'agent_completed', mode: 'plan', message: 'Planning completed' })
+      this.event({ type: 'agent_completed', mode, changes: codeOutput.changes, message: `${mode} completed` })
+    } finally {
+      reasoning.end()
     }
 
-    this.state = withStatus(this.state!, 'coding')
-    this.emit()
-    const mode: AgentMode = isFirst ? (this.options.skipPlan ? 'unified' : 'code') : 'fix'
-    this.event({ type: 'agent_started', mode, message: `${mode} started` })
-    const codeOutput = await this.deps.agent.execute(task, context, mode, agentOptions)
-    this.event({ type: 'stream_end', message: '' })
-    this.event({ type: 'agent_completed', mode, changes: codeOutput.changes, message: `${mode} completed` })
+    // Text-only response: model responded without writing any files.
+    // Nothing to validate and nothing to apply — complete immediately.
+    if (codeOutput.changes.length === 0) {
+      const emptyDecision: import('@kova/shared').DecisionResult = {
+        decision: 'auto_apply', score: 100,
+        reason: 'No file changes — text-only response',
+        feedback: [],
+      }
+      const emptyHarness: import('@kova/shared').HarnessResult = {
+        passed: true, score: 100, duration: 0, iteration: this.state!.currentIteration + 1,
+        layers: [], validationConfidence: 'full',
+      }
+      this.state = withIteration(this.state!, buildRecord(this.state!.currentIteration, codeOutput, emptyHarness, emptyDecision, context, iterStart))
+      this.emit()
+      this.state = withStatus(this.state!, 'completed')
+      this.emit()
+      return emptyDecision
+    }
 
     this.state = withStatus(this.state!, 'validating')
     this.emit()
@@ -277,6 +356,10 @@ export class ExecutionEngine {
       }
 
       if (this.options.autoApply === false) {
+        // Harness passed and decision is auto_apply, but user has autoApply disabled.
+        // Treat as 'suggest': stop the loop and wait for manual apply.
+        // Without this flag, the while loop would re-run the agent indefinitely.
+        this.paused = true
         this.state = withStatus(this.state!, 'paused')
         this.emit()
         return decision
@@ -291,6 +374,10 @@ export class ExecutionEngine {
         this.state = withStatus(this.state!, 'completed')
         this.emit()
         this.event({ type: 'apply_completed', changes: codeOutput.changes, message: 'Apply completed' })
+        // Auto-record verified learnings after successful apply — best-effort, never blocks
+        try {
+          this.deps.memory?.recordFromIteration(task, this.state!.iterationHistory)
+        } catch { /* memory is always best-effort */ }
       } else {
         this.state = withStatus(this.state!, 'paused')
         this.emit()
@@ -303,7 +390,15 @@ export class ExecutionEngine {
   private async validateOutput(output: AgentOutput): Promise<HarnessResult> {
     const iteration = this.state!.currentIteration + 1
     if (output.changes.length === 0) {
-      return { score: 100, layers: [], passed: true, duration: 0, iteration }
+      return {
+        score: 75,
+        layers: [],
+        passed: false,
+        duration: 0,
+        iteration,
+        validationConfidence: 'none',
+        skippedLayers: ['build', 'typecheck', 'tests', 'rules'],
+      }
     }
 
     const contract = this.contract ?? createExecutionContract(this.task!)
@@ -317,7 +412,17 @@ export class ExecutionEngine {
       iteration,
       output.changes.map(c => c.path),
     )
-    const orchResult = await this.deps.orchestrator.run(output.changes, config)
+    const signal = this.abortController?.signal
+    const orchResult = await this.deps.orchestrator.run(output.changes, {
+      ...config,
+      signal,
+      onLayerStart: (layer, command) => {
+        this.event({ type: 'harness_layer_start', harnessLayer: layer, message: command || layer })
+      },
+      onHarnessLine: (layer, line, stream) => {
+        this.event({ type: 'harness_line', harnessLayer: layer, harnessLine: line, harnessStream: stream, message: line })
+      },
+    })
     return orchResult.harnessResult
   }
 
@@ -348,56 +453,30 @@ function buildRecord(
   }
 }
 
-function generateProofPack(state: ExecutionState, contract: ExecutionContract): ProofPack {
-  const lastIter = state.iterationHistory.at(-1)
-  const changes = lastIter?.changes.map(c => ({
-    path: c.path,
-    type: c.type,
-    reason: 'Modificado durante iteração'
-  })) ?? []
-
-  const validationsRun: ProofPackValidation[] = []
-  const validationsNotRun: Array<{ kind: string; reason: string }> = []
-  const residualRisk: string[] = []
-
-  if (lastIter?.harnessResult) {
-    for (const layer of lastIter.harnessResult.layers) {
-      if (layer.skipped) {
-        validationsNotRun.push({ kind: layer.name, reason: layer.warnings[0]?.message ?? 'Skipped' })
-      } else {
-        validationsRun.push({
-          kind: layer.name as ProofPackValidation['kind'],
-          command: layer.command,
-          passed: layer.passed,
-          skipped: false,
-          note: layer.passed ? undefined : `${layer.errors.length} erro(s)`
-        })
-      }
-    }
-  }
-
-  // Collect context files from all iterations, deduplicating by path
-  const contextFileMap = new Map<string, { path: string; reason: string }>()
-  for (const iter of state.iterationHistory) {
-    for (const f of iter.contextFiles ?? []) {
-      if (!contextFileMap.has(f.path)) {
-        contextFileMap.set(f.path, { path: f.path, reason: `No contexto da iteração ${iter.iteration}` })
-      }
-    }
-  }
-  const analyzedFiles = Array.from(contextFileMap.values())
-
+function createReasoningEvents(
+  emit: (event: Omit<ExecutionEvent, 'taskId' | 'timestamp' | 'iteration'> & { iteration?: number }) => void,
+): { start: () => void; delta: (delta: string) => void; end: () => void } {
+  let active = false
   return {
-    objective: contract.objective,
-    iterations: state.currentIteration,
-    totalTokens: state.totalTokens,
-    changes,
-    analyzedFiles,
-    validationsRun,
-    validationsNotRun,
-    residualRisk,
-    finalDecision: lastIter?.decision.decision ?? 'suggest',
-    finalScore: lastIter?.decision.score ?? 0,
-    completedAt: new Date().toISOString()
+    start: () => {
+      if (active) return
+      active = true
+      emit({ type: 'reasoning_start', message: 'Raciocinando...' })
+    },
+    delta: (delta: string) => {
+      if (!delta) return
+      if (!active) {
+        active = true
+        emit({ type: 'reasoning_start', message: 'Raciocinando...' })
+      }
+      emit({ type: 'reasoning_delta', reasoning: delta })
+    },
+    end: () => {
+      if (!active) return
+      active = false
+      emit({ type: 'reasoning_end' })
+    },
   }
 }
+
+// generateProofPack extracted to ./proof-pack.ts

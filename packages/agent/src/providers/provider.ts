@@ -28,6 +28,9 @@ export interface AgentLoopOptions {
   signal?: AbortSignal
   // Streaming callbacks — called in real time as the LLM generates output
   onToken?: (token: string) => void
+  onReasoningStart?: () => void
+  onReasoningDelta?: (delta: string) => void
+  onReasoningEnd?: () => void
   onToolCall?: (name: string, input: Record<string, unknown>) => void
   onToolResult?: (name: string, output: string) => void
 }

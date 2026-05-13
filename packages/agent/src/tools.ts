@@ -1,10 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
-import type { FileChange } from '@kova/shared'
+import type { FileChange, ValidationCommandKind } from '@kova/shared'
+import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 
-const execAsync = promisify(exec)
 export type PermissionAction = 'allow' | 'ask' | 'deny'
 export type PermissionKey = 'read' | 'edit' | 'list' | 'bash'
 
@@ -35,6 +33,7 @@ export const READ_ONLY_PERMISSION_POLICY: PermissionPolicy = {
   list: 'allow',
   bash: 'deny',
 }
+
 const RUN_TIMEOUT_MS = 120_000  // 2 min — enough for npm install on slow machines
 
 const COMMAND_ALLOWLIST = [
@@ -63,6 +62,11 @@ const COMMAND_ALLOWLIST = [
   'git diff', 'git status', 'git log', 'git branch', 'git show',
   // Make executable
   'chmod +x',
+  // CLI tools — non-interactive inspection (auth/login MUST use run_interactive_command)
+  'gh --version', 'gh repo', 'gh pr', 'gh issue', 'gh release',
+  'docker info', 'docker ps', 'docker images', 'docker logs',
+  'kubectl get', 'kubectl describe', 'kubectl logs',
+  'aws --version', 'gcloud --version', 'az --version',
 ]
 
 const COMMAND_BLOCKLIST = [
@@ -140,13 +144,36 @@ export const AGENT_TOOLS: KovaTool[] = [
   },
   {
     name: 'run_command',
-    description: 'Run a shell command in the project root. Use for: installing dependencies (npm install, pip install, cargo build, go mod download), building (npm run build, go build), testing (npm test, go test), linting, formatting. Always run install/build before finishing a task that adds new dependencies.',
+    description: 'Run a single safe command in the project root or a structured cwd. Use for build, test, lint, typecheck, format, or read-only inspection. Do not use cd, pipes, redirects, &&, or ;.',
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'Command to run (e.g. "go test ./...", "npm run build", "cargo test")' },
+        command: { type: 'string', description: 'Single command to run (e.g. "go test ./...", "npm run build", "cargo test")' },
+        cwd: { type: 'string', description: 'Optional relative working directory inside the project root' },
+        kind: { type: 'string', enum: ['test', 'build', 'lint', 'typecheck', 'format', 'security', 'run'], description: 'Command kind used by the safe policy' },
       },
       required: ['command'],
+    },
+  },
+  {
+    name: 'run_interactive_command',
+    description: `Run a command that requires interactive user input via a built-in terminal panel.
+Use this for: authentication (gh auth login, npm login, docker login), interactive setup wizards,
+git operations that open an editor, or any command that prompts for keyboard input.
+DO NOT use run_command for these — it cannot handle interactive prompts and will fail.
+DO NOT try to install missing CLIs with shell scripts; ask the user to install them.
+The user will see an approval dialog before the terminal opens. Examples:
+- gh auth login → authenticate GitHub CLI
+- npm login → authenticate npm registry
+- git commit (without -m) → opens editor for commit message`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The exact command to run (e.g. "gh auth login")' },
+        reason: { type: 'string', description: 'Why interactive input is needed — shown in the approval dialog' },
+        cwd: { type: 'string', description: 'Optional working directory relative to project root' },
+      },
+      required: ['command', 'reason'],
     },
   },
 ]
@@ -156,15 +183,40 @@ export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(
   t => t.name === 'read_file' || t.name === 'list_files',
 )
 
+export type InteractiveRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
+
+/**
+ * Executes agent tools with in-memory staging for file writes.
+ *
+ * Writes and deletes are buffered in memory — the project root on disk
+ * is never touched during the agent loop. This prevents watchers (Vite HMR,
+ * nodemon, etc.) from reacting to intermediate broken states.
+ *
+ * The HarnessOrchestrator already creates its own isolated staging workspace
+ * from the FileChange[] returned by getChanges(), so the harness always
+ * validates the correct final state regardless of disk content.
+ *
+ * run_command executes against the real projectRoot (original disk state).
+ * This is an accepted trade-off: agent self-verification runs on original
+ * files, but the harness is the authoritative validator.
+ *
+ * Lifecycle: create one instance per agent.execute() call. rollbackWrites()
+ * is always called in the finally block — it clears the buffer and is the
+ * correct cleanup path on both success and error.
+ */
 export class ToolExecutor {
-  private readonly written = new Map<string, FileChange>()
-  // Tracks original content before any agent write — for diff display and detectExternalChange
+  /** In-memory file buffer: path → content (null means deleted) */
+  private readonly buffer = new Map<string, string | null>()
+  /** Snapshot of original disk content before first write, for FileChange.before */
   private readonly originals = new Map<string, string | undefined>()
+  /** Accumulated FileChange records for getChanges() — consumed by orchestrator */
+  private readonly written = new Map<string, FileChange>()
 
   constructor(
     private readonly projectRoot: string,
     private readonly signal?: AbortSignal,
     private readonly permissionPolicy: PermissionPolicy = DEFAULT_PERMISSION_POLICY,
+    private readonly interactiveRunner?: InteractiveRunner,
   ) {}
 
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
@@ -173,7 +225,16 @@ export class ToolExecutor {
       case 'read_file':   return this.readFile(String(input.path ?? ''))
       case 'delete_file': return this.deleteFile(String(input.path ?? ''))
       case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
-      case 'run_command': return this.runCommand(String(input.command ?? ''))
+      case 'run_command': return this.runCommand(
+        String(input.command ?? ''),
+        stringOrUndefined(input.cwd),
+        stringOrUndefined(input.kind) as ValidationCommandKind | undefined,
+      )
+      case 'run_interactive_command': return this.runInteractiveCommand(
+        String(input.command ?? ''),
+        String(input.reason ?? ''),
+        stringOrUndefined(input.cwd),
+      )
       default: return `Unknown tool: ${name}`
     }
   }
@@ -182,21 +243,44 @@ export class ToolExecutor {
     return [...this.written.values()]
   }
 
+  /**
+   * Clears the in-memory buffer and all tracking maps.
+   * No disk restoration is needed because writes never reached the project root.
+   * Always called in the agent.execute() finally block.
+   */
+  rollbackWrites(): void {
+    this.buffer.clear()
+    this.written.clear()
+    this.originals.clear()
+  }
+
   private writeFile(rawPath: string, content: string): string {
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
     if (!content.trim()) return 'Error: content cannot be empty'
-    const fullPath = join(this.projectRoot, path)
-    // Record original content once — subsequent writes keep the first snapshot
+    if (path.endsWith('.py')) {
+      const syntaxHole = findPythonEmptyBlock(content)
+      if (syntaxHole) return `Error: Python syntax invalid before write: ${syntaxHole}`
+    }
+
+    // Capture original disk content once — used for FileChange.before and detectExternalChange
     if (!this.originals.has(path)) {
+      const fullPath = join(this.projectRoot, path)
       this.originals.set(path, existsSync(fullPath) ? readFileSync(fullPath, 'utf-8') : undefined)
     }
     const original = this.originals.get(path)
-    mkdirSync(dirname(fullPath), { recursive: true })
-    writeFileSync(fullPath, content, 'utf-8')
-    this.written.set(path, { path, type: original === undefined ? 'create' : 'modify', diff: content, before: original })
+
+    // Stage write in memory — projectRoot disk is never touched
+    this.buffer.set(path, content)
+    this.written.set(path, {
+      path,
+      type: original === undefined ? 'create' : 'modify',
+      diff: content,
+      before: original,
+    })
+
     return `OK: wrote ${path} (${content.split('\n').length} lines)`
   }
 
@@ -205,6 +289,15 @@ export class ToolExecutor {
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
     const permission = this.requirePermission('read', path)
     if (permission) return permission
+
+    // Buffer takes precedence — agent reads its own staged writes
+    // Non-null assertion is safe: has() guarantees the key is present
+    if (this.buffer.has(path)) {
+      const staged = this.buffer.get(path)!
+      if (staged === null) return `Error: not found — ${path} (deleted in this session)`
+      return staged.length > 8_000 ? `${staged.slice(0, 8_000)}\n...(truncated)` : staged
+    }
+
     const fullPath = join(this.projectRoot, path)
     if (!existsSync(fullPath)) return `Error: not found — ${path}`
     try {
@@ -220,55 +313,96 @@ export class ToolExecutor {
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
-    const fullPath = join(this.projectRoot, path)
-    if (!existsSync(fullPath)) return `OK: ${path} does not exist`
-    try {
-      unlinkSync(fullPath)
-      this.written.set(path, { path, type: 'delete', diff: '' })
-      return `OK: deleted ${path}`
-    } catch {
-      return `Error: cannot delete ${path}`
+
+    // If file was staged but never existed on disk, just remove from buffer
+    if (this.buffer.has(path) && this.buffer.get(path) !== null && !existsSync(join(this.projectRoot, path))) {
+      this.buffer.delete(path)
+      this.written.delete(path)
+      return `OK: ${path} does not exist`
     }
+
+    // File must exist on disk (or be staged) to record a delete
+    const fullPath = join(this.projectRoot, path)
+    if (!this.buffer.has(path) && !existsSync(fullPath)) return `OK: ${path} does not exist`
+
+    if (!this.originals.has(path)) {
+      this.originals.set(path, existsSync(fullPath) ? readFileSync(fullPath, 'utf-8') : undefined)
+    }
+
+    // Stage deletion in memory — disk file is not touched
+    this.buffer.set(path, null)
+    this.written.set(path, { path, type: 'delete', diff: '' })
+    return `OK: deleted ${path}`
   }
 
   private listFiles(rawDir: string): string {
     const dir = this.sanitizePath(rawDir) ?? '.'
     const permission = this.requirePermission('list', dir)
     if (permission) return permission
+
+    const dirNorm = dir === '.' ? '' : `${dir.replace(/\\/g, '/')}/`
+    const entries = new Map<string, boolean>() // name → isDir
+
+    // Disk entries
     const fullPath = join(this.projectRoot, dir)
-    if (!existsSync(fullPath)) return `Error: directory not found — ${dir}`
-    try {
-      const entries = readdirSync(fullPath).map(f =>
-        statSync(join(fullPath, f)).isDirectory() ? `${f}/` : f,
-      )
-      return entries.length > 0 ? entries.join('\n') : '(empty)'
-    } catch {
-      return `Error: cannot list ${dir}`
+    if (existsSync(fullPath)) {
+      try {
+        for (const f of readdirSync(fullPath)) {
+          entries.set(f, statSync(join(fullPath, f)).isDirectory())
+        }
+      } catch {
+        if (entries.size === 0) return `Error: cannot list ${dir}`
+      }
     }
+
+    // Apply buffer overlay: show staged creates, hide staged deletes
+    for (const [bufPath, content] of this.buffer) {
+      const normalized = bufPath.replace(/\\/g, '/')
+      if (!normalized.startsWith(dirNorm)) continue
+      const remainder = normalized.slice(dirNorm.length)
+      if (!remainder || remainder.includes('/')) continue // skip nested paths
+      if (content === null) {
+        entries.delete(remainder) // staged delete hides from listing
+      } else if (!entries.has(remainder)) {
+        entries.set(remainder, false) // staged create appears in listing
+      }
+    }
+
+    if (entries.size === 0) {
+      const fullExists = existsSync(fullPath)
+      return fullExists ? '(empty)' : `Error: directory not found — ${dir}`
+    }
+
+    return [...entries.entries()]
+      .map(([name, isDir]) => isDir ? `${name}/` : name)
+      .sort()
+      .join('\n')
   }
 
-  private async runCommand(command: string): Promise<string> {
+  private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {
     if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
     const permission = this.requirePermission('bash', command)
     if (permission) return permission
-    if (!isCommandAllowed(command)) {
-      return `Blocked: "${command.slice(0, 80)}" is not an allowed command. Use build, test, lint, or format commands.`
+    const normalized = normalizeCommandInvocation({ command, workspaceRoot: this.projectRoot, cwd, kind })
+    if (!normalized.ok) {
+      return `Blocked: ${normalized.reason}${normalized.hint ? ` ${normalized.hint}` : ''}`
     }
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: this.projectRoot,
-        timeout: RUN_TIMEOUT_MS,
-        signal: this.signal,
-      })
-      const out = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n')
-      return out || 'OK: command completed with no output'
-    } catch (err) {
-      const e = err as { stdout?: string; stderr?: string; killed?: boolean; code?: string; name?: string }
-      if (e.code === 'ABORT_ERR' || e.name === 'AbortError') return 'Aborted: command cancelled by session abort'
-      if (e.killed) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
-      const out = [e.stdout?.trim(), e.stderr?.trim()].filter(Boolean).join('\n')
-      return `Error:\n${out || 'command failed'}`
+    if (isGitDiffCommand(normalized.command) && !existsSync(join(normalized.cwd, '.git')) && !existsSync(join(this.projectRoot, '.git'))) {
+      return 'Info: diff indisponivel: nao e repositorio Git'
     }
+    const result = await runCommandInvocation({
+      command,
+      workspaceRoot: this.projectRoot,
+      cwd,
+      kind,
+      timeoutMs: RUN_TIMEOUT_MS,
+      signal: this.signal,
+    })
+    if (this.signal?.aborted) return 'Aborted: command cancelled by session abort'
+    if (result.timedOut) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
+    const out = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
+    if (result.exitCode !== 0) return `Error:\n${out || 'command failed'}`
+    return out || 'OK: command completed with no output'
   }
 
   private sanitizePath(raw: string): string | null {
@@ -286,6 +420,21 @@ export class ToolExecutor {
     if (action === 'deny') return `Blocked: ${key} denied for ${target}`
     if (action === 'ask') return `Approval required: ${key} ${target}`
     return null
+  }
+
+  private async runInteractiveCommand(command: string, reason: string, cwd?: string): Promise<string> {
+    if (!this.interactiveRunner) {
+      return 'Interactive commands are not available in this context. Ask the user to run this command manually: ' + command
+    }
+    const resolvedCwd = cwd ? join(this.projectRoot, cwd) : this.projectRoot
+    try {
+      const result = await this.interactiveRunner(command, resolvedCwd, reason)
+      return result.exitCode === 0
+        ? `Interactive command completed successfully (exit 0).\nOutput:\n${result.output.slice(-3_000)}`
+        : `Interactive command exited with code ${result.exitCode}.\nOutput:\n${result.output.slice(-3_000)}`
+    } catch (err) {
+      return `Interactive command failed: ${err instanceof Error ? err.message : String(err)}`
+    }
   }
 }
 
@@ -306,6 +455,36 @@ function matchPermissionPattern(target: string, pattern: string): boolean {
     .replace(/\*/g, '.*')
     .replace(/\?/g, '.')
   return new RegExp(`^${escaped}$`).test(target.replace(/\\/g, '/'))
+}
+
+function isGitDiffCommand(command: string): boolean {
+  return /^git\s+diff(\s|$)/i.test(command.trim())
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function findPythonEmptyBlock(content: string): string | null {
+  const lines = content.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#') || !trimmed.endsWith(':')) continue
+    const indent = line.match(/^\s*/)?.[0].length ?? 0
+    let sawBodyCandidate = false
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j]
+      const nextTrimmed = next.trim()
+      if (!nextTrimmed || nextTrimmed.startsWith('#')) continue
+      sawBodyCandidate = true
+      const nextIndent = next.match(/^\s*/)?.[0].length ?? 0
+      if (nextIndent <= indent) return `empty block after line ${i + 1}`
+      break
+    }
+    if (!sawBodyCandidate) return `empty block after line ${i + 1}`
+  }
+  return null
 }
 
 function isCommandAllowed(command: string): boolean {

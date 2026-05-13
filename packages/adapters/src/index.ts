@@ -1,4 +1,5 @@
 export { TypeScriptAdapter, detectStructure } from './typescript'
+export { JavaScriptAdapter } from './javascript'
 export { PythonAdapter } from './python'
 export { GoAdapter } from './go'
 export { RustAdapter } from './rust'

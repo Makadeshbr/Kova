@@ -169,6 +169,85 @@ describe('ExecutionEngine', () => {
       expect(state.currentIteration).toBe(2)
       expect(state.status).toBe('failed')
     })
+
+    it('Proof Pack vem do harness e nao de texto livre do modelo quando build falha', async () => {
+      const failing = makeFailResult()
+      failing.layers[0].command = 'python -m py_compile task_manager.py test_task_manager.py'
+      const deps = makeDeps({
+        agent: {
+          execute: vi.fn().mockResolvedValue({
+            mode: 'unified',
+            thought: '## Proof Pack\n- py_compile passed\n- unittest passed',
+            changes: [{ path: 'task_manager.py', type: 'modify' as const, diff: 'def broken(:\n' }],
+            tokensUsed: 50,
+          }),
+        },
+        orchestrator: {
+          run: vi.fn().mockResolvedValue({ harnessResult: failing, scratchpadFallback: false, mode: 'standard' }),
+        },
+      })
+      const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true }))
+
+      const state = await engine.run(makeTask('task-python', { stackAdapter: 'python', affectedFiles: ['task_manager.py'] }))
+
+      expect(state.status).toBe('failed')
+      expect(state.proofPack?.validationsRun[0]).toMatchObject({
+        kind: 'build',
+        command: 'python -m py_compile task_manager.py test_task_manager.py',
+        passed: false,
+        source: 'harness',
+      })
+      expect(state.proofPack?.finalDecision).toBe('reject')
+      expect(state.proofPack?.finalUiDecision).toBe('repair_needed')
+      expect(state.proofPack?.sourceOfTruth).toBe('harness')
+      expect(state.proofPack?.results?.passed).toBe(false)
+      expect(state.proofPack?.summary).toContain('harness')
+      expect(JSON.stringify(state.proofPack)).not.toContain('unittest passed')
+    })
+
+    it('Proof Pack sem validacao real fica needs_review e nao declara sucesso completo', async () => {
+      const noValidation: HarnessResult = {
+        passed: false,
+        score: 55,
+        layers: [{
+          name: 'rules',
+          passed: true,
+          errors: [],
+          warnings: [{ layer: 'rules', message: 'Nenhuma validacao configurada', file: '' }],
+          duration: 0,
+          durationMs: 0,
+          skipped: true,
+          skippedReason: 'no_validation_layers_configured',
+          status: 'skipped',
+        }],
+        duration: 0,
+        iteration: 1,
+        validationConfidence: 'none',
+        skippedLayers: ['build', 'typecheck', 'tests', 'rules'],
+      }
+      const deps = makeDeps({
+        agent: {
+          execute: vi.fn().mockResolvedValue({
+            mode: 'unified',
+            thought: 'All tests passed',
+            changes: [{ path: 'src/app.ts', type: 'modify' as const, diff: '+const x = 1\n' }],
+            tokensUsed: 50,
+          }),
+        },
+        orchestrator: {
+          run: vi.fn().mockResolvedValue({ harnessResult: noValidation, scratchpadFallback: false, mode: 'standard' }),
+        },
+      })
+      const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true, autoApply: true }))
+
+      const state = await engine.run(makeTask())
+
+      expect(state.status).toBe('paused')
+      expect(state.proofPack?.results?.validationConfidence).toBe('none')
+      expect(state.proofPack?.finalUiDecision).toBe('needs_review')
+      expect(state.proofPack?.validationsNotRun.map(v => v.kind)).toEqual(expect.arrayContaining(['rules', 'build', 'typecheck', 'tests']))
+      expect(state.proofPack?.residualRisk.join(' ')).toContain('Nenhuma validacao real')
+    })
   })
 
   describe('stop — timeout', () => {
@@ -329,7 +408,7 @@ describe('ExecutionEngine', () => {
       await engine.run(makeTask()) // completes, records checkpointId 'chk-42'
       await engine.abort()
 
-      expect(rollback).toHaveBeenCalledWith('chk-42')
+      expect(rollback).not.toHaveBeenCalled()
     })
   })
 
@@ -362,5 +441,62 @@ describe('ExecutionEngine', () => {
 
       await expect(engine.forceApply()).rejects.toThrow('Sem changes')
     })
+  })
+})
+
+// ─── Contract enforcement regression tests ────────────────────────────────────
+
+describe('ExecutionEngine — Contract enforcement', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('text-only response completes immediately without harness', async () => {
+    // Regression: when model replies with text and writes no files, the engine
+    // must complete immediately (status=completed) without running the harness.
+    const orchestratorSpy = vi.fn()
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'unified', thought: 'done', changes: [], tokensUsed: 10 }),
+      },
+      orchestrator: { run: orchestratorSpy } as never,
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: true }))
+    const state = await engine.run(makeTask())
+
+    expect(state.status).toBe('completed')
+    expect(orchestratorSpy).not.toHaveBeenCalled()
+  })
+
+  it('text-only response has auto_apply decision even with autoApply=false', async () => {
+    // When no files changed, completing is always safe — there is nothing to apply.
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'unified', thought: 'done', changes: [], tokensUsed: 10 }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: false }))
+    const state = await engine.run(makeTask())
+
+    expect(state.status).toBe('completed')
+    const last = state.iterationHistory.at(-1)
+    expect(last?.decision.decision).toBe('auto_apply')
+  })
+
+  it('max_files_changed violation leads to reject (agent-fixable)', async () => {
+    // Low-impact task allows 6 files. Model changes 8 → contract violation → reject.
+    const bigChange = Array.from({ length: 8 }, (_, i) => ({
+      path: `src/file${i}.ts`, type: 'create' as const, diff: 'const x = 1',
+    }))
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'code', thought: '', changes: bigChange, tokensUsed: 100 }),
+      },
+    })
+    const task = makeTask('t1', { impact: 'low', stackAdapter: 'typescript' })  // maxFilesChanged=6
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: false }))
+    const state = await engine.run(task)
+
+    const last = state.iterationHistory.at(-1)
+    expect(last?.decision.decision).toBe('reject')
+    expect(last?.decision.score).toBeLessThan(70)
   })
 })

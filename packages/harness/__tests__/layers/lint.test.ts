@@ -1,24 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('node:child_process', () => ({ exec: vi.fn() }))
+vi.mock('@kova/shared', async importOriginal => {
+  const actual = await importOriginal<typeof import('@kova/shared')>()
+  return { ...actual, runCommandInvocation: vi.fn() }
+})
 
-import { exec } from 'node:child_process'
+import { runCommandInvocation } from '@kova/shared'
 import { runLintLayer } from '../../src/layers/lint'
 
-const mockExec = vi.mocked(exec)
-type ExecCb = (err: Error | null, stdout: string, stderr: string) => void
+const mockRun = vi.mocked(runCommandInvocation)
+
+function commandResult(overrides: Partial<Awaited<ReturnType<typeof runCommandInvocation>>> = {}) {
+  return {
+    command: 'eslint .',
+    cwd: '/tmp',
+    kind: 'lint' as const,
+    stdout: '',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 5,
+    startedAt: new Date().toISOString(),
+    timedOut: false,
+    ...overrides,
+  }
+}
 
 function mockSuccess() {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    ;(args[args.length - 1] as ExecCb)(null, '', '')
-  })
+  mockRun.mockResolvedValue(commandResult())
 }
 
 function mockFailure(stdout: string) {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    const err = Object.assign(new Error('Lint failed'), { code: 1, killed: false, stdout })
-    ;(args[args.length - 1] as ExecCb)(err, stdout, '')
-  })
+  mockRun.mockResolvedValue(commandResult({ exitCode: 1, stdout }))
 }
 
 const ESLINT_OUTPUT = [
@@ -47,12 +59,12 @@ describe('runLintLayer', () => {
   })
 
   it('deve capturar o nome da regra entre colchetes', async () => {
-    mockFailure("src/a.ts:1:1: error Some problem [my-rule]")
+    mockFailure('src/a.ts:1:1: error Some problem [my-rule]')
     const result = await runLintLayer({ command: 'eslint .', projectRoot: '/tmp' })
     expect(result.errors[0].rule).toBe('my-rule')
   })
 
-  it('deve retornar erro genérico quando output não tem file:line', async () => {
+  it('deve retornar erro generico quando output nao tem file:line', async () => {
     mockFailure('Lint config error: cannot read config file')
     const result = await runLintLayer({ command: 'eslint .', projectRoot: '/tmp' })
     expect(result.passed).toBe(false)
@@ -61,10 +73,7 @@ describe('runLintLayer', () => {
   })
 
   it('deve retornar erro quando timeout', async () => {
-    mockExec.mockImplementation((...args: unknown[]) => {
-      const err = Object.assign(new Error('timeout'), { killed: true, stdout: '' })
-      ;(args[args.length - 1] as ExecCb)(err, '', '')
-    })
+    mockRun.mockResolvedValue(commandResult({ exitCode: 1, timedOut: true }))
     const result = await runLintLayer({ command: 'eslint .', projectRoot: '/tmp', timeoutMs: 5000 })
     expect(result.passed).toBe(false)
     expect(result.errors[0].message).toContain('5000')

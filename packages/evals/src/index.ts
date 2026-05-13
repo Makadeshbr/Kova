@@ -1,7 +1,16 @@
-import type { FileChange, HarnessResult, TaskDefinition } from '@kova/shared'
-import { createExecutionContract, validateContractChanges } from '@kova/execution'
+import type { FileChange, HarnessResult, TaskDefinition, ExecutionState } from '@kova/shared'
+import { createExecutionContract, validateContractChanges, ExecutionEngine } from '@kova/execution'
+import type { ExecutionDependencies, ExecutionEngineOptions } from '@kova/execution'
 import { calculateScore } from '@kova/decision'
 import { runReviewGate } from '@kova/decision'
+
+export { MockAgentProvider } from './mock-provider'
+export type { MockTurn } from './mock-provider'
+export { ALL_LIVE_CASES, buildDeps, setupProjectForCase, mocksForCase } from './live-cases'
+export { DOGFOOD_CASES, setupDogfoodProject } from './dogfood-cases'
+export { readDogfoodProviderConfig, runRealDogfood } from './real-dogfood'
+export { validateDogfoodOutput } from './dogfood-validator'
+export type { DogfoodExpectations, DogfoodViolation, DogfoodViolationRule, FileChangeRef } from './dogfood-validator'
 
 export interface EvalCase {
   id: string
@@ -173,6 +182,78 @@ export const BASE_EVALS: EvalCase[] = [
     expectedRules: ['dependency'],
   },
 ]
+
+// ─── Live Eval ────────────────────────────────────────────────────────────────
+// Runs the full ExecutionEngine loop with real dependencies injected externally.
+// Use this for integration evals where you want to verify the whole pipeline.
+
+export type LiveEvalDependencies = ExecutionDependencies
+
+export interface LiveEvalCase {
+  id: string
+  description: string
+  task: TaskDefinition
+  projectRoot: string
+  /** Maximum iterations allowed (default 3) */
+  maxIterations?: number
+  /** Expected terminal status */
+  expectedStatus: ExecutionState['status']
+  /** Expected decision at last iteration */
+  expectedDecision?: 'auto_apply' | 'suggest' | 'reject' | 'human_required'
+  /** If true, skip applying changes after decision */
+  dryRun?: boolean
+}
+
+export interface LiveEvalResult {
+  id: string
+  passed: boolean
+  actualStatus: ExecutionState['status']
+  actualDecision?: string
+  iterations: number
+  totalTokens: number
+  finalScore: number
+  notes: string[]
+}
+
+export async function runLiveEval(
+  testCase: LiveEvalCase,
+  deps: LiveEvalDependencies,
+  options?: Partial<Pick<ExecutionEngineOptions, 'onEvent' | 'onStateChange'>>,
+): Promise<LiveEvalResult> {
+  const engine = new ExecutionEngine(deps, {
+    projectRoot: testCase.projectRoot,
+    maxIterations: testCase.maxIterations ?? 3,
+    autoApply: !testCase.dryRun,
+    skipPlan: true,
+    onStateChange: options?.onStateChange,
+    onEvent: options?.onEvent,
+  })
+
+  const state = await engine.run(testCase.task)
+  const last = state.iterationHistory.at(-1)
+  const actualDecision = last?.decision.decision
+  const finalScore = last?.decision.score ?? last?.harnessResult.score ?? 0
+
+  const statusOk = state.status === testCase.expectedStatus
+  const decisionOk = !testCase.expectedDecision || actualDecision === testCase.expectedDecision
+  const passed = statusOk && decisionOk
+
+  const notes: string[] = []
+  if (!statusOk) notes.push(`Expected status '${testCase.expectedStatus}', got '${state.status}'`)
+  if (!decisionOk) notes.push(`Expected decision '${testCase.expectedDecision}', got '${actualDecision}'`)
+  if (last?.decision.reason) notes.push(`Decision reason: ${last.decision.reason}`)
+
+  return {
+    id: testCase.id,
+    passed,
+    actualStatus: state.status,
+    actualDecision,
+    iterations: state.iterationHistory.length,
+    totalTokens: state.totalTokens,
+    finalScore,
+    notes,
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

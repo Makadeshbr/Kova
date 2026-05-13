@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react'
 import type { ExecutionState } from '../types'
 import type { SessionUsage } from '../App'
 import { ProjectFiles } from './ProjectFiles'
+import { MemoryPanel } from './MemoryPanel'
 
 interface Props {
   executionState: ExecutionState | null
@@ -169,6 +170,8 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
           ))}
         </div>
       )}
+
+      <MemoryPanel projectRoot={projectRoot} refreshKey={refreshKey} />
 
       {totalTokens > 0 && (
         <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>

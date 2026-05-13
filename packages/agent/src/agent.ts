@@ -1,6 +1,7 @@
 import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage } from '@kova/shared'
 import type { AgentProvider, LLMResponse } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
+import type { InteractiveRunner } from './tools'
 import { MODE_PROMPTS } from './modes'
 
 const MAX_TURNS = 10
@@ -30,8 +31,12 @@ export class Agent {
       history?: AgentMessage[]
       signal?: AbortSignal
       onToken?: (token: string) => void
+      onReasoningStart?: () => void
+      onReasoningDelta?: (delta: string) => void
+      onReasoningEnd?: () => void
       onToolCall?: (name: string, input: Record<string, unknown>) => void
       onToolResult?: (name: string, result: string) => void
+      interactiveRunner?: InteractiveRunner
     }
   ): Promise<AgentOutput> {
     const tools = WRITE_MODES.has(mode) ? AGENT_TOOLS : READ_ONLY_TOOLS
@@ -39,6 +44,7 @@ export class Agent {
       this.projectRoot,
       options?.signal,
       WRITE_MODES.has(mode) ? undefined : READ_ONLY_PERMISSION_POLICY,
+      options?.interactiveRunner,
     )
     const caps = this.provider.capabilities()
     const system = buildSystemPrompt(mode, task, caps.supportsToolCalls)
@@ -68,16 +74,21 @@ export class Agent {
         system, tools, executor, maxTurns: MAX_TURNS,
         signal: composedSignal,
         onToken: options?.onToken,
+        onReasoningStart: options?.onReasoningStart,
+        onReasoningDelta: options?.onReasoningDelta,
+        onReasoningEnd: options?.onReasoningEnd,
         onToolCall: options?.onToolCall,
         onToolResult: options?.onToolResult,
       })
     } catch (err) {
+      executor.rollbackWrites()
       if (timeoutController.signal.aborted) {
         throw new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 60_000} minutes — LLM may be overloaded`)
       }
       throw err
     } finally {
       clearTimeout(timeoutId)
+      executor.rollbackWrites()
     }
 
     return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed }

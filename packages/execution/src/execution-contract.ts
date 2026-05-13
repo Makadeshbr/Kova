@@ -7,9 +7,11 @@ const DEFAULT_FORBIDDEN_PATHS = [
   '.git/**',
 ]
 
+// Files that must NEVER be created or modified — secrets, infra, generated locks.
+// Unlike other safe zones, these block even new-file creation.
+const CREDENTIAL_PATHS = ['.env', '.env.*']
+
 const DEFAULT_SAFE_ZONES = [
-  '.env',
-  '.env.*',
   '.github/**',
   'docker-compose*',
   'package.json',
@@ -47,7 +49,15 @@ export function createExecutionContract(task: TaskDefinition): ExecutionContract
     forbiddenPaths: DEFAULT_FORBIDDEN_PATHS,
     safeZones: DEFAULT_SAFE_ZONES,
     allowedCommands: [],
-    forbiddenCommands: ['rm -rf', 'git reset --hard', 'git clean -f', 'git push', 'sudo ', 'curl |', 'wget |'],
+    forbiddenCommands: [
+      // Destructive / irreversible
+      'rm -rf', 'git reset --hard', 'git clean -f', 'git push', 'sudo ',
+      'curl |', 'wget |', 'powershell iex',
+      // Dependency installation — requires explicit user approval; agent must not add deps silently
+      'npm install', 'npm i ', 'pnpm add', 'pnpm install', 'yarn add',
+      'pip install', 'pip3 install', 'poetry add', 'cargo add',
+      'go get', 'gem install', 'composer require', 'apt-get install', 'brew install',
+    ],
     validationCriteria: task.validationCriteria,
     requiresTests: task.type === 'feature' || task.type === 'bugfix' || task.type === 'refactor',
     maxFilesChanged: task.impact === 'high' ? 20 : task.impact === 'medium' ? 12 : 6,
@@ -63,7 +73,7 @@ export function validateContractChanges(
 
   if (changes.length > contract.maxFilesChanged) {
     violations.push({
-      severity: 'medium',
+      severity: 'high',  // 'medium' was too lenient — harness was passing with this violation
       message: `Patch altera ${changes.length} arquivos; contrato permite ${contract.maxFilesChanged}`,
       file: '',
       rule: 'max_files_changed',
@@ -82,8 +92,18 @@ export function validateContractChanges(
       continue
     }
 
-    // Safe zones: only block MODIFICATIONS, not new file creation
-    // New projects legitimately need to create package.json, go.mod, etc.
+    // Credential files: block even creation — .env files must never hold secrets committed via agent
+    if (matchesAny(change.path, CREDENTIAL_PATHS)) {
+      violations.push({
+        severity: 'high',
+        message: `${change.path} é arquivo de credenciais — criação e modificação exigem revisão humana`,
+        file: change.path,
+        rule: 'safe_zone',
+      })
+      continue
+    }
+
+    // Other safe zones: block modifications but allow creation (e.g. package.json in new projects)
     if (change.type !== 'create' && matchesAny(change.path, contract.safeZones)) {
       violations.push({
         severity: 'high',
@@ -132,7 +152,6 @@ export function contractViolationsToHarnessResult(
     rule: v.rule,
   }))
 
-  // Only hard-fail (score=0) for truly critical violations (forbidden paths)
   const hasCritical = violations.some(v => v.severity === 'critical')
   const hasHigh = violations.some(v => v.severity === 'high')
   const score = hasCritical ? 0 : hasHigh ? 45 : 70
@@ -140,6 +159,9 @@ export function contractViolationsToHarnessResult(
   return {
     passed: !hasCritical && !hasHigh,
     score,
+    // 'partial' not 'none': the contract DID run real validation (rules/scope/stack).
+    // This prevents decide() from capping score at 75 and returning 'suggest' instead of 'reject'.
+    validationConfidence: 'partial',
     duration: 0,
     iteration,
     layers: [{

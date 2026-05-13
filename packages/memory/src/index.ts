@@ -1,5 +1,6 @@
 export { MemorySystem } from './memory-system'
 export { promoteLearnings } from './promotion'
 export { pruneLearnings } from './anti-drift'
-export { readLearnings, writeLearnings } from './storage'
-export { classifyLearning } from './learning-gate'
+export { readLearnings, writeLearnings, readPendingLearnings, appendPendingLearning, clearPendingLearnings } from './storage'
+export type { PendingLearning } from './storage'
+export { classifyLearning, descriptionKey } from './learning-gate'

@@ -155,5 +155,137 @@ describe('Provider round-trip: tool_use_id preservation', () => {
       expect(secondBody.tools).toBeDefined()
       expect(secondBody.tools.length).toBeGreaterThan(0)
     })
+
+    it('deve preservar reasoning_content do DeepSeek entre turnos', async () => {
+      const deepSeekToolCall = {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: null,
+              reasoning_content: '<think>Pensando...</think>',
+              tool_calls: [{ id: 'call1', type: 'function', function: { name: 'list_files', arguments: '{"dir":"."}' } }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { total_tokens: 200 },
+        }),
+        text: async () => '',
+      }
+      fetchMock
+        .mockResolvedValueOnce(deepSeekToolCall)
+        .mockResolvedValueOnce(openAiStop('Done.'))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'deepseek-r1' })
+      await provider.runAgentLoop(
+        [{ role: 'user', content: 'list files' }],
+        { system: 'sys', tools: AGENT_TOOLS, executor },
+      )
+
+      // Second call must include assistant message WITH reasoning_content preserved
+      const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+      const assistantMsg = secondBody.messages.find((m: { role: string }) => m.role === 'assistant')
+      expect(assistantMsg?.reasoning_content).toBe('<think>Pensando...</think>')
+    })
+
+    it('propaga AbortSignal corretamente durante multi-turn', async () => {
+      const controller = new AbortController()
+      fetchMock.mockImplementation(async () => {
+        controller.abort()
+        throw new Error('AbortError')
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot, controller.signal)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+
+      await expect(
+        provider.runAgentLoop(
+          [{ role: 'user', content: 'do something' }],
+          { system: 'sys', tools: AGENT_TOOLS, executor, signal: controller.signal },
+        ),
+      ).rejects.toThrow()
+    })
+
+    it('reporta tokensUsed acumulados de múltiplos turnos', async () => {
+      fetchMock
+        .mockResolvedValueOnce(openAiToolCall('c1', 'list_files', { dir: '.' }))
+        .mockResolvedValueOnce(openAiStop('Done.'))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'list files' }],
+        { system: 'sys', tools: AGENT_TOOLS, executor },
+      )
+
+      // 120 tokens from turn 1 + 60 from turn 2 = 180
+      expect(result.tokensUsed).toBe(180)
+    })
+  })
+
+  describe('Error normalization', () => {
+    it('OpenAI: lança erro quando fetch retorna 401', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 401, text: async () => 'Unauthorized' })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toThrow()
+    })
+
+    it('OpenAI: lança erro quando fetch retorna 429', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'Rate limit exceeded' })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toThrow()
+    })
+
+    it('Anthropic: 401 vira KovaProviderError provider_auth nao recuperavel', async () => {
+      mockCreate.mockRejectedValueOnce(new Error('401 {"error":{"type":"authentication_error"}}'))
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new AnthropicProvider({ apiKey: 'bad-key' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toMatchObject({ code: 'provider_auth', recoverable: false, provider: 'anthropic' })
+    })
+
+    it('Anthropic: 429 vira KovaProviderError provider_rate_limited recuperavel', async () => {
+      mockCreate.mockRejectedValueOnce(new Error('429 {"error":{"type":"rate_limit_error"}}'))
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toMatchObject({ code: 'provider_rate_limited', recoverable: true, provider: 'anthropic' })
+    })
+
+    it('Anthropic: SDK error com .status sem codigo na mensagem e normalizado corretamente', async () => {
+      const sdkErr = Object.assign(new Error('Too Many Requests'), { status: 429 })
+      mockCreate.mockRejectedValueOnce(sdkErr)
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toMatchObject({ code: 'provider_rate_limited', recoverable: true })
+    })
+
+    it('Anthropic: 404 model not found vira KovaProviderError recuperavel', async () => {
+      mockCreate.mockRejectedValueOnce(new Error('404 {"error":{"type":"not_found_error","message":"model not found"}}'))
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      await expect(
+        provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
+      ).rejects.toMatchObject({ code: 'provider_model_not_found', recoverable: true })
+    })
   })
 })

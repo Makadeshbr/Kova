@@ -6,9 +6,11 @@ import type {
   HarnessProjectConfig,
   InstructionFile,
   ProjectFileReference,
+  ProjectKind,
   ProjectProfile,
   ProjectRisk,
   ProjectSignal,
+  ProjectTrait,
   ProjectValidation,
   ProjectWorkspace,
 } from '@kova/shared'
@@ -111,6 +113,8 @@ type CommandBuckets = {
   typecheck: CommandCandidate[]
 }
 
+type ValidationCommandKind = keyof CommandBuckets
+
 export function findProjectRoot(startDir: string): string {
   let current = resolve(startDir)
   while (true) {
@@ -125,7 +129,7 @@ export function buildProjectProfile(projectRoot: string): ProjectProfile {
   const root = resolve(projectRoot)
   const files = listProjectFiles(root)
   const signals = collectSignals(root, files)
-  const languages = rankDetectedItems(signals.filter(s => s.stackHint !== 'container'), 'language')
+  const languages = rankDetectedItems(signals.filter(isLanguageSignal), 'language')
   const packageManagers = detectPackageManagers(files)
   const frameworks = detectFrameworks(root, files)
   const rootCommands = detectCommands(root, files)
@@ -137,9 +141,13 @@ export function buildProjectProfile(projectRoot: string): ProjectProfile {
   const instructionFiles = detectFileReferences(files, 'instruction')
   const sensitiveFiles = detectFileReferences(files, 'sensitive')
   const validations = detectValidations(commands, workspaces)
+  const projectKind = detectProjectKind(files, languages, workspaces)
+  const traits = detectProjectTraits(languages, validations, ci, containers, taskRunners, sensitiveFiles)
 
   return {
     root,
+    projectKind,
+    traits,
     languages,
     frameworks,
     packageManagers,
@@ -158,6 +166,7 @@ export function buildProjectProfile(projectRoot: string): ProjectProfile {
     entrypoints: detectEntrypoints(files),
     architectureHints: detectArchitectureHints(files),
     signals,
+    observations: detectObservations(files, projectKind, traits, languages, workspaces, validations, sensitiveFiles),
     confidence: calculateConfidence(signals, commands),
   }
 }
@@ -165,9 +174,21 @@ export function buildProjectProfile(projectRoot: string): ProjectProfile {
 export function loadProjectInstructions(projectRoot: string): InstructionFile[] {
   const root = resolve(projectRoot)
   const files: InstructionFile[] = []
+  const seenResolved = new Set<string>()
   const add = (path: string, priority: number): void => {
     const fullPath = join(root, path)
     if (!existsSync(fullPath)) return
+    // Use device+inode as a stable identity key: two paths that resolve to the same
+    // physical file on a case-insensitive filesystem (Windows/macOS) share the same key.
+    let inodeKey: string
+    try {
+      const st = statSync(fullPath)
+      inodeKey = `${st.dev}:${st.ino}`
+    } catch {
+      inodeKey = resolve(fullPath)
+    }
+    if (seenResolved.has(inodeKey)) return
+    seenResolved.add(inodeKey)
     try {
       files.push({ path, priority, content: readFileSync(fullPath, 'utf-8') })
     } catch {
@@ -178,7 +199,10 @@ export function loadProjectInstructions(projectRoot: string): InstructionFile[] 
   add('KOVA.md', 100)
   add('AGENTS.md', 90)
   add('CLAUDE.md', 80)
+  // Check all capitalisation variants — Linux/Mac filesystems are case-sensitive
   add('RULES.md', 70)
+  add('Rules.md', 70)
+  add('rules.md', 70)
 
   const rulesDir = join(root, '.kova', 'rules')
   if (existsSync(rulesDir)) {
@@ -279,6 +303,10 @@ function rankDetectedItems(signals: ProjectSignal[], sourcePrefix: string): Dete
     .sort((a, b) => b.confidence - a.confidence)
 }
 
+function isLanguageSignal(signal: ProjectSignal): boolean {
+  return signal.kind === 'manifest' || signal.kind === 'source_file'
+}
+
 function detectPackageManagers(files: string[]): DetectedItem[] {
   const items: DetectedItem[] = []
   for (const [file, name] of Object.entries(LOCKFILES)) {
@@ -344,7 +372,7 @@ function detectWorkspaces(root: string, files: string[]): ProjectWorkspace[] {
         name: pkg?.name ?? path,
         path,
         kind: rootDeclaresWorkspaces ? 'workspace' : 'module',
-        languages: rankDetectedItems(scopedSignals.filter(s => s.stackHint !== 'container'), 'language'),
+        languages: rankDetectedItems(scopedSignals.filter(isLanguageSignal), 'language'),
         frameworks: detectFrameworks(join(root, path), scopedFiles),
         packageManagers: detectPackageManagers(scopedFiles).length > 0
           ? detectPackageManagers(scopedFiles)
@@ -434,9 +462,31 @@ function detectCommands(root: string, files: string[], scope = ''): CommandBucke
     add(test, 'dotnet test', 'adapter_default', 0.82)
   }
   if (scopedFiles.includes('Makefile')) {
-    add(build, 'make build', 'makefile', 0.75)
-    add(test, 'make test', 'makefile', 0.75)
-    add(lint, 'make lint', 'makefile', 0.65)
+    const targets = parseMakeTargets(root, scope)
+    if (targets.has('build')) add(build, 'make build', 'makefile', 0.78)
+    if (targets.has('test')) add(test, 'make test', 'makefile', 0.78)
+    if (targets.has('lint')) add(lint, 'make lint', 'makefile', 0.68)
+    if (targets.has('typecheck')) add(typecheck, 'make typecheck', 'makefile', 0.68)
+  }
+  if (scopedFiles.includes('Taskfile.yml') || scopedFiles.includes('Taskfile.yaml')) {
+    const tasks = parseNamedTasks(root, scope, scopedFiles.includes('Taskfile.yml') ? 'Taskfile.yml' : 'Taskfile.yaml')
+    if (tasks.has('build')) add(build, 'task build', 'taskfile', 0.72)
+    if (tasks.has('test')) add(test, 'task test', 'taskfile', 0.72)
+    if (tasks.has('lint')) add(lint, 'task lint', 'taskfile', 0.62)
+    if (tasks.has('typecheck')) add(typecheck, 'task typecheck', 'taskfile', 0.62)
+  }
+  if (scopedFiles.includes('justfile')) {
+    const recipes = parseJustRecipes(root, scope)
+    if (recipes.has('build')) add(build, 'just build', 'taskfile', 0.72)
+    if (recipes.has('test')) add(test, 'just test', 'taskfile', 0.72)
+    if (recipes.has('lint')) add(lint, 'just lint', 'taskfile', 0.62)
+    if (recipes.has('typecheck')) add(typecheck, 'just typecheck', 'taskfile', 0.62)
+  }
+  for (const candidate of detectCiCommands(root, scopedFiles, scope)) {
+    add(bucketForCommand(candidate.kind, { build, test, lint, typecheck }), candidate.command, 'ci', candidate.confidence)
+  }
+  for (const candidate of detectReadmeCommands(root, scopedFiles, scope)) {
+    add(bucketForCommand(candidate.kind, { build, test, lint, typecheck }), candidate.command, 'readme', candidate.confidence)
   }
 
   return { build, test, lint, typecheck }
@@ -454,6 +504,159 @@ function detectFileReferences(files: string[], kind: ProjectFileReference['kind'
     })
     .sort()
     .map(path => ({ path, kind, confidence: kind === 'sensitive' ? 0.95 : 0.85 }))
+}
+
+function detectProjectKind(
+  files: string[],
+  languages: DetectedItem[],
+  workspaces: ProjectWorkspace[],
+): ProjectKind {
+  if (files.length === 0) return 'empty'
+  if (workspaces.length > 0) return 'monorepo'
+  if (languages.length === 0) return 'generic_unknown'
+  return 'existing'
+}
+
+function detectProjectTraits(
+  languages: DetectedItem[],
+  validations: ProjectValidation[],
+  ci: ProjectFileReference[],
+  containers: ProjectFileReference[],
+  taskRunners: ProjectFileReference[],
+  sensitiveFiles: ProjectFileReference[],
+): ProjectTrait[] {
+  const traits: ProjectTrait[] = []
+  if (languages.length > 1) traits.push('multi_stack')
+  if (ci.length > 0) traits.push('has_ci')
+  if (containers.length > 0) traits.push('has_containers')
+  if (taskRunners.length > 0) traits.push('has_task_runners')
+  if (sensitiveFiles.length > 0) traits.push('has_sensitive_files')
+  const available = validations.filter(item => item.available)
+  if (available.length === 0) traits.push('no_validation')
+  else {
+    traits.push('has_validation')
+    if (!available.some(item => item.kind === 'test') || !available.some(item => item.kind === 'build')) {
+      traits.push('partial_validation')
+    }
+  }
+  return traits
+}
+
+function detectObservations(
+  files: string[],
+  projectKind: ProjectKind,
+  traits: ProjectTrait[],
+  languages: DetectedItem[],
+  workspaces: ProjectWorkspace[],
+  validations: ProjectValidation[],
+  sensitiveFiles: ProjectFileReference[],
+): string[] {
+  const observations: string[] = []
+  if (projectKind === 'empty') observations.push('Project is empty; no stack or validation command was inferred.')
+  if (projectKind === 'generic_unknown') observations.push('Project files exist, but no known language manifest or source signal was strong enough.')
+  if (traits.includes('multi_stack')) observations.push(`Multiple languages detected: ${languages.map(item => item.name).join(', ')}.`)
+  if (projectKind === 'monorepo') observations.push(`${workspaces.length} workspace/module candidate(s) detected.`)
+  if (validations.filter(item => item.available).length === 0) observations.push('No runnable validation command was detected.')
+  if (sensitiveFiles.length > 0) observations.push(`${sensitiveFiles.length} sensitive-looking file(s) detected and excluded from context reads.`)
+  if (files.some(file => /^\.github\/workflows\/.+\.ya?ml$/.test(file) || CI_FILES.includes(file))) observations.push('CI configuration detected.')
+  if (files.some(file => CONTAINER_FILES.includes(basename(file)) || CONTAINER_FILES.includes(file))) observations.push('Container configuration detected.')
+  return observations
+}
+
+function bucketForCommand(kind: ValidationCommandKind, buckets: CommandBuckets): CommandCandidate[] {
+  return buckets[kind]
+}
+
+function parseMakeTargets(root: string, scope: string): Set<string> {
+  const content = readSmallTextFile(join(root, scope, 'Makefile'))
+  const targets = new Set<string>()
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^([A-Za-z0-9_.-]+)\s*:(?![=])/.exec(line)
+    if (match) targets.add(match[1])
+  }
+  return targets
+}
+
+function parseNamedTasks(root: string, scope: string, file: string): Set<string> {
+  const content = readSmallTextFile(join(root, scope, file))
+  const tasks = new Set<string>()
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^\s{2}([A-Za-z0-9_.-]+)\s*:/.exec(line)
+    if (match) tasks.add(match[1])
+  }
+  return tasks
+}
+
+function parseJustRecipes(root: string, scope: string): Set<string> {
+  const content = readSmallTextFile(join(root, scope, 'justfile'))
+  const recipes = new Set<string>()
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^([A-Za-z0-9_.-]+)\s*:/.exec(line)
+    if (match) recipes.add(match[1])
+  }
+  return recipes
+}
+
+function detectCiCommands(
+  root: string,
+  files: string[],
+  scope: string,
+): Array<{ kind: ValidationCommandKind; command: string; confidence: number }> {
+  const candidates: Array<{ kind: ValidationCommandKind; command: string; confidence: number }> = []
+  for (const file of files.filter(file => CI_FILES.includes(file) || /^\.github\/workflows\/.+\.ya?ml$/.test(file))) {
+    for (const command of extractCommandsFromText(readSmallTextFile(join(root, scope, file)))) {
+      const kind = classifyValidationCommand(command)
+      if (kind) candidates.push({ kind, command, confidence: 0.65 })
+    }
+  }
+  return candidates
+}
+
+function detectReadmeCommands(
+  root: string,
+  files: string[],
+  scope: string,
+): Array<{ kind: ValidationCommandKind; command: string; confidence: number }> {
+  const candidates: Array<{ kind: ValidationCommandKind; command: string; confidence: number }> = []
+  for (const file of files.filter(file => /^readme(\.[a-z]+)?$/i.test(basename(file)))) {
+    for (const command of extractCommandsFromText(readSmallTextFile(join(root, scope, file)))) {
+      const kind = classifyValidationCommand(command)
+      if (kind) candidates.push({ kind, command, confidence: 0.45 })
+    }
+  }
+  return candidates
+}
+
+function extractCommandsFromText(content: string): string[] {
+  const commands = new Set<string>()
+  const add = (text: string): void => {
+    const command = text
+      .replace(/^[-*]\s+/, '')
+      .replace(/^run:\s*/, '')
+      .replace(/^`+|`+$/g, '')
+      .trim()
+    if (!command || command.startsWith('#')) return
+    if (/^(npm|pnpm|yarn|bun|go|cargo|pytest|ruff|mvn|gradle|\.\/gradlew|dotnet|make|task|just|python)\b/.test(command)) {
+      commands.add(command)
+    }
+  }
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    add(line)
+    for (const match of line.matchAll(/`([^`]+)`/g)) {
+      add(match[1])
+    }
+  }
+  return [...commands]
+}
+
+function classifyValidationCommand(command: string): ValidationCommandKind | null {
+  const text = command.toLowerCase()
+  if (/\b(test|pytest|unittest|vitest|jest|go test|cargo test|dotnet test|mvn test)\b/.test(text)) return 'test'
+  if (/\b(lint|ruff check|clippy|vet)\b/.test(text)) return 'lint'
+  if (/\b(typecheck|type-check|tsc --noemit|cargo check)\b/.test(text)) return 'typecheck'
+  if (/\b(build|compile|mvn compile|go build|cargo build|dotnet build)\b/.test(text)) return 'build'
+  return null
 }
 
 function detectValidations(commands: CommandBuckets, workspaces: ProjectWorkspace[]): ProjectValidation[] {
@@ -578,6 +781,15 @@ function readPackageJson(root: string, scope = ''): PackageJson | null {
     return JSON.parse(readFileSync(path, 'utf-8')) as PackageJson
   } catch {
     return null
+  }
+}
+
+function readSmallTextFile(path: string): string {
+  try {
+    if (!existsSync(path) || statSync(path).size > 300_000) return ''
+    return readFileSync(path, 'utf-8')
+  } catch {
+    return ''
   }
 }
 

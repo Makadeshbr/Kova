@@ -76,6 +76,29 @@ describe('runPipeline — validationConfidence', () => {
   })
 })
 
+describe('runPipeline - abort propagation', () => {
+  it('throws AbortError before running the next layer when signal is aborted', async () => {
+    const controller = new AbortController()
+    const first = passedLayer('build')
+    const second = passedLayer('tests')
+    vi.mocked(first.run).mockImplementation(async () => {
+      controller.abort()
+      return {
+        name: 'build',
+        passed: true,
+        errors: [],
+        warnings: [],
+        duration: 1,
+        skipped: false,
+      }
+    })
+
+    await expect(runPipeline([first, second], { ...cfg, signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' })
+    expect(second.run).not.toHaveBeenCalled()
+  })
+})
+
 describe('runPipeline — skippedLayers metadata', () => {
   it('skippedLayers is undefined when nothing was skipped', async () => {
     const result = await runPipeline([passedLayer('build'), passedLayer('tests')], cfg)
@@ -100,9 +123,75 @@ describe('runPipeline — no-validation synthetic layer', () => {
     expect(syntheticRule?.warnings.length).toBeGreaterThan(0)
   })
 
-  it('score is 75 (suggest threshold) when no real layers ran', async () => {
+  it('score is capped low when no real layers ran', async () => {
     const result = await runPipeline([], cfg)
-    // 75 triggers 'suggest' in decide() — never auto_apply for unvalidated code
-    expect(result.score).toBe(75)
+    expect(result.score).toBeLessThan(70)
+    expect(result.evidenceScore?.validationConfidence).toBe('none')
+  })
+})
+
+describe('runPipeline - Evidence Score', () => {
+  it('returns 100 only for full passing validation without risk penalties', async () => {
+    const result = await runPipeline([
+      passedLayer('build'),
+      passedLayer('tests'),
+      passedLayer('security'),
+      passedLayer('lint'),
+      passedLayer('rules'),
+    ], cfg)
+
+    expect(result.score).toBe(100)
+    expect(result.evidenceScore?.validation.executedLayers).toEqual(['build', 'tests', 'security', 'lint', 'rules'])
+    expect(result.evidenceScore?.blockers).toEqual([])
+  })
+
+  it('caps partial validation below auto-apply even when layers pass', async () => {
+    const result = await runPipeline([passedLayer('build')], cfg)
+
+    expect(result.validationConfidence).toBe('partial')
+    expect(result.score).toBeLessThan(90)
+    expect(result.evidenceScore?.completeness.reasons).toContain('sem teste executado')
+  })
+
+  it('applies risk penalties for sensitive public-contract changes', async () => {
+    const result = await runPipeline([
+      passedLayer('build'),
+      passedLayer('tests'),
+      passedLayer('security'),
+    ], {
+      ...cfg,
+      changes: [
+        { path: 'src/auth/routes.ts', type: 'modify', diff: '+export const route = 1\n' },
+        { path: 'package.json', type: 'modify', diff: '+{"name":"x"}\n' },
+      ],
+    })
+
+    expect(result.evidenceScore?.risk.riskLevel).toBe('high')
+    expect(result.evidenceScore?.risk.reasons).toEqual(expect.arrayContaining([
+      'area sensivel alterada',
+      'contrato publico/configuracao alterado',
+    ]))
+    expect(result.score).toBeLessThan(100)
+  })
+
+  it('failed typecheck blocks success and caps score', async () => {
+    const failedTypecheck: LayerDef = {
+      name: 'typecheck',
+      hardFail: false,
+      run: vi.fn().mockResolvedValue({
+        name: 'typecheck',
+        passed: false,
+        errors: [{ layer: 'typecheck', type: 'syntax', severity: 'high', fixable: false, message: 'bad type', humanMessage: 'bad type', file: 'src/a.ts' }],
+        warnings: [],
+        duration: 3,
+        skipped: false,
+      } satisfies LayerResult),
+    }
+
+    const result = await runPipeline([passedLayer('build'), failedTypecheck, passedLayer('tests')], cfg)
+
+    expect(result.passed).toBe(false)
+    expect(result.score).toBeLessThanOrEqual(55)
+    expect(result.evidenceScore?.blockers).toContain('typecheck failed')
   })
 })

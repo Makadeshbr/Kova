@@ -58,8 +58,25 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
           if (lastPending.type === 'command') lastPending.detail = e.message
         }
       }
+      else if (e.type === 'provider_session_start' && e.providerMeta) {
+        const m = e.providerMeta
+        const label = m.fallback
+          ? `${m.resolvedProvider}/${m.resolvedModel ?? '?'} (fallback)`
+          : `${m.resolvedProvider}/${m.resolvedModel ?? 'auto'}`
+        list.push({ id: `pss_${i}`, type: 'read', status: m.fallback ? 'error' : 'success', label, detail: m.fallbackReason })
+      }
       else if (e.type === 'validation_started') {
         list.push({ id: `val_${i}`, type: 'validate', status: 'pending', label: 'Validando regras com Harness' })
+      }
+      else if (e.type === 'harness_layer_start') {
+        const layer = e.harnessLayer ?? 'harness'
+        const cmd = e.message ? e.message.slice(0, 60) : layer
+        list.push({ id: `hl_${i}`, type: 'command', status: 'pending', label: `${layer}: ${cmd}`, detail: e.message })
+      }
+      else if (e.type === 'harness_line') {
+        // Update the most recent pending harness entry with the latest output line
+        const lastHarness = [...list].reverse().find(a => a.type === 'command' && a.status === 'pending')
+        if (lastHarness) lastHarness.detail = e.harnessLine?.slice(0, 120)
       }
       else if (e.type === 'context_ref_denied') {
         const path = String(e.toolInput?.path ?? e.message ?? 'arquivo protegido')
@@ -72,8 +89,9 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
       else if (e.type === 'validation_completed') {
         const lastVal = [...list].reverse().find(a => a.type === 'validate' && a.status === 'pending')
         if (lastVal) {
-          lastVal.status = 'success'
-          lastVal.detail = `Score: ${e.harnessResult?.score ?? 0}/100`
+          lastVal.status = e.harnessResult?.passed ? 'success' : 'error'
+          const failed = e.harnessResult?.layers.filter(layer => !layer.skipped && !layer.passed).map(layer => layer.command || layer.name)
+          lastVal.detail = failed?.length ? `Falhou: ${failed.join(', ')}` : `Score: ${e.harnessResult?.score ?? 0}/100`
         }
       }
     }
@@ -133,7 +151,13 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
               }}>
                 {act.label}
                 {!isPending && act.detail && act.type === 'validate' && (
-                  <span style={{ fontSize: 10, padding: '1px 6px', background: 'var(--teal-dim)', color: 'var(--teal)', borderRadius: 4 }}>
+                  <span style={{
+                    fontSize: 10,
+                    padding: '1px 6px',
+                    background: act.status === 'error' ? 'var(--red-dim)' : 'var(--teal-dim)',
+                    color: act.status === 'error' ? 'var(--red)' : 'var(--teal)',
+                    borderRadius: 4
+                  }}>
                     {act.detail}
                   </span>
                 )}

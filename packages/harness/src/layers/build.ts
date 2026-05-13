@@ -1,80 +1,46 @@
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
 import type { LayerResult, HarnessError } from '@kova/shared'
 import { parseBuildErrors } from './error-parsers'
-
-const execAsync = promisify(exec)
+import { makePolicyError, runLayerCommand } from './command-result'
 
 export interface BuildLayerConfig {
   command: string
   projectRoot: string
+  cwd?: string
   timeoutMs?: number
+  signal?: AbortSignal
+  onLine?: (line: string, stream: 'stdout' | 'stderr') => void
 }
 
 export async function runBuildLayer(config: BuildLayerConfig): Promise<LayerResult> {
   if (!config.command.trim()) {
-    return { name: 'build', passed: true, errors: [], warnings: [], duration: 0, skipped: true }
+    return { name: 'build', passed: true, errors: [], warnings: [], duration: 0, durationMs: 0, skipped: true, skippedReason: 'command_not_configured' }
   }
 
-  const startedAt = new Date().toISOString()
-  const start = Date.now()
   const timeout = config.timeoutMs ?? 30_000
+  const { base, passed, timedOut } = await runLayerCommand(config, 'build', 'build', timeout)
+  if (config.signal?.aborted) throwAbort()
 
-  try {
-    const result = await execAsync(config.command, { cwd: config.projectRoot, timeout })
-
-    return {
-      name: 'build',
-      passed: true,
-      errors: [],
-      warnings: [],
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout: result.stdout ?? '',
-      stderr: result.stderr ?? '',
-      exitCode: 0,
-      startedAt,
-    }
-  } catch (error) {
-    const err = error as { killed?: boolean; stderr?: string; stdout?: string; code?: number }
-    const stdout = err.stdout ?? ''
-    const stderr = err.stderr ?? ''
-    const exitCode = err.code ?? 1
-
-    if (err.killed) {
-      return {
-        name: 'build',
-        passed: false,
-        errors: [makeTimeoutError(timeout)],
-        warnings: [],
-        duration: Date.now() - start,
-        skipped: false,
-        command: config.command,
-        stdout,
-        stderr,
-        exitCode,
-        startedAt,
-      }
-    }
-
-    // tsc escreve diagnósticos no stdout; outros compiladores usam stderr
-    const output = (stderr.trim() ? stderr : stdout)
-    const errors = parseBuildErrors(output)
-    return {
-      name: 'build',
-      passed: false,
-      errors,
-      warnings: [],
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout,
-      stderr,
-      exitCode,
-      startedAt,
-    }
+  if (passed) {
+    return { name: 'build', passed: true, errors: [], warnings: [], skipped: false, ...base }
   }
+
+  if (timedOut) {
+    return { name: 'build', passed: false, errors: [makeTimeoutError(timeout)], warnings: [], skipped: false, ...base }
+  }
+
+  const output = (base.stderr?.trim() ? base.stderr : base.stdout) ?? ''
+  const errors = isPolicyOutput(output) ? [makePolicyError('build', output)] : parseBuildErrors(output)
+  return { name: 'build', passed: false, errors, warnings: [], skipped: false, ...base }
+}
+
+function throwAbort(): never {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  throw err
+}
+
+function isPolicyOutput(output: string): boolean {
+  return /bloquead|blocked|policy|manifest/i.test(output)
 }
 
 function makeTimeoutError(timeoutMs: number): HarnessError {
@@ -83,7 +49,7 @@ function makeTimeoutError(timeoutMs: number): HarnessError {
     type: 'syntax',
     severity: 'critical',
     fixable: false,
-    message: `Build timeout após ${timeoutMs}ms`,
+    message: `Build timeout apos ${timeoutMs}ms`,
     humanMessage: `Build demorou mais de ${timeoutMs}ms`,
     file: '',
   }

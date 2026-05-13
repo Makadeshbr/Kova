@@ -1,21 +1,36 @@
 import {
   Agent, AnthropicProvider, OpenAICompatibleProvider,
   READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor,
+  normalizeProviderError,
 } from '@kova/agent'
-import type { AgentProvider } from '@kova/agent'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { readdir, stat, readFile } from 'node:fs/promises'
-import { join, relative, resolve, extname, basename } from 'node:path'
-import { CodeApplicationEngine } from '@kova/application'
-import { ContextEngine, estimateTokens } from '@kova/context'
-import { ExecutionEngine, structureTask } from '@kova/execution'
+import type { AgentProvider, InteractiveRunner } from '@kova/agent'
+import { terminalManager } from './terminal-manager'
+import { CodeApplicationEngine, createDiffReviewDecision } from '@kova/application'
+import { ContextEngine } from '@kova/context'
+import { ExecutionEngine } from '@kova/execution'
 import { HarnessOrchestrator } from '@kova/orchestrator'
-import type { ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage } from '@kova/shared'
+import type { AgentContext, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage } from '@kova/shared'
+import { basename } from 'node:path'
 import { MemorySystem } from '@kova/memory'
 import { adapterFromProjectProfile, detectStack } from '@kova/adapters'
 import { buildProjectProfile } from '@kova/project'
+import { resolveAtRefs, shouldShortCircuitDeniedRefs, deniedRefsMessage } from './at-refs'
+import type { ResolvedAtRefs } from './at-refs'
+import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, inferRunMode, parsePlanResult } from './session-prompts'
+import type { KovaRunMode } from './session-prompts'
+import {
+  buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
+  createReasoningEmitter, estimateMessagesTokens, buildFallbackTask, toRelative,
+} from './session-utils'
+import { buildProvider, tryFallbackProvider } from './provider-resolver'
+import type { ProviderFactory, ProviderResolution } from './provider-resolver'
+import { buildPatchTask } from './task-structurer'
 
-export type KovaRunMode = 'chat' | 'plan' | 'patch' | 'review'
+// Re-export provider types so existing consumers of engine-manager keep working unchanged.
+export { autoResolveModel, buildProvider } from './provider-resolver'
+export type { ProviderFactory, ProviderResolution } from './provider-resolver'
+
+export type { KovaRunMode }
 export type KovaPermissionMode = 'auto-review' | 'ask' | 'full-access'
 
 export interface StartTaskParams {
@@ -31,238 +46,10 @@ export interface StartTaskParams {
   permissionMode?: KovaPermissionMode
   includeProjectContext?: boolean
   queuedCount?: number
+  openedFiles?: string[]
 }
 
-const PRESET_URLS: Record<string, string> = {
-  openai:     'https://api.openai.com/v1',
-  deepseek:   'https://api.deepseek.com',
-  openrouter: 'https://openrouter.ai/api/v1',
-  kimi:       'https://api.moonshot.ai/v1',
-  gemini:     'https://generativelanguage.googleapis.com/v1beta/openai',
-  ollama:     process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1',
-  lmstudio:   'http://localhost:1234/v1',
-}
-
-const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio', 'openai-compatible'])
-
-const PRESET_MODELS: Record<string, string> = {
-  openai: 'gpt-4.1', deepseek: 'deepseek-v4-flash',
-  kimi: 'kimi-k2.5', gemini: 'gemini-2.5-flash',
-  openrouter: 'anthropic/claude-sonnet-4.5',
-}
-
-const INVALID_MODEL_VALUES = new Set([
-  'deepseek', 'DeepSeek', 'openai', 'OpenAI', 'anthropic', 'Anthropic',
-  'gemini', 'Gemini', 'kimi', 'Kimi', 'ollama', 'Ollama',
-  'openrouter', 'OpenRouter', 'default', 'modelo', 'model', '',
-])
-
-export async function autoResolveModel(
-  baseUrl: string, configured?: string, onDetected?: (model: string) => void,
-): Promise<string | undefined> {
-  if (configured) return configured
-  try {
-    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, { signal: AbortSignal.timeout(4000) })
-    if (!res.ok) return undefined
-    const data = await res.json() as { data?: Array<{ id: string }> }
-    const first = data.data?.[0]?.id
-    if (first) onDetected?.(first)
-    return first
-  } catch { return undefined }
-}
-
-async function buildProvider(
-  params: StartTaskParams, onModelDetected?: (model: string) => void,
-): Promise<AgentProvider | null> {
-  const provider = params.provider ?? 'anthropic'
-  const apiKey = params.apiKey ?? ''
-  if (provider === 'anthropic') {
-    if (!apiKey) return null
-    return new AnthropicProvider({ apiKey, model: params.model })
-  }
-  const baseUrl = params.baseUrl ?? PRESET_URLS[provider] ?? ''
-  if (!baseUrl) return null
-  if (!apiKey && !LOCAL_PROVIDERS.has(provider)) return null
-  const fallback = PRESET_MODELS[provider] ?? ''
-  const rawModel = params.model?.trim() ?? ''
-  const safeConfigured = INVALID_MODEL_VALUES.has(rawModel) ? undefined : rawModel || undefined
-  const resolved = await autoResolveModel(baseUrl, safeConfigured, onModelDetected)
-  const model = resolved || fallback
-  if (!model) return null
-  if (resolved && onModelDetected) onModelDetected(model)
-  return new OpenAICompatibleProvider({ apiKey: apiKey || provider, baseUrl, model })
-}
-
-// â”€â”€â”€ Project context pre-loader (Removed naive loader, using ContextEngine) â”€â”€
-// â”€â”€â”€ @ file references â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-interface AtRef { name: string; path: string; content: string }
-interface DeniedAtRef { name: string; path: string; reason: string }
-interface ResolvedAtRefs { userContent: string; refs: AtRef[]; denied: DeniedAtRef[]; missing: string[] }
-const SKIP_DIRS = new Set(['node_modules','.git','dist','out','.next','__pycache__','.cache','vendor','target','build','coverage'])
-
-function isProtectedContextPath(path: string): boolean {
-  const name = basename(path.replace(/\\/g, '/')).toLowerCase()
-  if (name === '.env.example') return false
-  return name === '.env' || name.startsWith('.env.') || name.endsWith('.env') || name.includes('.env.')
-}
-
-// Search for a file by name anywhere inside projectRoot (depth-limited)
-function findFileByName(projectRoot: string, filename: string, depth = 0): string | null {
-  if (depth > 6) return null
-  let entries: string[]
-  try { entries = readdirSync(projectRoot) } catch { return null }
-  for (const name of entries) {
-    if (SKIP_DIRS.has(name) || name.startsWith('.')) continue
-    const full = join(projectRoot, name)
-    try {
-      const st = statSync(full)
-      if (!st.isDirectory() && name === filename) return full
-      if (st.isDirectory()) {
-        const found = findFileByName(full, filename, depth + 1)
-        if (found) return found
-      }
-    } catch { /* skip */ }
-  }
-  return null
-}
-
-function extractAtTokens(message: string): string[] {
-  const tokens: string[] = []
-  for (const match of message.matchAll(/@(?:"([^"]+)"|'([^']+)'|([^\s,;]+))/g)) {
-    const raw = match[1] ?? match[2] ?? match[3] ?? ''
-    const token = raw.replace(/[)\].!?]+$/g, '').trim()
-    if (token && !tokens.includes(token)) tokens.push(token)
-  }
-  return tokens
-}
-
-function resolveAtRefs(message: string, projectRoot: string): ResolvedAtRefs {
-  const refs: AtRef[] = []
-  const denied: DeniedAtRef[] = []
-  const missing: string[] = []
-  const seen = new Set<string>()
-  for (const token of extractAtTokens(message)) {
-    if (seen.has(token)) continue
-    seen.add(token)
-
-    // 1. Try exact relative path from project root
-    let fullPath = join(projectRoot, token)
-    // 2. Fallback: search by filename if not found at exact path
-    if (!existsSync(fullPath)) {
-      fullPath = findFileByName(projectRoot, basename(token)) ?? ''
-    }
-    if (!fullPath || !existsSync(fullPath)) {
-      missing.push(token)
-      continue
-    }
-
-    try {
-      const rel = relative(projectRoot, fullPath).replace(/\\/g, '/')
-      if (isProtectedContextPath(rel)) {
-        denied.push({ name: token, path: rel, reason: 'Arquivo protegido: segredos nao sao anexados ao contexto.' })
-        continue
-      }
-      const content = readFileSync(fullPath, 'utf-8').slice(0, 8_000)
-      refs.push({ name: token, path: rel, content })
-    } catch { /* skip */ }
-  }
-  const attachment = refs.length > 0
-    ? '\n\nReferenced files:\n' + refs.map(r => `\`\`\`\n// @${r.path}\n${r.content}\n\`\`\``).join('\n\n')
-    : ''
-  const deniedText = denied.length > 0
-    ? '\n\nDenied references:\n' + denied.map(r => `- @${r.path}: ${r.reason}`).join('\n')
-    : ''
-  return { userContent: message + attachment + deniedText, refs, denied, missing }
-}
-
-// ——— Prompts ————————————————————————————————————————————————————————————————
-function chatOnlyPrompt(stack: string): string {
-  return `You are Kova, a senior software engineering assistant.
-Stack adapter: ${stack}.
-
-This is Chat Mode:
-- Reply in text only.
-- Do not call tools.
-- Use provided referenced files and project context if present.
-- If a referenced file was denied, explain the security reason briefly.
-- Do not carry out older tasks unless the user explicitly asks for them again.
-
-Respond in the language the user writes in.`
-}
-
-function reviewOnlyPrompt(stack: string): string {
-  return `You are Kova in Review Mode, a read-only senior code reviewer.
-Stack adapter: ${stack}.
-
-Allowed behavior:
-- You may inspect files with read_file and list_files.
-- You must not edit, create, delete, apply patches, or run shell commands.
-- Focus on concrete findings, risks, missing validation, and next steps.
-- Do not carry out older tasks unless the user explicitly asks for them again.
-
-Respond in the user's language.`
-}
-
-function planOnlyPrompt(stack: string): string {
-  return `You are Kova in Plan Mode, a read-only senior engineering planner.
-Stack adapter: ${stack}.
-
-Allowed behavior:
-- You may inspect files with read_file and list_files.
-- You must not edit, create, delete, apply patches, or run shell commands.
-- Use existing project structure, instructions, and local conventions as the source of truth.
-- Prefer a small, safe implementation plan over broad refactors.
-
-Respond with ONLY the following XML structure:
-<plan_result>
-  <objective>What the task requires and why</objective>
-  <files>
-    <file path="path/to/file.ext" reason="Why this file needs to change" />
-  </files>
-  <approach>Step-by-step implementation strategy</approach>
-  <validations>
-    <command>Validation commands to run later</command>
-  </validations>
-  <risk>low</risk> <!-- Must be: low, medium, or high -->
-</plan_result>`
-}
-
-function inferRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
-  if (explicit) return explicit
-  const text = message.trim().toLowerCase()
-  if (/^\/plan(\s|$)/i.test(message.trim())) return 'plan'
-  if (/\b(review|revise|analise|audit|audite|explique|explain)\b/.test(text)) return 'review'
-  if (/\b(crie|criar|implemente|implementar|altere|alterar|corrija|fix|refatore|refactor|adicione|add|remova|delete)\b/.test(text)) return 'patch'
-  return 'chat'
-}
-
-function shouldShortCircuitDeniedRefs(message: string, resolution: ResolvedAtRefs): boolean {
-  if (resolution.denied.length === 0 || resolution.refs.length > 0) return false
-  const withoutRefs = message.replace(/@(?:"([^"]+)"|'([^']+)'|([^\s,;]+))/g, '').trim().toLowerCase()
-  if (!withoutRefs) return true
-  return /^(leia|ler|read|explique|explain|mostre|show|abrir|open)\b/.test(withoutRefs)
-}
-
-function deniedRefsMessage(resolution: ResolvedAtRefs): string {
-  const files = resolution.denied.map(ref => `@${ref.path}`).join(', ')
-  return `Nao posso ler ${files}. Arquivos de ambiente podem conter segredos e nao sao anexados ao contexto. Use um arquivo exemplo, como @.env.example, se quiser compartilhar variaveis sem valores sensiveis.`
-}
-
-function contextBudgetFor(provider: AgentProvider): number {
-  const limit = provider.capabilities().contextTokenLimit
-  return Math.min(20_000, Math.max(2_000, Math.floor(limit * 0.35)))
-}
-
-function estimateMessagesTokens(messages: AgentMessage[]): number {
-  return estimateTokens(messages.map(m => `${m.role}: ${m.content}`).join('\n\n'))
-}
-
-// â”€â”€â”€ Engine Manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Injectable factory for testing â€” defaults to the real buildProvider function
-export type ProviderFactory = (
-  params: StartTaskParams,
-  onModelDetected?: (model: string) => void,
-) => Promise<AgentProvider | null>
+// ——— Engine Manager ——————————————————————————————————————————————————————————
 
 export class EngineManager {
   private engine: ExecutionEngine | null = null
@@ -273,8 +60,32 @@ export class EngineManager {
   private onModelDetected: ((model: string) => void) | null = null
   private onChatResponse: ((msg: string) => void) | null = null
   private onExecutionEvent: ((event: ExecutionEvent) => void) | null = null
+  // Cache ContextEngine + MemorySystem per projectRoot to avoid recreating on every session
+  private readonly contextEngineCache = new Map<string, ReturnType<typeof buildContextEngine>>()
 
   constructor(private readonly providerFactory: ProviderFactory = buildProvider) {}
+
+  private getContextEngine(projectRoot: string, adapter: ReturnType<typeof detectStack>): ContextEngine {
+    const cached = this.contextEngineCache.get(projectRoot)
+    if (cached) return cached
+    const engine = buildContextEngine(projectRoot, adapter)
+    this.contextEngineCache.set(projectRoot, engine)
+    return engine
+  }
+
+  /** Thin wrapper that injects this instance's state into the pure tryFallbackProvider helper. */
+  private async resolveFallbackProvider(
+    params: StartTaskParams,
+    primaryError: unknown,
+  ): Promise<ProviderResolution | null> {
+    return tryFallbackProvider({
+      params,
+      primaryError,
+      factory: this.providerFactory,
+      isAborted: () => Boolean(this.sessionAbort?.signal.aborted),
+      onModelDetected: this.onModelDetected ?? undefined,
+    })
+  }
 
   setHandlers(
     onUpdate: (state: ExecutionState) => void,
@@ -325,30 +136,72 @@ export class EngineManager {
       return
     }
 
-    const provider = await this.providerFactory(params, this.onModelDetected ?? undefined)
-    if (!provider) {
-      this.onChatResponse?.('Provider nao configurado. Abra Configuracoes.')
-      this.emit({ type: 'stream_end' })
-      return
+    let resolution2: ProviderResolution | null
+    try {
+      resolution2 = await this.providerFactory(params, this.onModelDetected ?? undefined)
+    } catch (err) {
+      // Try fallback provider on hard error if configured
+      const fallback = await this.resolveFallbackProvider(params, err)
+      if (fallback) {
+        resolution2 = fallback
+      } else {
+        this.emitProviderError(err)
+        if (!this.sessionAbort.signal.aborted) this.onChatResponse?.(formatProviderError(err))
+        this.emit({ type: 'stream_end' })
+        return
+      }
+    }
+    if (!resolution2) {
+      // Try fallback when primary returned null (auth missing, no model)
+      const fallback = await this.resolveFallbackProvider(params, new Error('Provider primario nao configurado'))
+      if (fallback) {
+        resolution2 = fallback
+      } else {
+        this.onChatResponse?.('Provider nao configurado. Abra Configuracoes.')
+        this.emit({ type: 'stream_end' })
+        return
+      }
     }
 
+    const provider = resolution2.provider
+    // Emit auditable session-start event — always records requested vs resolved model/provider
+    this.emit({
+      type: 'provider_session_start',
+      message: resolution2.fallback
+        ? `Provider: ${resolution2.resolvedProvider} / modelo: ${resolution2.resolvedModel} (fallback — ${resolution2.fallbackReason ?? 'modelo configurado nao disponivel'})`
+        : `Provider: ${resolution2.resolvedProvider} / modelo: ${resolution2.resolvedModel ?? 'auto'}`,
+      providerMeta: {
+        requestedProvider: params.provider ?? 'anthropic',
+        requestedModel: params.model || undefined,
+        resolvedProvider: resolution2.resolvedProvider,
+        resolvedModel: resolution2.resolvedModel,
+        fallback: resolution2.fallback,
+        fallbackReason: resolution2.fallbackReason,
+      },
+    })
+
+    const explicitFiles = resolution.refs.map(ref => ref.path)
     if (mode === 'plan') {
-      await this.runPlanSession(resolution.userContent || 'Create an implementation plan for this project.', history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal)
+      await this.runPlanSession(resolution.userContent || 'Create an implementation plan for this project.', history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal, explicitFiles, params.openedFiles ?? [])
       return
     }
     if (mode === 'chat') {
-      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal)
+      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles)
       return
     }
     if (mode === 'review') {
-      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal)
+      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles)
       return
     }
-    const task = await this.buildPatchTask(resolution.userContent, provider, projectRoot, adapter)
+    const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter)
     this.onStructured?.(task)
+    // Patch mode does not receive raw conversation history. The agent rediscovers project
+    // state from disk via read_file/list_files — that is more reliable than chat transcripts
+    // that may include narration, failed attempts, or context from a different task.
+    // Chat/Plan/Review modes still receive history because they ARE conversation-driven.
     await this.runUnifiedSession(
       resolution.userContent,
-      history,
+      [],
       params,
       provider,
       projectRoot,
@@ -356,28 +209,10 @@ export class EngineManager {
       task,
       true,
       this.sessionAbort.signal,
+      explicitFiles,
     )
   }
 
-  private async buildPatchTask(
-    objective: string,
-    provider: AgentProvider,
-    projectRoot: string,
-    adapter: ReturnType<typeof detectStack>,
-  ): Promise<TaskDefinition> {
-    try {
-      const structured = await structureTask(objective, {
-        root: projectRoot,
-        stackAdapter: adapter.name,
-        affectedFiles: [],
-        llm: provider,
-      })
-      if (structured.valid) return structured.task
-    } catch {
-      // Fallback below keeps the execution path available when structuring fails.
-    }
-    return buildFallbackTask(objective.split('\n')[0].slice(0, 120), adapter.name)
-  }
 
   private async runChatSession(
     userContent: string,
@@ -387,24 +222,21 @@ export class EngineManager {
     adapter: ReturnType<typeof detectStack>,
     params: StartTaskParams,
     signal?: AbortSignal,
+    explicitFiles: string[] = [],
   ): Promise<void> {
     let streamEndEmitted = false
+    const reasoning = createReasoningEmitter((event) => this.emit(event))
     try {
       let content = userContent
       if (params.includeProjectContext !== false && (history.length === 0 || !history.some(h => h.role === 'assistant'))) {
-        const contextEngine = new ContextEngine(new MemorySystem(projectRoot), adapter)
+        const contextEngine = this.getContextEngine(projectRoot, adapter)
         const maxContextTokens = contextBudgetFor(provider)
         const task = buildFallbackTask(userContent.split('\n')[0].slice(0, 120), adapter.name)
-        const ctx = await contextEngine.buildContext(task, projectRoot, { maxTokens: maxContextTokens })
+        const ctx = await contextEngine.buildContext(task, projectRoot, contextBuildOptions(projectRoot, maxContextTokens, explicitFiles, params.openedFiles ?? []))
         this.emit({
           type: 'context_loaded',
           message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
-          context: {
-            files: ctx.files.map(f => f.path),
-            tokensUsed: ctx.tokensUsed,
-            maxTokens: maxContextTokens,
-            learningsCount: ctx.learnings.length,
-          },
+          context: contextEventPayload(ctx, maxContextTokens),
         })
         if (ctx.files.length > 0) {
           content += '\n\n---\nProject context:\n' + ctx.files.map(f => `\n### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join('\n')
@@ -412,19 +244,27 @@ export class EngineManager {
       }
 
       const messages: AgentMessage[] = [...history, { role: 'user', content }]
+      reasoning.start()
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
         tools: [],
         executor: new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY),
         maxTurns: 1,
         signal,
-        onToken: t => this.emit({ type: 'token', token: t }),
+        onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
+        onReasoningStart: () => reasoning.start(),
+        onReasoningDelta: delta => reasoning.delta(delta),
+        onReasoningEnd: () => reasoning.end(),
       })
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
       this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
     } catch (err) {
-      if (!signal?.aborted) this.onChatResponse?.(formatProviderError(err))
+      if (!signal?.aborted) {
+        this.emitProviderError(err)
+        this.onChatResponse?.(formatProviderError(err))
+      }
     } finally {
+      reasoning.end()
       if (!streamEndEmitted) {
         this.emit({ type: 'stream_end' })
         streamEndEmitted = true
@@ -440,24 +280,23 @@ export class EngineManager {
     adapter: ReturnType<typeof detectStack>,
     params: StartTaskParams,
     signal?: AbortSignal,
+    explicitFiles: string[] = [],
   ): Promise<void> {
     let streamEndEmitted = false
+    const reasoning = createReasoningEmitter((event) => this.emit(event))
     try {
-      const contextEngine = new ContextEngine(new MemorySystem(projectRoot), adapter)
+      const contextEngine = this.getContextEngine(projectRoot, adapter)
       const maxContextTokens = contextBudgetFor(provider)
       const task = buildFallbackTask(userContent.split('\n')[0].slice(0, 120), adapter.name)
       const ctx = params.includeProjectContext === false
         ? { files: [], tokensUsed: 0, learnings: [] as { description: string; confidence: number; tags: string[] }[] }
-        : await contextEngine.buildContext(task, projectRoot, { maxTokens: maxContextTokens })
+        : await contextEngine.buildContext(task, projectRoot, contextBuildOptions(projectRoot, maxContextTokens, explicitFiles, params.openedFiles ?? []))
 
       this.emit({
         type: 'context_loaded',
         message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
         context: {
-          files: ctx.files.map(f => f.path),
-          tokensUsed: ctx.tokensUsed,
-          maxTokens: maxContextTokens,
-          learningsCount: ctx.learnings.length,
+          ...contextEventPayload(ctx as AgentContext, maxContextTokens),
         },
       })
 
@@ -469,13 +308,17 @@ export class EngineManager {
         { role: 'user', content: `${userContent}\n\n---\nProject root: ${projectRoot}\nProject context:\n${contextText}` },
       ]
       const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY)
+      reasoning.start()
       const output = await provider.runAgentLoop(messages, {
         system: reviewOnlyPrompt(adapter.name),
         tools: READ_ONLY_TOOLS,
         executor,
-        maxTurns: 8,
+        maxTurns: 20, // increased: real projects need more turns to read all relevant files
         signal,
-        onToken: t => this.emit({ type: 'token', token: t }),
+        onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
+        onReasoningStart: () => reasoning.start(),
+        onReasoningDelta: delta => reasoning.delta(delta),
+        onReasoningEnd: () => reasoning.end(),
         onToolCall: (name, input) => {
           const preview = String(input.path ?? input.dir ?? name)
           this.emit({ type: 'tool_call', toolName: name, toolInput: input, message: preview })
@@ -489,9 +332,19 @@ export class EngineManager {
       })
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
       this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+
+      // If onToken events were never fired (model finished with tool calls only, no final text),
+      // emit output.thought directly so the user always sees a response.
+      if (output.thought.trim()) {
+        this.emit({ type: 'token', token: output.thought })
+      }
     } catch (err) {
-      if (!signal?.aborted) this.onChatResponse?.(formatProviderError(err))
+      if (!signal?.aborted) {
+        this.emitProviderError(err)
+        this.onChatResponse?.(formatProviderError(err))
+      }
     } finally {
+      reasoning.end()
       if (!streamEndEmitted) {
         this.emit({ type: 'stream_end' })
         streamEndEmitted = true
@@ -507,24 +360,24 @@ export class EngineManager {
     adapter: ReturnType<typeof detectStack>,
     includeProjectContext = true,
     signal?: AbortSignal,
+    explicitFiles: string[] = [],
+    openedFiles: string[] = [],
   ): Promise<void> {
     let streamEndEmitted = false
+    const reasoning = createReasoningEmitter((event) => this.emit(event))
     try {
-      const contextEngine = new ContextEngine(new MemorySystem(projectRoot), adapter)
+      const contextEngine = this.getContextEngine(projectRoot, adapter)
       const maxContextTokens = contextBudgetFor(provider)
       const task = buildFallbackTask(userContent.split('\n')[0].slice(0, 120), adapter.name)
       const ctx = includeProjectContext
-        ? await contextEngine.buildContext(task, projectRoot, { maxTokens: maxContextTokens })
+        ? await contextEngine.buildContext(task, projectRoot, contextBuildOptions(projectRoot, maxContextTokens, explicitFiles, openedFiles))
         : { files: [], tokensUsed: 0, learnings: [] as { description: string; confidence: number; tags: string[] }[] }
 
       this.emit({
         type: 'context_loaded',
         message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
         context: {
-          files: ctx.files.map(f => f.path),
-          tokensUsed: ctx.tokensUsed,
-          maxTokens: maxContextTokens,
-          learningsCount: ctx.learnings.length,
+          ...contextEventPayload(ctx as AgentContext, maxContextTokens),
         },
       })
 
@@ -550,13 +403,17 @@ export class EngineManager {
       ]
 
       const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY)
+      reasoning.start()
       const output = await provider.runAgentLoop(messages, {
         system: planOnlyPrompt(adapter.name),
         tools: READ_ONLY_TOOLS,
         executor,
         maxTurns: 8,
         signal,
-        onToken: t => this.emit({ type: 'token', token: t }),
+        onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
+        onReasoningStart: () => reasoning.start(),
+        onReasoningDelta: delta => reasoning.delta(delta),
+        onReasoningEnd: () => reasoning.end(),
         onToolCall: (name, input) => {
           const preview = String(input.path ?? input.dir ?? name)
           this.emit({ type: 'tool_call', toolName: name, toolInput: input, message: preview })
@@ -571,9 +428,21 @@ export class EngineManager {
 
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
       this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+
+      // Parse XML plan result → emit structured card so the UI renders it properly
+      const planMsg = parsePlanResult(output.thought, userContent)
+      const planEndEvent = planMsg
+        ? { type: 'stream_end' as const, structuredMessage: planMsg }
+        : { type: 'stream_end' as const }
+      this.emit(planEndEvent)
+      streamEndEmitted = true
     } catch (err) {
-      if (!signal?.aborted) this.onChatResponse?.(formatProviderError(err))
+      if (!signal?.aborted) {
+        this.emitProviderError(err)
+        this.onChatResponse?.(formatProviderError(err))
+      }
     } finally {
+      reasoning.end()
       if (!streamEndEmitted) {
         this.emit({ type: 'stream_end' })
         streamEndEmitted = true
@@ -586,6 +455,7 @@ export class EngineManager {
     objective: string, history: AgentMessage[], params: StartTaskParams,
     provider: AgentProvider, projectRoot: string, adapter: ReturnType<typeof detectStack>,
     task: TaskDefinition, skipPlan: boolean, signal?: AbortSignal,
+    explicitFiles: string[] = [],
   ): Promise<void> {
     const appEngine = new CodeApplicationEngine(projectRoot)
 
@@ -596,6 +466,7 @@ export class EngineManager {
         orchestrator: new HarnessOrchestrator(),
         contextEngine: new ContextEngine(new MemorySystem(projectRoot), adapter),
         applicationEngine: appEngine,
+        memory: new MemorySystem(projectRoot),
       },
       {
         projectRoot,
@@ -603,18 +474,30 @@ export class EngineManager {
         skipPlan,
         maxIterations: params.maxIterations ?? 5,
         autoApply: params.autoApply ?? false,
+        explicitFiles,
+        openedFiles: params.openedFiles ?? [],
         onStateChange: (state) => this.onUpdate?.(state),
         onEvent: (event) => this.onExecutionEvent?.(event),
+        interactiveRunner: (command, cwd, reason) =>
+          terminalManager.runInteractive(command, cwd, reason),
       },
     )
 
-    // The ExecutionEngine emits stream_end itself after each agent phase.
-    // If run() throws before doing so, this flag ensures we emit it defensively
-    // so isThinking never stays stuck and streamingText is flushed.
+    // The ExecutionEngine emits internal stream_end events when an agent phase ends.
+    // Patch mode emits one final stream_end from here so the renderer receives a
+    // single message that can include both streamed text and the structured result.
     let engineStreamEndObserved = false
+    let finalStreamEndEmitted = false
     const origEventHandler = this.onExecutionEvent
+    const emitFinal = (event: Omit<ExecutionEvent, 'taskId' | 'timestamp'>): void => {
+      finalStreamEndEmitted = true
+      origEventHandler?.({ taskId: 'chat', timestamp: new Date().toISOString(), ...event })
+    }
     this.onExecutionEvent = (event) => {
-      if (event.type === 'stream_end') engineStreamEndObserved = true
+      if (event.type === 'stream_end') {
+        engineStreamEndObserved = true
+        return
+      }
       origEventHandler?.(event)
     }
 
@@ -622,18 +505,31 @@ export class EngineManager {
       const state = await this.engine.run(task)
       const last = state.iterationHistory.at(-1)
       const files = last?.changes ?? []
-      const score = last?.harnessResult.score ?? 0
+      const score = last?.decision.score ?? last?.harnessResult.score ?? 0
+      const proof = state.proofPack
 
       if (files.length > 0) {
+        origEventHandler?.({
+          taskId: task.id,
+          timestamp: new Date().toISOString(),
+          iteration: last?.iteration,
+          type: 'diff_review_ready',
+          message: `${files.length} arquivo(s) aguardando review`,
+          diffReview: createDiffReviewDecision(files),
+        })
         // Emit a structured result so the renderer renders a visual card
         const title = state.status === 'completed' ? 'Tarefa concluída'
           : state.status === 'paused' ? 'Aguardando revisão'
-          : 'Tarefa falhou'
+          : 'Correção necessária'
+        const failedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && !layer.passed) ?? []
+        const failedSummary = failedLayers.length > 0
+          ? `${failedLayers.map(layer => layer.command || layer.name).join(', ')} falhou após ${state.iterationHistory.length} tentativa(s).`
+          : 'Máximo de tentativas atingido.'
         const summary = state.status === 'completed'
           ? 'Modificações aplicadas com sucesso.'
           : state.status === 'paused'
           ? 'Revisão necessária antes de aplicar.'
-          : (last?.decision.reason ?? 'Máximo de tentativas atingido.')
+          : failedSummary
 
         const structuredMsg: import('@kova/shared').AgentResultMessage = {
           kind: 'agent_result',
@@ -645,37 +541,39 @@ export class EngineManager {
             status: c.type === 'create' ? 'created' : c.type === 'delete' ? 'deleted' : 'modified',
           })),
           validations: last?.harnessResult.layers.map(l => ({
-            command: l.name,
+            command: l.command || l.name,
             status: l.skipped ? 'skipped' : l.passed ? 'passed' : 'failed',
-            durationMs: l.duration,
+            exitCode: l.exitCode,
+            durationMs: l.durationMs ?? l.duration,
           })) ?? [],
-          risk: score >= 90 ? 'low' : score >= 70 ? 'medium' : 'high',
-          decision: state.status === 'completed' ? 'apply' : state.status === 'paused' ? 'needs_review' : 'reject',
-          notes: last?.decision.reason ? [last.decision.reason] : [],
+          risk: proof?.results?.evidenceScore?.risk.riskLevel ?? (score >= 90 ? 'low' : score >= 70 ? 'medium' : 'high'),
+          decision: proof?.finalUiDecision ?? mapResultDecision(state.status, last?.decision.decision),
+          notes: [
+            ...(last?.decision.reason ? [last.decision.reason] : []),
+            ...(proof?.nextStepRecommended ? [proof.nextStepRecommended] : []),
+          ],
+          proofPackRef: proof ? 'executionState.proofPack' : undefined,
         }
-        this.emit({ type: 'stream_end', structuredMessage: structuredMsg })
+        emitFinal({ type: 'stream_end', structuredMessage: structuredMsg })
         engineStreamEndObserved = true
       } else {
         // No files changed (analysis-only run, or agent replied with text only).
         // The streamingText was already sent via token events — we must still
         // emit stream_end so isThinking resets and the UI is not left frozen.
-        if (!engineStreamEndObserved) {
-          this.emit({ type: 'stream_end' })
-          engineStreamEndObserved = true
-        }
+        emitFinal({ type: 'stream_end' })
       }
     } catch (err) {
       // Defensive: if the engine threw before emitting stream_end, flush any accumulated
       // streamingText so it appears as a message and isThinking is reset.
-      if (!engineStreamEndObserved) {
-        this.emit({ type: 'stream_end' })
-        engineStreamEndObserved = true
+      if (!signal?.aborted) this.emitProviderError(err)
+      if (!finalStreamEndEmitted) {
+        emitFinal({ type: 'stream_end' })
       }
       if (!signal?.aborted) this.onChatResponse?.(formatProviderError(err))
     } finally {
       // Restore original event handler
       this.onExecutionEvent = origEventHandler
-      if (!engineStreamEndObserved) this.emit({ type: 'stream_end' })
+      if (!finalStreamEndEmitted && !engineStreamEndObserved) emitFinal({ type: 'stream_end' })
       if (this.engine?.getState()?.status !== 'paused') this.engine = null
     }
   }
@@ -689,27 +587,35 @@ export class EngineManager {
   }
   getState(): ExecutionState | null { return this.engine?.getState() ?? null }
 
-  async forceApply(): Promise<void> {
+  private emitProviderError(err: unknown): void {
+    const normalized = normalizeProviderError(err)
+    this.emit({
+      type: 'provider_error',
+      providerError: normalized.code,
+      providerStatus: normalized.status,
+      provider: normalized.provider,
+      model: normalized.model,
+      message: normalized.safeMessage,
+    })
+  }
+
+  async forceApply(selection?: DiffReviewSelection): Promise<void> {
     // All pending apply state is owned by ExecutionEngine.
     if (this.engine) {
-      try { await this.engine.forceApply() } catch (err) { this.onChatResponse?.(formatProviderError(err)) }
+      try { await this.engine.forceApply(selection) } catch (err) { this.onChatResponse?.(formatProviderError(err)) }
       return
     }
     this.onChatResponse?.('Nenhuma mudanca pendente para aplicar.')
   }
 }
 
-// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function buildFallbackTask(objective: string, stackAdapter: string): TaskDefinition {
-  return {
-    id: `task-${Date.now()}`, objective: objective.trim(),
-    constraints: [], nonGoals: [], validationCriteria: [],
-    type: 'feature', impact: 'low', affectedFiles: [], stackAdapter,
-  }
-}
-
+// ——— Error helpers ——————————————————————————————————————————————————————————
 function formatProviderError(err: unknown): string {
+  const normalized = normalizeProviderError(err)
+  if (normalized.name === 'KovaProviderError') return normalized.safeMessage
   const msg = err instanceof Error ? err.message : String(err)
+  if (classifyProviderError(err) === 'provider_rate_limited')
+    return 'Limite do provider atingido. Tente novamente depois ou troque de provider.'
   if (msg.includes('model') && (msg.includes('not found') || msg.includes('404')))
     return 'Modelo nao encontrado. Verifique o nome do modelo nas configuracoes.'
   if (msg.includes('400') && msg.includes('crash'))
@@ -723,18 +629,25 @@ function formatProviderError(err: unknown): string {
   return msg
 }
 
-function toRelative(root: string, filePath: string): string {
-  const normalized = filePath.replace(/\\/g, '/')
-  const rootNorm = root.replace(/\\/g, '/')
-  if (normalized.startsWith(rootNorm + '/')) return normalized.slice(rootNorm.length + 1)
-  if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith('/')) {
-    try {
-      const rel = relative(root, resolve(filePath)).replace(/\\/g, '/')
-      if (!rel.startsWith('..')) return rel
-    } catch { /* ignore */ }
-    return normalized.split('/').at(-1) ?? normalized
-  }
-  return normalized
+function classifyProviderError(err: unknown): NonNullable<ExecutionEvent['providerError']> {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  if (msg.includes('429') || msg.includes('too many requests') || msg.includes('rate limit')) return 'provider_rate_limited'
+  if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('api key')) return 'provider_auth'
+  if (msg.includes('404') && msg.includes('model')) return 'provider_model_not_found'
+  if (msg.includes('fetch') || msg.includes('econnrefused') || msg.includes('network')) return 'provider_unavailable'
+  return 'provider_unknown'
+}
+
+function mapResultDecision(
+  status: ExecutionState['status'],
+  decision?: 'auto_apply' | 'suggest' | 'reject' | 'human_required',
+): import('@kova/shared').AgentResultMessage['decision'] {
+  if (status === 'completed') return 'apply'
+  if (status === 'failed') return 'repair_needed'
+  if (decision === 'suggest') return 'suggest'
+  if (decision === 'human_required' || status === 'paused') return 'needs_review'
+  if (decision === 'reject') return 'reject'
+  return 'reject'
 }
 
 export { toRelative, structureTask, ContextEngine, MemorySystem, ExecutionEngine }

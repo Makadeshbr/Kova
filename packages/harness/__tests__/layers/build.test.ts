@@ -1,37 +1,44 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('node:child_process', () => ({ exec: vi.fn() }))
+vi.mock('@kova/shared', async importOriginal => {
+  const actual = await importOriginal<typeof import('@kova/shared')>()
+  return { ...actual, runCommandInvocation: vi.fn() }
+})
 
-import { exec } from 'node:child_process'
+import { runCommandInvocation } from '@kova/shared'
 import { runBuildLayer } from '../../src/layers/build'
 
-const mockExec = vi.mocked(exec)
+const mockRun = vi.mocked(runCommandInvocation)
 
-type ExecCb = (err: Error | null, stdout: string, stderr: string) => void
+function commandResult(overrides: Partial<Awaited<ReturnType<typeof runCommandInvocation>>> = {}) {
+  return {
+    command: 'tsc',
+    cwd: '/tmp',
+    kind: 'build' as const,
+    stdout: '',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 5,
+    startedAt: new Date().toISOString(),
+    timedOut: false,
+    ...overrides,
+  }
+}
 
 function mockSuccess() {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    ;(args[args.length - 1] as ExecCb)(null, '', '')
-  })
+  mockRun.mockResolvedValue(commandResult())
 }
 
 function mockFailure(output: string, viaStdout = false) {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    const err = Object.assign(new Error('Build failed'), {
-      code: 1,
-      killed: false,
-      stderr: viaStdout ? '' : output,
-      stdout: viaStdout ? output : '',
-    })
-    ;(args[args.length - 1] as ExecCb)(err, viaStdout ? output : '', viaStdout ? '' : output)
-  })
+  mockRun.mockResolvedValue(commandResult({
+    exitCode: 1,
+    stderr: viaStdout ? '' : output,
+    stdout: viaStdout ? output : '',
+  }))
 }
 
 function mockTimeout() {
-  mockExec.mockImplementation((...args: unknown[]) => {
-    const err = Object.assign(new Error('timeout'), { killed: true, code: null })
-    ;(args[args.length - 1] as ExecCb)(err, '', '')
-  })
+  mockRun.mockResolvedValue(commandResult({ exitCode: 1, timedOut: true }))
 }
 
 describe('runBuildLayer', () => {
@@ -55,7 +62,7 @@ describe('runBuildLayer', () => {
     expect(result.errors[0].rule).toBe('TS2345')
   })
 
-  it('deve parsear múltiplos erros', async () => {
+  it('deve parsear multiplos erros', async () => {
     const stderr = [
       "src/a.ts(1,1): error TS1001: Error one.",
       "src/b.ts(5,3): error TS2002: Error two.",
@@ -67,7 +74,7 @@ describe('runBuildLayer', () => {
     expect(result.errors[1].file).toBe('src/b.ts')
   })
 
-  it('deve retornar erro genérico quando stderr não tem formato TypeScript', async () => {
+  it('deve retornar erro generico quando stderr nao tem formato TypeScript', async () => {
     mockFailure('something went wrong')
     const result = await runBuildLayer({ command: 'tsc', projectRoot: '/tmp' })
     expect(result.passed).toBe(false)
@@ -75,7 +82,7 @@ describe('runBuildLayer', () => {
     expect(result.errors[0].message).toBe('something went wrong')
   })
 
-  it('deve retornar erro crítico quando build timeout', async () => {
+  it('deve retornar erro critico quando build timeout', async () => {
     mockTimeout()
     const result = await runBuildLayer({ command: 'tsc', projectRoot: '/tmp', timeoutMs: 5000 })
     expect(result.passed).toBe(false)

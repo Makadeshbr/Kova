@@ -17,6 +17,21 @@ function mockResponse(body: unknown): void {
   vi.stubGlobal('fetch', fetchMock)
 }
 
+function mockStream(chunks: unknown[]): void {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+      }
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+      controller.close()
+    },
+  })
+  fetchMock.mockResolvedValueOnce({ ok: true, body: stream, text: async () => '' } as Response)
+  vi.stubGlobal('fetch', fetchMock)
+}
+
 describe('OpenAICompatibleProvider', () => {
   describe('generate()', () => {
     it('deve enviar para o endpoint correto', async () => {
@@ -131,6 +146,58 @@ describe('OpenAICompatibleProvider', () => {
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
       expect(body.tools).toBeDefined()
       expect(body.tools.length).toBeGreaterThan(0)
+    })
+
+    it('streams reasoning_content separately from final tokens', async () => {
+      mockStream([
+        { choices: [{ delta: { reasoning_content: 'checking' } }] },
+        { choices: [{ delta: { content: 'Final' }, finish_reason: 'stop' }] },
+      ])
+
+      const tokens: string[] = []
+      const reasoning: string[] = []
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'task' }],
+        {
+          system: 'sys',
+          tools: [],
+          executor,
+          onToken: token => tokens.push(token),
+          onReasoningDelta: delta => reasoning.push(delta),
+        },
+      )
+
+      expect(tokens.join('')).toBe('Final')
+      expect(reasoning.join('')).toBe('checking')
+      expect(result.thought).toBe('Final')
+    })
+
+    it('extracts legacy think tags and removes them from final tokens', async () => {
+      mockStream([
+        { choices: [{ delta: { content: '<think>private plan</think>Visible' }, finish_reason: 'stop' }] },
+      ])
+
+      const tokens: string[] = []
+      const reasoning: string[] = []
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'task' }],
+        {
+          system: 'sys',
+          tools: [],
+          executor,
+          onToken: token => tokens.push(token),
+          onReasoningDelta: delta => reasoning.push(delta),
+        },
+      )
+
+      expect(tokens.join('')).toBe('Visible')
+      expect(tokens.join('')).not.toContain('<think>')
+      expect(reasoning.join('')).toBe('private plan')
+      expect(result.thought).toBe('Visible')
     })
   })
 })

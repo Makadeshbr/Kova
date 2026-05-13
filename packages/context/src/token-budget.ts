@@ -1,6 +1,4 @@
-import type { ContextRelevance, ContextFile } from '@kova/shared'
-
-export type ContextSource = 'instruction' | 'explicit' | 'error' | 'dependency' | 'grep' | 'memory' | 'profile' | 'diff'
+import type { ContextRelevance, ContextFile, ContextFileKind, ContextSource } from '@kova/shared'
 
 const PRIORITY: Record<ContextRelevance, number> = {
   rules: 0, target: 1, error: 2, direct_dep: 3, learning: 4, indirect_dep: 5,
@@ -11,16 +9,26 @@ export interface PrioritizedFile {
   content: string
   relevance: ContextRelevance
   score?: number
+  confidence?: number
   reason?: string
   evidence?: string[]
   source?: ContextSource
+  kind?: ContextFileKind
+  sensitive?: boolean
+  included?: boolean
+  excludedReason?: string
 }
 
 export type ContextFileWithEvidence = ContextFile & {
   score?: number
+  confidence?: number
   reason?: string
   evidence?: string[]
   source?: ContextSource
+  kind?: ContextFileKind
+  sensitive?: boolean
+  included?: boolean
+  excludedReason?: string
 }
 
 export interface BudgetResult {
@@ -34,7 +42,7 @@ export function allocateBudget(files: PrioritizedFile[], maxTokens: number): Bud
     if (byPriority !== 0) return byPriority
     return (b.score ?? 0) - (a.score ?? 0)
   })
-  const included: ContextFile[] = []
+  const included: ContextFileWithEvidence[] = []
   let tokensUsed = 0
 
   for (const file of sorted) {

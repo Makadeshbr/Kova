@@ -22,7 +22,10 @@
     "@kova/memory": "workspace:*",
     "@kova/orchestrator": "workspace:*",
     "@kova/project": "workspace:*",
-    "@kova/shared": "workspace:*"
+    "@kova/shared": "workspace:*",
+    "@lydell/node-pty": "1.2.0-beta.12",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^5.5.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

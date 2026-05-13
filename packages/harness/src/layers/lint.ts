@@ -1,77 +1,46 @@
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
 import type { LayerResult, HarnessError } from '@kova/shared'
 import { parseLintErrors } from './error-parsers'
-
-const execAsync = promisify(exec)
+import { makePolicyError, runLayerCommand } from './command-result'
 
 export interface LintLayerConfig {
   command: string
   projectRoot: string
+  cwd?: string
   timeoutMs?: number
+  signal?: AbortSignal
+  onLine?: (line: string, stream: 'stdout' | 'stderr') => void
 }
 
 export async function runLintLayer(config: LintLayerConfig): Promise<LayerResult> {
   if (!config.command.trim()) {
-    return { name: 'lint', passed: true, errors: [], warnings: [], duration: 0, skipped: true }
+    return { name: 'lint', passed: true, errors: [], warnings: [], duration: 0, durationMs: 0, skipped: true, skippedReason: 'command_not_configured' }
   }
 
-  const startedAt = new Date().toISOString()
-  const start = Date.now()
   const timeout = config.timeoutMs ?? 60_000
+  const { base, passed, timedOut } = await runLayerCommand(config, 'lint', 'lint', timeout)
+  if (config.signal?.aborted) throwAbort()
 
-  try {
-    const result = await execAsync(config.command, { cwd: config.projectRoot, timeout })
-    return {
-      name: 'lint',
-      passed: true,
-      errors: [],
-      warnings: [],
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout: result.stdout ?? '',
-      stderr: result.stderr ?? '',
-      exitCode: 0,
-      startedAt,
-    }
-  } catch (error) {
-    const err = error as { killed?: boolean; stdout?: string; stderr?: string; code?: number }
-    const stdout = err.stdout ?? ''
-    const stderr = err.stderr ?? ''
-    const exitCode = err.code ?? 1
-
-    if (err.killed) {
-      return {
-        name: 'lint',
-        passed: false,
-        errors: [makeTimeoutError(timeout)],
-        warnings: [],
-        duration: Date.now() - start,
-        skipped: false,
-        command: config.command,
-        stdout,
-        stderr,
-        exitCode,
-        startedAt,
-      }
-    }
-
-    const output = (stdout.trim() ? stdout : stderr)
-    return {
-      name: 'lint',
-      passed: false,
-      errors: parseLintErrors(output),
-      warnings: [],
-      duration: Date.now() - start,
-      skipped: false,
-      command: config.command,
-      stdout,
-      stderr,
-      exitCode,
-      startedAt,
-    }
+  if (passed) {
+    return { name: 'lint', passed: true, errors: [], warnings: [], skipped: false, ...base }
   }
+
+  if (timedOut) {
+    return { name: 'lint', passed: false, errors: [makeTimeoutError(timeout)], warnings: [], skipped: false, ...base }
+  }
+
+  const output = (base.stdout?.trim() ? base.stdout : base.stderr) ?? ''
+  const errors = isPolicyOutput(output) ? [makePolicyError('lint', output)] : parseLintErrors(output)
+  return { name: 'lint', passed: false, errors, warnings: [], skipped: false, ...base }
+}
+
+function throwAbort(): never {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  throw err
+}
+
+function isPolicyOutput(output: string): boolean {
+  return /bloquead|blocked|policy|manifest/i.test(output)
 }
 
 function makeTimeoutError(timeoutMs: number): HarnessError {
@@ -80,7 +49,7 @@ function makeTimeoutError(timeoutMs: number): HarnessError {
     type: 'style',
     severity: 'high',
     fixable: false,
-    message: `Lint timeout após ${timeoutMs}ms`,
+    message: `Lint timeout apos ${timeoutMs}ms`,
     humanMessage: `Lint demorou mais de ${timeoutMs}ms`,
     file: '',
   }

@@ -1,7 +1,7 @@
 import type {
   ExecutionContract, ExecutionEvent, ExecutionState, TaskDefinition,
   HarnessResult, DecisionResult, FileChange, LayerResult, HarnessError,
-  AgentMessage, ReviewGateResult, ReviewFinding,
+  AgentMessage, ReviewGateResult, ReviewFinding, DiffReviewSelection, DiffReviewDecision, DiffReviewHunk,
 } from '@kova/shared'
 import type { KovaSettings } from '../../main/ipc-handlers'
 import type { StartTaskParams } from '../../main/engine-manager'
@@ -9,7 +9,7 @@ import type { StartTaskParams } from '../../main/engine-manager'
 export type {
   ExecutionContract, ExecutionEvent, ExecutionState, TaskDefinition,
   HarnessResult, DecisionResult, FileChange, LayerResult, HarnessError,
-  AgentMessage, ReviewGateResult, ReviewFinding, KovaSettings, StartTaskParams,
+  AgentMessage, ReviewGateResult, ReviewFinding, DiffReviewSelection, DiffReviewDecision, DiffReviewHunk, KovaSettings, StartTaskParams,
 }
 
 export type LayerName = 'build' | 'lint' | 'tests' | 'security' | 'rules'

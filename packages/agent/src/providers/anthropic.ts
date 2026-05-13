@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import type { AgentMessage } from '@kova/shared'
 import type { LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions, ProviderCapabilities } from './provider'
 import type { KovaTool } from '../tools'
+import { normalizeProviderError } from './errors'
 
 export interface AnthropicProviderOptions {
   apiKey?: string
@@ -26,12 +27,18 @@ export class AnthropicProvider implements AgentProvider {
 
   // Single-turn — used for task structuring (no tools)
   async generate(messages: AgentMessage[], options: GenerateOptions = {}): Promise<LLMResponse> {
-    const response = await this.client.messages.create({
-      model: options.model ?? this.defaultModel,
-      max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-      system: options.system,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-    })
+    const model = options.model ?? this.defaultModel
+    let response: Anthropic.Messages.Message
+    try {
+      response = await this.client.messages.create({
+        model,
+        max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+        system: options.system,
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+      })
+    } catch (err) {
+      throw normalizeProviderError(err, { provider: 'anthropic', model })
+    }
     const thought = response.content
       .filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text')
       .map(b => b.text).join('\n').trim()
@@ -52,7 +59,12 @@ export class AnthropicProvider implements AgentProvider {
       }, { signal })
       let thought = ''
       stream.on('text', text => { thought += text; onToken(text) })
-      const response = await stream.finalMessage()
+      let response: Anthropic.Messages.Message
+      try {
+        response = await stream.finalMessage()
+      } catch (err) {
+        throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
+      }
       return { thought, changes: [], tokensUsed: response.usage.input_tokens + response.usage.output_tokens }
     }
 
@@ -88,9 +100,17 @@ export class AnthropicProvider implements AgentProvider {
           contentBlocks.push(block)
         })
 
-        response = await stream.finalMessage()
+        try {
+          response = await stream.finalMessage()
+        } catch (err) {
+          throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
+        }
       } else {
-        response = await this.client.messages.create(params)
+        try {
+          response = await this.client.messages.create(params)
+        } catch (err) {
+          throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
+        }
         turnText = response.content
           .filter((b): b is Anthropic.Messages.TextBlock => b.type === 'text')
           .map(b => b.text).join('\n').trim()

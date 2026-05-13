@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TaskDefinition, AgentContext } from '@kova/shared'
@@ -205,6 +205,51 @@ describe('Agent', () => {
     const output = await agent.execute(makeTask(), makeContext(), 'fix')
     expect(output.thought).toBe('custom response')
     expect(mockProvider.runAgentLoop).toHaveBeenCalledOnce()
+  })
+
+  it('faz rollback das escritas do agente antes de retornar as mudancas para staging/apply', async () => {
+    const mockProvider: AgentProvider = {
+      generate: vi.fn(),
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      runAgentLoop: vi.fn().mockImplementation(async (_messages, options) => {
+        await options.executor.execute('write_file', { path: 'src/new-file.ts', content: 'export const staged = true\n' })
+        return {
+          thought: 'wrote file',
+          changes: options.executor.getChanges(),
+          tokensUsed: 50,
+        } satisfies LLMResponse
+      }),
+    }
+
+    const agent = new Agent(mockProvider, projectRoot)
+    const output = await agent.execute(makeTask({ affectedFiles: ['src/new-file.ts'] }), makeContext(), 'code')
+
+    expect(output.changes).toHaveLength(1)
+    expect(output.changes[0]).toMatchObject({ path: 'src/new-file.ts', type: 'create' })
+    expect(existsSync(join(projectRoot, 'src', 'new-file.ts'))).toBe(false)
+  })
+
+  it('restaura conteudo original apos modificar arquivo existente durante o turno', async () => {
+    mkdirSync(join(projectRoot, 'src'), { recursive: true })
+    writeFileSync(join(projectRoot, 'src', 'auth.ts'), 'export const version = 1\n', 'utf-8')
+    const mockProvider: AgentProvider = {
+      generate: vi.fn(),
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      runAgentLoop: vi.fn().mockImplementation(async (_messages, options) => {
+        await options.executor.execute('write_file', { path: 'src/auth.ts', content: 'export const version = 2\n' })
+        return {
+          thought: 'modified file',
+          changes: options.executor.getChanges(),
+          tokensUsed: 50,
+        } satisfies LLMResponse
+      }),
+    }
+
+    const agent = new Agent(mockProvider, projectRoot)
+    const output = await agent.execute(makeTask(), makeContext(), 'code')
+
+    expect(output.changes[0]).toMatchObject({ path: 'src/auth.ts', type: 'modify', before: 'export const version = 1\n' })
+    expect(readFileSync(join(projectRoot, 'src', 'auth.ts'), 'utf-8')).toBe('export const version = 1\n')
   })
 
   it('não deve enviar write_file em modo plan', async () => {

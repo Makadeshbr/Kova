@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ProjectProfile } from '@kova/shared'
-import { adapterFromProjectProfile, detectStack } from '../src/detect'
+import { adapterFromProjectProfile, detectStack, detectStackFromChanges } from '../src/detect'
 
 let tmpDir: string
 
@@ -20,6 +20,8 @@ describe('adapterFromProjectProfile', () => {
   it('deve escolher adapter pela linguagem mais forte do profile', () => {
     const profile = {
       root: '/repo',
+      projectKind: 'existing',
+      traits: ['multi_stack'],
       languages: [
         { name: 'go', confidence: 0.95, source: 'go.mod' },
         { name: 'typescript', confidence: 0.8, source: 'tsconfig.json' },
@@ -41,6 +43,7 @@ describe('adapterFromProjectProfile', () => {
       entrypoints: [],
       architectureHints: [],
       signals: [],
+      observations: [],
       confidence: 0.9,
     } satisfies ProjectProfile
 
@@ -49,16 +52,25 @@ describe('adapterFromProjectProfile', () => {
 })
 
 describe('detectStack', () => {
-  it('deve retornar TypeScriptAdapter para pasta com package.json', () => {
+  it('deve retornar JavaScriptAdapter para pasta com apenas package.json (Node.js/JS puro)', () => {
+    // package.json sem tsconfig = JavaScript — adapter proprio sem tsc
     const dir = makeTmpDir()
     writeFileSync(join(dir, 'package.json'), '{}')
+    const adapter = detectStack(dir)
+    expect(adapter.name).toBe('javascript')
+  })
+
+  it('deve retornar TypeScriptAdapter apenas quando tsconfig.json existe', () => {
+    const dir = makeTmpDir()
+    writeFileSync(join(dir, 'tsconfig.json'), '{}')
     const adapter = detectStack(dir)
     expect(adapter.name).toBe('typescript')
   })
 
-  it('deve retornar TypeScriptAdapter para pasta com tsconfig.json', () => {
+  it('deve retornar TypeScriptAdapter para pasta com tsconfig.json + package.json', () => {
     const dir = makeTmpDir()
     writeFileSync(join(dir, 'tsconfig.json'), '{}')
+    writeFileSync(join(dir, 'package.json'), '{}')
     const adapter = detectStack(dir)
     expect(adapter.name).toBe('typescript')
   })
@@ -87,5 +99,29 @@ describe('detectStack', () => {
   it('nunca deve lançar erro — todo projeto tem um fallback', () => {
     const dir = makeTmpDir()
     expect(() => detectStack(dir)).not.toThrow()
+  })
+})
+
+describe('detectStackFromChanges', () => {
+  it('retorna TypeScriptAdapter para arquivos .ts', () => {
+    expect(detectStackFromChanges(['src/app.ts', 'test/app.test.ts'])?.name).toBe('typescript')
+  })
+
+  it('retorna JavaScriptAdapter para arquivos .js puros — nao deve rodar tsc', () => {
+    const adapter = detectStackFromChanges(['calculator.js', 'test/calculator.test.js'])
+    expect(adapter?.name).toBe('javascript')
+  })
+
+  it('prefere .ts sobre .js quando ambos estao presentes', () => {
+    const adapter = detectStackFromChanges(['src/app.ts', 'dist/app.js'])
+    expect(adapter?.name).toBe('typescript')
+  })
+
+  it('retorna GoAdapter para arquivos .go', () => {
+    expect(detectStackFromChanges(['main.go', 'handler.go'])?.name).toBe('go')
+  })
+
+  it('retorna null para extensoes desconhecidas', () => {
+    expect(detectStackFromChanges(['README.md', 'Makefile'])).toBeNull()
   })
 })

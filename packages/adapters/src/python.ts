@@ -15,7 +15,7 @@ export const PythonAdapter: StackAdapter = {
 
   commands: {
     build: 'python -m py_compile',
-    test: 'pytest',
+    test: 'python -m unittest discover -v',
     lint: 'ruff check .',
   },
 

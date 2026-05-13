@@ -1,6 +1,7 @@
 import type { StackAdapter } from '@kova/shared'
 import type { ProjectProfile } from '@kova/shared'
 import { TypeScriptAdapter } from './typescript'
+import { JavaScriptAdapter } from './javascript'
 import { PythonAdapter } from './python'
 import { GoAdapter } from './go'
 import { RustAdapter } from './rust'
@@ -13,19 +14,20 @@ import { GenericAdapter } from './generic-adapter'
 
 // Ordered by specificity — most specific markers first
 const ADAPTERS: StackAdapter[] = [
-  FlutterAdapter,     // pubspec.yaml (before generic checks)
-  SwiftAdapter,       // Package.swift / Podfile
-  DotNetAdapter,      // .csproj / global.json
-  GradleAdapter,      // build.gradle / settings.gradle.kts
-  JavaMavenAdapter,   // pom.xml
-  RustAdapter,        // Cargo.toml
-  GoAdapter,          // go.mod
-  PythonAdapter,      // pyproject.toml / requirements.txt
-  RubyAdapter,        // Gemfile / Rakefile
-  PhpAdapter,         // composer.json / artisan
-  CppAdapter,         // CMakeLists.txt / meson.build
-  TypeScriptAdapter,  // package.json / tsconfig.json (broad — check after specifics)
-  CAdapter,           // Makefile only (fallback for C projects)
+  FlutterAdapter,      // pubspec.yaml (before generic checks)
+  SwiftAdapter,        // Package.swift / Podfile
+  DotNetAdapter,       // .csproj / global.json
+  GradleAdapter,       // build.gradle / settings.gradle.kts
+  JavaMavenAdapter,    // pom.xml
+  RustAdapter,         // Cargo.toml
+  GoAdapter,           // go.mod
+  PythonAdapter,       // pyproject.toml / requirements.txt
+  RubyAdapter,         // Gemfile / Rakefile
+  PhpAdapter,          // composer.json / artisan
+  CppAdapter,          // CMakeLists.txt / meson.build
+  TypeScriptAdapter,   // tsconfig.json (requires explicit TS config — checked before JS)
+  JavaScriptAdapter,   // package.json without tsconfig.json (Node.js / pure JS)
+  CAdapter,            // Makefile only (fallback for C projects)
 ]
 
 const ADAPTER_BY_NAME = new Map<string, StackAdapter>(
@@ -34,7 +36,7 @@ const ADAPTER_BY_NAME = new Map<string, StackAdapter>(
 
 const LANGUAGE_TO_ADAPTER: Record<string, string> = {
   typescript: 'typescript',
-  javascript: 'typescript',
+  javascript: 'javascript',
   go: 'go',
   python: 'python',
   rust: 'rust',
@@ -82,7 +84,7 @@ export function detectStackFromChanges(paths: string[]): StackAdapter | null {
   if (exts.has('rs') || paths.some(p => p.endsWith('Cargo.toml'))) return RustAdapter
   if (exts.has('py') || paths.some(p => p.endsWith('requirements.txt'))) return PythonAdapter
   if (exts.has('ts') || exts.has('tsx')) return TypeScriptAdapter
-  if (exts.has('js') || exts.has('jsx') || exts.has('mjs')) return TypeScriptAdapter
+  if (exts.has('js') || exts.has('jsx') || exts.has('mjs') || exts.has('cjs')) return JavaScriptAdapter
   if (exts.has('java') || paths.some(p => p.endsWith('pom.xml'))) return JavaMavenAdapter
   if (exts.has('kt') || exts.has('kts')) return GradleAdapter
   if (exts.has('cs') || exts.has('csproj')) return DotNetAdapter

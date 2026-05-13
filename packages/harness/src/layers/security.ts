@@ -1,12 +1,10 @@
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
 import type { LayerResult, HarnessError, HarnessWarning, FileChange } from '@kova/shared'
-
-const execAsync = promisify(exec)
+import { runCommandInvocation } from '@kova/shared'
 
 export interface SecurityLayerConfig {
   changes: FileChange[]
   projectRoot: string
+  signal?: AbortSignal
 }
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -23,7 +21,7 @@ export async function runSecurityLayer(config: SecurityLayerConfig): Promise<Lay
     return secResult(secretErrors, [], 0)
   }
 
-  const available = await isSemgrepAvailable(config.projectRoot)
+  const available = await isSemgrepAvailable(config.projectRoot, config.signal)
   if (!available) {
     const warn: HarnessWarning = {
       layer: 'security',
@@ -33,7 +31,7 @@ export async function runSecurityLayer(config: SecurityLayerConfig): Promise<Lay
     return { name: 'security', passed: true, errors: [], warnings: [warn], duration: 0, skipped: false }
   }
 
-  return runSemgrep(config.projectRoot)
+  return runSemgrep(config.projectRoot, config.signal)
 }
 
 function checkSecrets(changes: FileChange[]): HarnessError[] {
@@ -65,22 +63,30 @@ function checkSecrets(changes: FileChange[]): HarnessError[] {
   return errors
 }
 
-async function isSemgrepAvailable(projectRoot: string): Promise<boolean> {
-  try {
-    await execAsync('semgrep --version', { cwd: projectRoot, timeout: 5_000 })
-    return true
-  } catch {
-    return false
-  }
+async function isSemgrepAvailable(projectRoot: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await runCommandInvocation({
+    command: 'semgrep --version',
+    workspaceRoot: projectRoot,
+    kind: 'security',
+    timeoutMs: 5_000,
+    signal,
+  })
+  if (signal?.aborted) throwAbort()
+  return result.exitCode === 0
 }
 
-async function runSemgrep(projectRoot: string): Promise<LayerResult> {
+async function runSemgrep(projectRoot: string, signal?: AbortSignal): Promise<LayerResult> {
+  const start = Date.now()
+  const execResult = await runCommandInvocation({
+    command: 'semgrep --config=auto --json',
+    workspaceRoot: projectRoot,
+    kind: 'security',
+    timeoutMs: 120_000,
+    signal,
+  })
+  if (signal?.aborted) throwAbort()
   try {
-    const execResult = await execAsync('semgrep --config=auto --json', {
-      cwd: projectRoot,
-      timeout: 120_000,
-    })
-    const stdout = (execResult as unknown as { stdout: string }).stdout ?? ''
+    const stdout = execResult.stdout ?? ''
     const data = JSON.parse(stdout) as {
       results: Array<{
         path: string
@@ -98,7 +104,7 @@ async function runSemgrep(projectRoot: string): Promise<LayerResult> {
       file: r.path,
       line: r.start.line,
     }))
-    return secResult(errors, [], 0)
+    return { ...secResult(errors, [], Date.now() - start), command: execResult.command, cwd: execResult.cwd, kind: execResult.kind, stdout: execResult.stdout, stderr: execResult.stderr, exitCode: execResult.exitCode, startedAt: execResult.startedAt }
   } catch (error) {
     throw new Error(`Semgrep falhou: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -106,4 +112,10 @@ async function runSemgrep(projectRoot: string): Promise<LayerResult> {
 
 function secResult(errors: HarnessError[], warnings: HarnessWarning[], duration: number): LayerResult {
   return { name: 'security', passed: errors.length === 0, errors, warnings, duration, skipped: false }
+}
+
+function throwAbort(): never {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  throw err
 }

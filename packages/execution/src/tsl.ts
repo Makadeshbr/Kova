@@ -1,4 +1,5 @@
 import type { AgentMessage, TaskDefinition } from '@kova/shared'
+import { resolveTaskStack } from './language-detection'
 
 export interface TaskStructuringLLM {
   generate(messages: AgentMessage[], options?: { system?: string; maxTokens?: number }): Promise<{ thought: string }>
@@ -122,16 +123,22 @@ function buildTask(
   if (typeof parsed.objective !== 'string') return null
   if (!isStringArray(parsed.validationCriteria)) return null
 
+  const constraints = toStringArray(parsed.constraints)
+  const objective = parsed.objective.trim()
+  // Stack precedence: explicit language in user's text (objective + raw input + constraints)
+  // overrides project-detected stack. This makes the contract honour user intent like
+  // "JavaScript puro" even when the project folder is empty (generic).
+  const stackText = [input, objective, ...constraints].join(' ')
   return {
     id: project.id ?? `task-${Date.now()}`,
-    objective: parsed.objective.trim(),
-    constraints: toStringArray(parsed.constraints),
+    objective,
+    constraints,
     nonGoals: toStringArray(parsed.nonGoals),
     validationCriteria: parsed.validationCriteria.map(v => v.trim()).filter(Boolean),
     type: pickType(parsed.type),
     impact: inferImpact(input, parsed, project),
     affectedFiles: project.affectedFiles,
-    stackAdapter: project.stackAdapter,
+    stackAdapter: resolveTaskStack(stackText, project.stackAdapter),
   }
 }
 
