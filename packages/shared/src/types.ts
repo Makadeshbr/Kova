@@ -324,6 +324,7 @@ export interface ExecutionEvent {
     | 'provider_error' // provider/API failure classified by Kova, not harness/build output
     | 'tool_call'    // agent called a tool
     | 'tool_result'  // result of a tool call
+    | 'command_output' // real-time stdout/stderr line from a run_command tool invocation
     | 'harness_line' // real-time stdout/stderr line from a harness subprocess
     | 'harness_layer_start' // a harness layer just started running its command
     | 'provider_session_start' // provider/model resolved for this session — auditable metadata
@@ -368,6 +369,11 @@ export interface ExecutionEvent {
   harnessLayer?: string
   harnessLine?: string
   harnessStream?: 'stdout' | 'stderr'
+  // run_command streaming (FIX-003): correlates lines with the originating tool call.
+  // The UI groups lines by commandId under the latest pending run_command activity entry.
+  commandId?: string
+  commandLine?: string
+  commandStream?: 'stdout' | 'stderr'
   // provider session audit
   providerMeta?: {
     requestedProvider: string

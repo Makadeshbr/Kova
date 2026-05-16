@@ -26,7 +26,7 @@ export function FileEditor({ path, onClose }: Props): React.ReactElement {
     setIsDirty(false)
     window.kova.readFile(path).then(c => {
       if (c !== null) { setContent(c); setEditContent(c) }
-      else setError('Arquivo não encontrado ou sem permissão de leitura')
+      else setError('File not found or missing read permission')
     })
   }, [path])
 
@@ -44,7 +44,7 @@ export function FileEditor({ path, onClose }: Props): React.ReactElement {
       setIsEditing(false)
       setIsDirty(false)
     } catch (err) {
-      setError(`Erro ao salvar: ${err instanceof Error ? err.message : 'permissão negada ou disco cheio'}`)
+      setError(`Save failed: ${err instanceof Error ? err.message : 'permission denied or disk full'}`)
     } finally {
       setIsSaving(false)
     }

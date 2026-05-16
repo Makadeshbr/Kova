@@ -88,7 +88,7 @@ export class TerminalManager {
     if (!this.ptyImpl) {
       return {
         exitCode: 1,
-        output: 'Terminal interativo nao disponivel. O modulo node-pty nao esta compilado para esta versao do Electron. Execute: npx @electron/rebuild',
+        output: 'Interactive terminal not available. The node-pty module is not compiled for this Electron version. Run: npx @electron/rebuild',
       }
     }
 
@@ -98,7 +98,7 @@ export class TerminalManager {
     if (!INTERACTIVE_ALLOWLIST.has(exe)) {
       return {
         exitCode: 1,
-        output: `Comando "${exe}" nao esta na allowlist de comandos interativos. Comandos permitidos: ${[...INTERACTIVE_ALLOWLIST].join(', ')}`,
+        output: `Command "${exe}" is not in the interactive command allowlist. Allowed commands: ${[...INTERACTIVE_ALLOWLIST].join(', ')}`,
       }
     }
 
@@ -107,14 +107,14 @@ export class TerminalManager {
       return {
         exitCode: 1,
         output: this.projectRoot
-          ? `cwd "${cwd}" esta fora do projeto "${this.projectRoot}" — execucao bloqueada.`
-          : 'Nenhum projeto aberto — terminal nao pode ser executado.',
+          ? `cwd "${cwd}" is outside project "${this.projectRoot}" — execution blocked.`
+          : 'No project open — terminal cannot run.',
       }
     }
 
     const approved = await this.requestApproval(id, command, reason)
     if (!approved) {
-      return { exitCode: 1, output: 'Usuario negou a execucao do comando interativo.' }
+      return { exitCode: 1, output: 'User denied interactive command execution.' }
     }
 
     return this.startSession(id, command, safeCwd)

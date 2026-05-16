@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
-import type { FileChange, ValidationCommandKind } from '@kova/shared'
+import { randomUUID } from 'node:crypto'
+import type { CommandOutputCallback, FileChange, ValidationCommandKind } from '@kova/shared'
 import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -35,6 +36,12 @@ export const READ_ONLY_PERMISSION_POLICY: PermissionPolicy = {
 }
 
 const RUN_TIMEOUT_MS = 120_000  // 2 min — enough for npm install on slow machines
+
+// FIX-006: read_file returns up to this many characters per call. Files larger
+// than this are truncated with a clear message instructing the agent how to
+// continue reading via the `offset` parameter. Previously 8_000 — too small for
+// real-world files and caused silent data loss on re-writes.
+const READ_CHUNK_SIZE = 32_000
 
 const COMMAND_ALLOWLIST = [
   // Go
@@ -99,7 +106,7 @@ export interface KovaTool {
 export const AGENT_TOOLS: KovaTool[] = [
   {
     name: 'write_file',
-    description: 'Create or overwrite a file. Always provide the complete file content — never partial.',
+    description: 'Create a new file, or completely rewrite an existing one. Always provide the complete file content. For surgical changes to an existing file, prefer edit_file — it is cheaper and safer.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -110,12 +117,32 @@ export const AGENT_TOOLS: KovaTool[] = [
     },
   },
   {
-    name: 'read_file',
-    description: 'Read an existing file from the project.',
+    name: 'edit_file',
+    description: `Prefer this tool for surgical changes to an existing file. Replaces an exact literal string with a new one — much cheaper than rewriting the whole file with write_file.
+
+Rules:
+- old_string must match the file content EXACTLY, including indentation and newlines. Read the file first to copy it verbatim.
+- old_string must be unique in the file. If it appears more than once, either add surrounding context to make it unique, or set replace_all: true to substitute every occurrence.
+- Use write_file for new files or complete rewrites. Use delete_file (not edit_file with new_string: "") to remove a file.`,
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Relative path from project root' },
+        old_string: { type: 'string', description: 'Exact literal text to find. Must match including whitespace and newlines.' },
+        new_string: { type: 'string', description: 'Replacement text. Empty string is allowed (deletes the match).' },
+        replace_all: { type: 'boolean', description: 'When true, replaces every occurrence of old_string. Default false.' },
+      },
+      required: ['path', 'old_string', 'new_string'],
+    },
+  },
+  {
+    name: 'read_file',
+    description: 'Read an existing file from the project. Files larger than 32000 characters are truncated — use the `offset` parameter to read subsequent chunks (e.g. offset=32000 for the next chunk).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path from project root' },
+        offset: { type: 'number', description: 'Character offset to start reading from. Default 0. Use to continue reading large files that were truncated.' },
       },
       required: ['path'],
     },
@@ -211,18 +238,32 @@ export class ToolExecutor {
   private readonly originals = new Map<string, string | undefined>()
   /** Accumulated FileChange records for getChanges() — consumed by orchestrator */
   private readonly written = new Map<string, FileChange>()
+  /**
+   * Receives each stdout/stderr line emitted by run_command in real time.
+   * A fresh commandId is generated per command so the UI can group lines.
+   */
+  private readonly onCommandOutput?: CommandOutputCallback
 
   constructor(
     private readonly projectRoot: string,
     private readonly signal?: AbortSignal,
     private readonly permissionPolicy: PermissionPolicy = DEFAULT_PERMISSION_POLICY,
     private readonly interactiveRunner?: InteractiveRunner,
-  ) {}
+    onCommandOutput?: CommandOutputCallback,
+  ) {
+    this.onCommandOutput = onCommandOutput
+  }
 
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
     switch (name) {
       case 'write_file':  return this.writeFile(String(input.path ?? ''), String(input.content ?? ''))
-      case 'read_file':   return this.readFile(String(input.path ?? ''))
+      case 'edit_file':   return this.editFile(
+        String(input.path ?? ''),
+        String(input.old_string ?? ''),
+        String(input.new_string ?? ''),
+        input.replace_all === true,
+      )
+      case 'read_file':   return this.readFile(String(input.path ?? ''), numberOrZero(input.offset))
       case 'delete_file': return this.deleteFile(String(input.path ?? ''))
       case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
       case 'run_command': return this.runCommand(
@@ -284,25 +325,131 @@ export class ToolExecutor {
     return `OK: wrote ${path} (${content.split('\n').length} lines)`
   }
 
-  private readFile(rawPath: string): string {
+  /**
+   * FIX-013: surgical edit by literal string replacement.
+   *
+   * Reads current content (staged buffer takes precedence over disk), validates
+   * uniqueness of `oldString`, applies the replacement, and stages the result
+   * in the same in-memory buffer used by write_file. Disk is never touched.
+   *
+   * Returns a descriptive error (without staging anything) when:
+   *   - oldString is empty
+   *   - oldString === newString (no-op)
+   *   - file does not exist or was deleted in this session
+   *   - oldString is not found
+   *   - oldString matches multiple times and replaceAll is false
+   *   - the result would be an empty file (use delete_file instead)
+   *   - resulting Python file would have an empty block
+   *
+   * Change type is preserved across edits: if the file was created earlier in the
+   * same session (originals === undefined), subsequent edits keep type='create'.
+   */
+  private editFile(rawPath: string, oldString: string, newString: string, replaceAll: boolean): string {
+    const path = this.sanitizePath(rawPath)
+    if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
+    const permission = this.requirePermission('edit', path)
+    if (permission) return permission
+
+    if (oldString === '') {
+      return 'Error: old_string cannot be empty — use write_file to create a new file or insert content at a known anchor.'
+    }
+    if (oldString === newString) {
+      return 'Error: old_string and new_string are identical — no edit needed.'
+    }
+
+    // Resolve current content (staged buffer takes precedence over disk)
+    const current = this.resolveCurrentContent(path)
+    if ('error' in current) return current.error
+
+    // Count occurrences using literal split (handles regex special chars and dollar signs)
+    const parts = current.content.split(oldString)
+    const occurrences = parts.length - 1
+
+    if (occurrences === 0) {
+      return `Error: old_string not found in ${path}. Read the file first and copy the exact text — whitespace and newlines must match character-for-character.`
+    }
+    if (occurrences > 1 && !replaceAll) {
+      return `Error: old_string appears ${occurrences} times in ${path}. Add more surrounding context to make it unique, or pass replace_all: true to substitute every occurrence.`
+    }
+
+    const newContent = parts.join(newString)
+
+    if (newContent === '') {
+      return `Error: this edit would produce an empty file. Use delete_file to remove ${path} instead.`
+    }
+    if (path.endsWith('.py')) {
+      const syntaxHole = findPythonEmptyBlock(newContent)
+      if (syntaxHole) return `Error: Python syntax invalid after edit: ${syntaxHole}`
+    }
+
+    // Capture original disk content once for FileChange.before — also marks
+    // whether the file existed on disk before the agent loop started.
+    if (!this.originals.has(path)) {
+      const fullPath = join(this.projectRoot, path)
+      this.originals.set(path, existsSync(fullPath) ? readFileSync(fullPath, 'utf-8') : undefined)
+    }
+    const original = this.originals.get(path)
+
+    // Stage in memory — never touch disk
+    this.buffer.set(path, newContent)
+    this.written.set(path, {
+      path,
+      type: original === undefined ? 'create' : 'modify',
+      diff: newContent,
+      before: original,
+    })
+
+    const occurrencesText = occurrences === 1 ? '1 occurrence' : `${occurrences} occurrences`
+    return `OK: edited ${path} (replaced ${occurrencesText}; file now ${newContent.split('\n').length} lines)`
+  }
+
+  /**
+   * Returns the current logical content for a path (staged buffer wins over
+   * disk), or a structured error describing why it cannot be read for editing.
+   * Returning a discriminated result keeps the caller's control flow flat.
+   */
+  private resolveCurrentContent(path: string): { content: string } | { error: string } {
+    if (this.buffer.has(path)) {
+      const staged = this.buffer.get(path)
+      if (staged === null) {
+        return { error: `Error: cannot edit ${path} — file was deleted in this session.` }
+      }
+      return { content: staged as string }
+    }
+    const fullPath = join(this.projectRoot, path)
+    if (!existsSync(fullPath)) {
+      return { error: `Error: cannot edit ${path} — file not found. Use write_file to create it, or read_file first to confirm the path.` }
+    }
+    try {
+      return { content: readFileSync(fullPath, 'utf-8') }
+    } catch {
+      return { error: `Error: cannot read ${path} for editing` }
+    }
+  }
+
+  /**
+   * FIX-006: read up to READ_CHUNK_SIZE characters starting at `offset`. Files larger
+   * than the chunk are truncated with an explicit message telling the agent how to
+   * continue (`offset=<next>`). Prevents silent data loss when re-writing large files.
+   */
+  private readFile(rawPath: string, offset: number = 0): string {
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
     const permission = this.requirePermission('read', path)
     if (permission) return permission
 
     // Buffer takes precedence — agent reads its own staged writes
-    // Non-null assertion is safe: has() guarantees the key is present
     if (this.buffer.has(path)) {
       const staged = this.buffer.get(path)!
       if (staged === null) return `Error: not found — ${path} (deleted in this session)`
-      return staged.length > 8_000 ? `${staged.slice(0, 8_000)}\n...(truncated)` : staged
+      return sliceWithTruncationNotice(staged, offset, path)
     }
 
     const fullPath = join(this.projectRoot, path)
     if (!existsSync(fullPath)) return `Error: not found — ${path}`
     try {
       const content = readFileSync(fullPath, 'utf-8')
-      return content.length > 8_000 ? `${content.slice(0, 8_000)}\n...(truncated)` : content
+      return sliceWithTruncationNotice(content, offset, path)
     } catch {
       return `Error: cannot read ${path}`
     }
@@ -388,21 +535,58 @@ export class ToolExecutor {
       return `Blocked: ${normalized.reason}${normalized.hint ? ` ${normalized.hint}` : ''}`
     }
     if (isGitDiffCommand(normalized.command) && !existsSync(join(normalized.cwd, '.git')) && !existsSync(join(this.projectRoot, '.git'))) {
-      return 'Info: diff indisponivel: nao e repositorio Git'
+      return 'Info: diff unavailable — not a Git repository'
     }
-    const result = await runCommandInvocation({
+    // FIX-003: when a streaming consumer is attached, generate a commandId and forward
+    // each line via the callback. Without a consumer, the spawn fast-path is skipped
+    // (preserves backward-compatible execFile-based execution).
+    const commandId = this.onCommandOutput ? randomUUID() : undefined
+    const onLine = this.onCommandOutput && commandId
+      ? (line: string, stream: 'stdout' | 'stderr') => this.onCommandOutput!(commandId, line, stream)
+      : undefined
+    const result = await this.withStagedFilesOnDisk(() => runCommandInvocation({
       command,
       workspaceRoot: this.projectRoot,
       cwd,
       kind,
       timeoutMs: RUN_TIMEOUT_MS,
       signal: this.signal,
-    })
+      onLine,
+    }))
     if (this.signal?.aborted) return 'Aborted: command cancelled by session abort'
     if (result.timedOut) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
     const out = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
     if (result.exitCode !== 0) return `Error:\n${out || 'command failed'}`
     return out || 'OK: command completed with no output'
+  }
+
+  private async withStagedFilesOnDisk<T>(run: () => Promise<T>): Promise<T> {
+    if (this.buffer.size === 0) return run()
+
+    const touched = [...this.buffer.keys()]
+    try {
+      for (const [path, content] of this.buffer.entries()) {
+        const fullPath = join(this.projectRoot, path)
+        if (content === null) {
+          rmSync(fullPath, { force: true })
+        } else {
+          mkdirSync(dirname(fullPath), { recursive: true })
+          writeFileSync(fullPath, content, 'utf-8')
+        }
+      }
+      return await run()
+    } finally {
+      for (const path of touched.reverse()) {
+        const fullPath = join(this.projectRoot, path)
+        const original = this.originals.get(path)
+        if (original === undefined) {
+          rmSync(fullPath, { force: true })
+        } else {
+          mkdirSync(dirname(fullPath), { recursive: true })
+          writeFileSync(fullPath, original, 'utf-8')
+        }
+      }
+    }
   }
 
   private sanitizePath(raw: string): string | null {
@@ -463,6 +647,32 @@ function isGitDiffCommand(command: string): boolean {
 
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function numberOrZero(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value)
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n)
+  }
+  return 0
+}
+
+/**
+ * FIX-006: slice file content at `offset`, returning up to READ_CHUNK_SIZE chars.
+ * When the file is larger than what fits, returns a TRUNCATED marker that tells the
+ * model exactly how to continue (`offset=<next>`). Offset beyond EOF returns a
+ * descriptive error so the model can recover instead of silently writing back
+ * incomplete content.
+ */
+function sliceWithTruncationNotice(content: string, offset: number, path: string): string {
+  const total = content.length
+  if (offset > total) return `Error: offset ${offset} is beyond file end (${total} chars) — ${path}`
+  const start = offset
+  const end = Math.min(total, start + READ_CHUNK_SIZE)
+  const chunk = content.slice(start, end)
+  if (end >= total) return chunk
+  return `${chunk}\n...(TRUNCATED — ${total} chars total; you read ${start}-${end}. Call read_file again with offset=${end} to continue.)`
 }
 
 function findPythonEmptyBlock(content: string): string | null {

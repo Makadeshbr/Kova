@@ -33,11 +33,14 @@ executor.getChanges()          // retorna mudanças acumuladas
 ### AGENT_TOOLS (escrita + leitura)
 | Tool | Parâmetros | Efeito |
 |------|-----------|--------|
-| write_file | path, content | Cria ou sobrescreve arquivo |
+| write_file | path, content | Cria arquivo novo ou reescreve totalmente. Para mudanças cirúrgicas, prefira `edit_file`. |
+| edit_file | path, old_string, new_string, replace_all? | Substitui literal exato no arquivo (FIX-013). Valida unicidade: 0 matches → erro; >1 matches sem `replace_all` → erro. Trabalha em buffer staged; tipo de FileChange preservado (create permanece create se editado na mesma sessão). |
 | read_file | path | Lê arquivo (registra FileChange type='modify' only se escreveu antes) |
 | delete_file | path | Remove arquivo |
 | list_files | dir? | Lista diretório |
 | run_command | command | Executa comando da allowlist |
+
+**Ordem de preferência para alterar código existente:** `edit_file` (1ª escolha) → `write_file` (rewrite completo) → `delete_file` (remover).
 
 ### READ_ONLY_TOOLS
 Apenas `read_file` e `list_files`. Usar em modos `plan` e `review`.
@@ -50,10 +53,15 @@ go, npm/npx, python/pip, cargo, mvn/gradle, dotnet, ruby/gem/rake, composer, swi
 ## Providers
 
 ### AnthropicProvider
-- `capabilities()` → `{ supportsToolCalls: true, contextTokenLimit: 180_000 }`
+- `capabilities()` → `{ supportsToolCalls: true, contextTokenLimit: 180_000, supportsPromptCaching: true }`
 - Quando `tools: []` e `onToken` fornecido: usa `messages.stream()` (NÃO `generate()`)
 - Quando `tools: []` e sem `onToken`: usa `generate()` (sem streaming)
 - Com tools: loop de até `maxTurns` gerenciando tool_use/tool_result
+- **Prompt caching (FIX-014)**: `cache_control: { type: 'ephemeral' }` aplicado em 3 breakpoints por chamada via `anthropic-cache.ts`:
+  1. system prompt (TextBlockParam[])
+  2. último tool da lista
+  3. último content block da última mensagem do histórico (avança a cada turno — incremental caching)
+- `onUsageReport(ProviderUsageReport)` em `AgentLoopOptions` recebe `{cacheReadInputTokens, cacheCreationInputTokens, inputTokens, outputTokens}` por chamada.
 
 ### OpenAICompatibleProvider
 - `capabilities()` → `supportsToolCalls` inferido pelo nome do modelo

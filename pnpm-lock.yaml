@@ -87,6 +87,15 @@ importers:
       '@kova/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@lydell/node-pty':
+        specifier: 1.2.0-beta.12
+        version: 1.2.0-beta.12
+      '@xterm/addon-fit':
+        specifier: ^0.11.0
+        version: 0.11.0
+      '@xterm/xterm':
+        specifier: ^5.5.0
+        version: 5.5.0
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
@@ -234,16 +243,37 @@ importers:
 
   packages/evals:
     dependencies:
+      '@kova/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@kova/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@kova/application':
+        specifier: workspace:*
+        version: link:../application
+      '@kova/context':
+        specifier: workspace:*
+        version: link:../context
       '@kova/decision':
         specifier: workspace:*
         version: link:../decision
       '@kova/execution':
         specifier: workspace:*
         version: link:../execution
+      '@kova/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@kova/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
       '@kova/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(jiti@1.21.7)(postcss@8.5.12)(typescript@5.9.3)
@@ -259,6 +289,9 @@ importers:
       '@kova/decision':
         specifier: workspace:*
         version: link:../decision
+      '@kova/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@kova/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
@@ -431,6 +464,9 @@ importers:
 
   packages/shared:
     devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(jiti@1.21.7)(postcss@8.5.12)(typescript@5.9.3)
@@ -751,6 +787,39 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@lydell/node-pty-darwin-arm64@1.2.0-beta.12':
+    resolution: {integrity: sha512-tqaifcY9Cr41SblO1+FLzh8oxxtkNhuW9Dhl22lKme9BreYvKvxEZcdPIXTuqkJc5tagOEC4QHShKmJjLyLXLQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@lydell/node-pty-darwin-x64@1.2.0-beta.12':
+    resolution: {integrity: sha512-4LrS5pCJwqHKDVf1zS2gyNV0m4hKAXch+XZNhbZ6LY8uwVL8BhchzQBO40Os5anuRxRCWzHpw4Sp64Ie8q7E4Q==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@lydell/node-pty-linux-arm64@1.2.0-beta.12':
+    resolution: {integrity: sha512-Sx+A71x5BDGHt9ansfrtGxwq2VFVDWvJUAdlUL0Hv0qeiJUfts+hgopx+CgT4PSwahKjdEgtu0+FAfY9rICKRw==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@lydell/node-pty-linux-x64@1.2.0-beta.12':
+    resolution: {integrity: sha512-bJzs94njofYhGg/UDqW1nj0dtvvu+2OvxMY+RlLS1T17VgcktKoIR6PuenTwE5HJ/D6StCPADmXcT0nNsCKmIQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@lydell/node-pty-win32-arm64@1.2.0-beta.12':
+    resolution: {integrity: sha512-p7POgjVEiFaBC3/y+AKuV1FzePCsJ6HmZDv2XK+jBZSfwP8+uBAw181ZiKYN1YuRa/XpmBGaWezcI8hZkbW++g==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@lydell/node-pty-win32-x64@1.2.0-beta.12':
+    resolution: {integrity: sha512-IDFa00g7qUDGUYgByrUBJtC+mOjYVt/8KYyWivCg5JjGOHbBUACUQZLl0jTWmnr+tld/UyTpX90a2PY6oTVtRw==}
+    cpu: [x64]
+    os: [win32]
+
+  '@lydell/node-pty@1.2.0-beta.12':
+    resolution: {integrity: sha512-qIK890UwPupoj07osVvgOIa++1mxeHbcGry4PKRHhNVNs81V2SCG34eJr46GybiOmBtc8Sj5PB1/GGM5PL549g==}
 
   '@malept/cross-spawn-promise@2.0.0':
     resolution: {integrity: sha512-1DpKU0Z5ThltBwjNySMC14g0CkbyhCaz9FkhxqNsZI6uAPJXFS8cMXlBKo26FJ8ZuW6S9GCMcR9IO5k2X5/9Fg==}
@@ -1086,6 +1155,12 @@ packages:
   '@xmldom/xmldom@0.9.10':
     resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
     engines: {node: '>=14.6'}
+
+  '@xterm/addon-fit@0.11.0':
+    resolution: {integrity: sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==}
+
+  '@xterm/xterm@5.5.0':
+    resolution: {integrity: sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A==}
 
   abbrev@1.1.1:
     resolution: {integrity: sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q==}
@@ -3375,6 +3450,33 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  '@lydell/node-pty-darwin-arm64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty-darwin-x64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty-linux-arm64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty-linux-x64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty-win32-arm64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty-win32-x64@1.2.0-beta.12':
+    optional: true
+
+  '@lydell/node-pty@1.2.0-beta.12':
+    optionalDependencies:
+      '@lydell/node-pty-darwin-arm64': 1.2.0-beta.12
+      '@lydell/node-pty-darwin-x64': 1.2.0-beta.12
+      '@lydell/node-pty-linux-arm64': 1.2.0-beta.12
+      '@lydell/node-pty-linux-x64': 1.2.0-beta.12
+      '@lydell/node-pty-win32-arm64': 1.2.0-beta.12
+      '@lydell/node-pty-win32-x64': 1.2.0-beta.12
+
   '@malept/cross-spawn-promise@2.0.0':
     dependencies:
       cross-spawn: 7.0.6
@@ -3685,6 +3787,10 @@ snapshots:
       tinyrainbow: 1.2.0
 
   '@xmldom/xmldom@0.9.10': {}
+
+  '@xterm/addon-fit@0.11.0': {}
+
+  '@xterm/xterm@5.5.0': {}
 
   abbrev@1.1.1: {}
 

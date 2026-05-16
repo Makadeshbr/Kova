@@ -49,19 +49,19 @@ export function normalizeProviderError(
   const isAbort = err instanceof Error && (err.name === 'AbortError' || msg.includes('aborted'))
 
   if (isAbort) {
-    return build('provider_unknown', 'Operacao cancelada.', false, status, meta, err)
+    return build('provider_unknown', 'Operation cancelled.', false, status, meta, err)
   }
   if (status === 401 || status === 403 || msg.includes('unauthorized') || msg.includes('api key')) {
-    return build('provider_auth', 'API key invalida. Verifique nas configuracoes.', false, status, meta, err)
+    return build('provider_auth', 'Invalid API key. Check Settings.', false, status, meta, err)
   }
   if (status === 429 || msg.includes('too many requests') || msg.includes('rate limit')) {
-    return build('provider_rate_limited', 'Limite do provider atingido. Tente novamente depois ou troque de provider.', true, status, meta, err)
+    return build('provider_rate_limited', 'Rate limit reached. Try again later or switch provider.', true, status, meta, err)
   }
   if (status === 404 && msg.includes('model')) {
-    return build('provider_model_not_found', 'Modelo nao encontrado. Verifique o nome do modelo nas configuracoes.', true, status, meta, err)
+    return build('provider_model_not_found', 'Model not found. Check the model name in Settings.', true, status, meta, err)
   }
   if ((status && status >= 500) || msg.includes('fetch') || msg.includes('econnrefused') || msg.includes('network') || msg.includes('timeout')) {
-    return build('provider_unavailable', 'Servidor LLM nao responde. Verifique se esta rodando.', true, status, meta, err)
+    return build('provider_unavailable', 'LLM server not responding. Check if it is running.', true, status, meta, err)
   }
   return build('provider_unknown', raw, false, status, meta, err)
 }

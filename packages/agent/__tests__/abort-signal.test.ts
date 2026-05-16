@@ -88,6 +88,40 @@ describe('ToolExecutor — AbortSignal: write/read/delete not affected', () => {
   })
 })
 
+describe('ToolExecutor — AbortSignal escalation to SIGKILL (FIX-009)', () => {
+  it('kills a SIGTERM-ignoring child within the grace period', async () => {
+    // Child registers SIGTERM handler that does nothing and would run 30s.
+    // POSIX: SIGTERM is ignored, our SIGKILL escalation must fire after ~3s grace.
+    // Windows: doesn't have POSIX signals, the first kill is already TerminateProcess.
+    // Either way: the process must die in well under 30s.
+    const stubbornCmd = 'node -e "process.on(\'SIGTERM\',()=>{});setTimeout(()=>{},30000)"'
+    const ctrl = new AbortController()
+    const executor = new ToolExecutor(projectRoot, ctrl.signal)
+    const start = Date.now()
+    const cmdPromise = executor.execute('run_command', { command: stubbornCmd })
+    // Let the child start and register its SIGTERM handler
+    await new Promise(r => setTimeout(r, 200))
+    ctrl.abort()
+    const result = await cmdPromise
+    const elapsed = Date.now() - start
+    expect(result).toMatch(/Aborted|Error/)
+    // Must die within grace+slack (3s SIGTERM grace + 2s slack) — well under 30s
+    expect(elapsed).toBeLessThan(6000)
+  }, 15_000)
+
+  it('clears the SIGKILL fallback timer when the process exits naturally', async () => {
+    // If a command finishes BEFORE abort fires, no SIGKILL timer should linger.
+    // We can't directly observe the timer, but we can ensure two consecutive normal
+    // runs complete cleanly with the same executor and shared signal.
+    const ctrl = new AbortController()
+    const executor = new ToolExecutor(projectRoot, ctrl.signal)
+    const r1 = await executor.execute('run_command', { command: 'node --version' })
+    const r2 = await executor.execute('run_command', { command: 'node --version' })
+    expect(r1).toMatch(/v\d+/)
+    expect(r2).toMatch(/v\d+/)
+  })
+})
+
 describe('ToolExecutor — AbortSignal: security invariants', () => {
   it('blocklist is enforced when signal is not aborted', async () => {
     const ctrl = new AbortController()

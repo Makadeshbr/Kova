@@ -72,7 +72,7 @@ export function resolveAtRefs(message: string, projectRoot: string): ResolvedAtR
     try {
       const rel = relative(projectRoot, fullPath).replace(/\\/g, '/')
       if (isProtectedPath(rel)) {
-        denied.push({ name: token, path: rel, reason: 'Arquivo protegido: segredos nao sao anexados ao contexto.' })
+        denied.push({ name: token, path: rel, reason: 'Protected file: secrets are never attached to context.' })
         continue
       }
       refs.push({ name: token, path: rel, content: readFileSync(fullPath, 'utf-8').slice(0, 8_000) })
@@ -98,5 +98,5 @@ export function shouldShortCircuitDeniedRefs(message: string, resolution: Resolv
 
 export function deniedRefsMessage(resolution: ResolvedAtRefs): string {
   const files = resolution.denied.map(r => `@${r.path}`).join(', ')
-  return `Nao posso ler ${files}. Arquivos de ambiente podem conter segredos e nao sao anexados ao contexto. Use um arquivo exemplo, como @.env.example, se quiser compartilhar variaveis sem valores sensiveis.`
+  return `Cannot read ${files}. Environment files may contain secrets and are never attached to context. Use an example file like @.env.example if you want to share variable names without sensitive values.`
 }

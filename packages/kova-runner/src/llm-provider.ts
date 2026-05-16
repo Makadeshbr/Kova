@@ -41,7 +41,7 @@ export function createProviderPair(request: ProviderConfig = {}): ProviderPair |
 
 export function missingProviderReason(): string {
   return [
-    'Nenhum provider LLM configurado.',
+    'No LLM provider configured.',
     'Rode kova connect para configurar um provider, kova login para OnAuth/OAuth, ou configure uma API key.',
     'Defina KOVA_LLM_PROVIDER com anthropic, openai, deepseek, kimi, openai-compatible ou ollama.',
     'Para modo gratuito local use KOVA_LLM_PROVIDER=ollama e Ollama em http://localhost:11434/v1.',

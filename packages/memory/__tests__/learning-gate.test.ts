@@ -78,4 +78,24 @@ describe('Learning Gate - classifyLearning', () => {
     expect(result.classification).toBe('rejected_learning')
     expect(result.approved).toBe(false)
   })
+
+  it('rejects gambiarra/workaround regardless of harness result', () => {
+    const hackCandidate = { ...baseCandidate, description: 'gambiarra: skip validation temporarily' }
+    const result = classifyLearning(hackCandidate, createHarnessResult(true))
+    expect(result.classification).toBe('temporary_workaround')
+    expect(result.approved).toBe(false)
+  })
+
+  it('sets invalidationRule when description has temporal condition', () => {
+    const temporal = { ...baseCandidate, description: 'use X until the API is stable' }
+    const result = classifyLearning(temporal, createHarnessResult(true))
+    expect(result.approved).toBe(true)
+    expect(result.invalidationRule).toBeTruthy()
+  })
+
+  it('no invalidationRule when description has no temporal condition', () => {
+    const result = classifyLearning(baseCandidate, createHarnessResult(true))
+    expect(result.approved).toBe(true)
+    expect(result.invalidationRule).toBeUndefined()
+  })
 })

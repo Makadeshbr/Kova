@@ -58,7 +58,7 @@ function parseArgs(): RunnerArgs {
   const get = (flag: string) => process.argv.find(a => a.startsWith(`${flag}=`))?.replace(`${flag}=`, '')
   const projectRoot = get('--project-root')
   if (!projectRoot) {
-    process.stderr.write('kova-runner: --project-root obrigatório\n')
+    process.stderr.write('kova-runner: --project-root is required\n')
     process.exit(2)
   }
   const modeArg = get('--mode')

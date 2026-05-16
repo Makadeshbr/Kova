@@ -1,8 +1,14 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { AgentMessage } from '@kova/shared'
-import type { LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions, ProviderCapabilities } from './provider'
+import type { LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions, ProviderCapabilities, ProviderUsageReport } from './provider'
 import type { KovaTool } from '../tools'
 import { normalizeProviderError } from './errors'
+import {
+  withCachedSystem,
+  withCachedTools,
+  withHistoryCacheBreakpoint,
+  parseCacheUsage,
+} from './anthropic-cache'
 
 export interface AnthropicProviderOptions {
   apiKey?: string
@@ -22,19 +28,25 @@ export class AnthropicProvider implements AgentProvider {
   }
 
   capabilities(): ProviderCapabilities {
-    return { supportsToolCalls: true, contextTokenLimit: 180_000 }
+    // FIX-014: explicit prompt caching is wired up via cache_control breakpoints.
+    return { supportsToolCalls: true, contextTokenLimit: 180_000, supportsPromptCaching: true }
   }
 
   // Single-turn — used for task structuring (no tools)
   async generate(messages: AgentMessage[], options: GenerateOptions = {}): Promise<LLMResponse> {
     const model = options.model ?? this.defaultModel
+    // FIX-014: cache the system prompt + the prior history. Single-shot calls
+    // still benefit when the same system+history shape repeats (task structuring).
+    const cachedSystem = withCachedSystem(options.system)
+    const cachedMessages = withHistoryCacheBreakpoint(messages.map(m => ({ role: m.role, content: m.content })))
+
     let response: Anthropic.Messages.Message
     try {
       response = await this.client.messages.create({
         model,
         max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-        system: options.system,
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        ...(cachedSystem ? { system: cachedSystem } : {}),
+        messages: cachedMessages,
       })
     } catch (err) {
       throw normalizeProviderError(err, { provider: 'anthropic', model })
@@ -47,15 +59,24 @@ export class AnthropicProvider implements AgentProvider {
 
   // Multi-turn agentic loop — streams text tokens when onToken is provided
   async runAgentLoop(messages: AgentMessage[], options: AgentLoopOptions): Promise<LLMResponse> {
-    const { system, tools, executor, maxTurns = 10, onToken, onToolCall, onToolResult, signal } = options
+    const { system, tools, executor, maxTurns = 10, onToken, onToolCall, onToolResult, onUsageReport, signal } = options
+
+    // FIX-014: precompute cache-marked system and tools once — they're stable across turns.
+    const cachedSystem = withCachedSystem(system)
+    const anthropicTools = withCachedTools(tools.map(toAnthropicTool))
+
     if (!tools.length) {
+      const baseHistory = messages.map(m => ({ role: m.role, content: m.content }))
+      const cachedHistory = withHistoryCacheBreakpoint(baseHistory)
+
       if (!onToken) return this.generate(messages, { system, model: options.model, maxTokens: options.maxTokens })
+
       // Streaming chat without tools (Anthropic doesn't stream via generate())
       const stream = this.client.messages.stream({
         model: options.model ?? this.defaultModel,
         max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-        system,
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        ...(cachedSystem ? { system: cachedSystem } : {}),
+        messages: cachedHistory,
       }, { signal })
       let thought = ''
       stream.on('text', text => { thought += text; onToken(text) })
@@ -65,22 +86,28 @@ export class AnthropicProvider implements AgentProvider {
       } catch (err) {
         throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
       }
+      reportUsage(response.usage, onUsageReport)
       return { thought, changes: [], tokensUsed: response.usage.input_tokens + response.usage.output_tokens }
     }
 
     const history: Anthropic.Messages.MessageParam[] = messages.map(m => ({ role: m.role, content: m.content }))
-    const anthropicTools = tools.map(toAnthropicTool)
     let thought = ''
     let tokensUsed = 0
 
     for (let turn = 0; turn < maxTurns; turn++) {
       if (signal?.aborted) break
+
+      // FIX-014: refresh the history breakpoint every turn — the marker moves
+      // forward as the loop appends assistant turns and tool_result blocks, so
+      // each turn's cached prefix grows.
+      const cachedHistory = withHistoryCacheBreakpoint(history)
+
       const params = {
         model: options.model ?? this.defaultModel,
         max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-        system,
+        ...(cachedSystem ? { system: cachedSystem } : {}),
         tools: anthropicTools,
-        messages: history,
+        messages: cachedHistory,
       }
 
       let response: Anthropic.Messages.Message
@@ -89,15 +116,10 @@ export class AnthropicProvider implements AgentProvider {
       if (onToken) {
         // Streaming path — emit tokens in real time and accumulate the full response
         const stream = this.client.messages.stream(params, { signal })
-        const contentBlocks: Anthropic.Messages.ContentBlock[] = []
 
         stream.on('text', (text) => {
           turnText += text
           onToken(text)
-        })
-
-        stream.on('contentBlock', (block) => {
-          contentBlocks.push(block)
         })
 
         try {
@@ -116,6 +138,7 @@ export class AnthropicProvider implements AgentProvider {
           .map(b => b.text).join('\n').trim()
       }
 
+      reportUsage(response.usage, onUsageReport)
       tokensUsed += response.usage.input_tokens + response.usage.output_tokens
       if (turnText.trim()) thought += (thought ? '\n' : '') + turnText.trim()
 
@@ -144,4 +167,22 @@ function toAnthropicTool(tool: KovaTool): Anthropic.Tool {
     description: tool.description,
     input_schema: tool.inputSchema as Anthropic.Tool['input_schema'],
   }
+}
+
+/**
+ * FIX-014: surface cache hit / miss counters to the caller. Called once per
+ * API response (i.e. once per agent-loop turn).
+ */
+function reportUsage(
+  usage: Anthropic.Messages.Usage,
+  onUsageReport: ((report: ProviderUsageReport) => void) | undefined,
+): void {
+  if (!onUsageReport) return
+  const parsed = parseCacheUsage(usage)
+  onUsageReport({
+    cacheReadInputTokens: parsed.cacheReadInputTokens,
+    cacheCreationInputTokens: parsed.cacheCreationInputTokens,
+    inputTokens: parsed.inputTokens,
+    outputTokens: parsed.outputTokens,
+  })
 }

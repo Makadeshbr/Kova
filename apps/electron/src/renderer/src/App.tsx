@@ -4,6 +4,7 @@ import { useSessionPersistence } from './hooks/useSessionPersistence'
 import type { ExecutionEvent, ExecutionState, TaskDefinition, StartTaskParams } from './types'
 import type { KovaSettings } from '../../main/ipc-handlers'
 import { buildTokenBudgetedHistory } from '../../main/history-utils'
+import { parseUserInput, type UserCommand } from './lib/parse-user-input'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
@@ -117,7 +118,11 @@ export function App(): React.ReactElement {
     onSessionIdCreated: (id) => setState(prev => ({ ...prev, sessionId: id })),
   })
 
-  const buildTaskParams = useCallback((objective: string, overrides?: Partial<Pick<QueuedMessage, 'mode'>>): StartTaskParams => {
+  // Command Pattern (race-free): once a UserCommand is created at submission time,
+  // it carries the full intent (text + mode) atomically through the pipeline.
+  // No downstream code reads `state.activeMode` to "guess" mode — eliminates the
+  // entire class of stale-closure bugs that affected slash command dispatch.
+  const buildTaskParams = useCallback((cmd: UserCommand): StartTaskParams => {
     const s = state.settings!
     const apiKeyMap: Record<string, string> = {
       anthropic: s.anthropicKey,
@@ -129,7 +134,7 @@ export function App(): React.ReactElement {
       'openai-compatible': s.openaiCompatibleKey,
     }
     return {
-      objective,
+      objective: cmd.text,
       projectRoot: state.projectRoot!,
       provider: s.defaultProvider as never,
       apiKey: apiKeyMap[s.defaultProvider] || undefined,
@@ -139,43 +144,43 @@ export function App(): React.ReactElement {
       model: state.activeModel || s.model || undefined,
       autoApply: s.autoApply,
       maxIterations: s.maxIterations,
-      mode: overrides?.mode ?? state.activeMode,
-      permissionMode: 'auto-review',  // always default, no longer user-selectable
-      includeProjectContext: true,     // always include context
+      mode: cmd.mode,                  // ← from atomic command, never stale
+      permissionMode: 'auto-review',
+      includeProjectContext: true,
       queuedCount: state.queuedMessages.length,
       openedFiles: state.openFilePath ? [state.openFilePath] : [],
     }
-  }, [state.settings, state.projectRoot, state.activeModel, state.activeMode, state.queuedMessages.length, state.openFilePath])
+  }, [state.settings, state.projectRoot, state.activeModel, state.queuedMessages.length, state.openFilePath])
 
-  const sendNow = useCallback(async (text: string, queued?: QueuedMessage) => {
+  const sendNow = useCallback(async (cmd: UserCommand) => {
     if (!state.settings || !state.projectRoot) return
-    const mode = queued?.mode ?? state.activeMode
-    // review/plan use focused history (task turns only); chat/patch carry full history
-    const taskOnly = mode === 'review' || mode === 'plan'
+    const taskOnly = cmd.mode === 'review' || cmd.mode === 'plan'
     const history = buildTokenBudgetedHistory(state.messages, { taskOnly })
     setState(prev => ({
       ...prev, isThinking: true, executionState: null, task: null,
       executionEvents: [], showDiff: false, streamingText: '', reasoning: EMPTY_REASONING,
-      messages: [...prev.messages, { id: Date.now().toString(), role: 'user', content: text, isTask: false }],
+      messages: [...prev.messages, { id: Date.now().toString(), role: 'user', content: cmd.text, isTask: false }],
     }))
-    await window.kova.sendMessage(text, history, buildTaskParams(text, queued))
+    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd))
   }, [state.settings, state.projectRoot, state.messages, buildTaskParams])
 
-  const handleSend = useCallback(async (text: string) => {
+  const handleSend = useCallback(async (rawText: string, modeOverride?: ChatMode) => {
     if (!state.settings || !state.projectRoot) return
+    // Single source of truth for user intent — parsed once, frozen, propagated.
+    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode)
     const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
-    const queued: QueuedMessage = {
-      id: `${Date.now()}`,
-      content: text,
-      mode: state.activeMode,
-      permissionMode: 'auto-review',
-      includeProjectContext: true,
-    }
     if (isBusy) {
+      const queued: QueuedMessage = {
+        id: `${Date.now()}`,
+        content: cmd.text,
+        mode: cmd.mode,
+        permissionMode: 'auto-review',
+        includeProjectContext: true,
+      }
       setState(prev => ({ ...prev, queuedMessages: [...prev.queuedMessages, queued] }))
       return
     }
-    await sendNow(text, queued)
+    await sendNow(cmd)
   }, [state.settings, state.projectRoot, state.isThinking, state.executionState, state.activeMode, sendNow])
 
   useEffect(() => {
@@ -183,7 +188,9 @@ export function App(): React.ReactElement {
     if (isBusy || state.queuedMessages.length === 0 || !state.settings || !state.projectRoot) return
     const [next, ...rest] = state.queuedMessages
     setState(prev => ({ ...prev, queuedMessages: rest }))
-    void sendNow(next.content, next)
+    // Reconstruct an atomic UserCommand from the queued message — the queued mode
+    // was captured at submission time, not now, so it's race-free by construction.
+    void sendNow({ text: next.content, mode: next.mode, fromSlashCommand: false })
   }, [state.isThinking, state.executionState?.status, state.queuedMessages, state.settings, state.projectRoot, sendNow])
 
   const handleOpenFolder = useCallback(async () => {
@@ -313,13 +320,14 @@ export function App(): React.ReactElement {
           }}
           onApply={() => window.kova.forceApply()}
           onRepair={() => {
-            void handleSend('As validações falharam. Investigue a causa, faça a menor correção possível e rode a validação novamente. Não mude a arquitetura.')
+            void handleSend('Validation failed. Investigate the cause, make the smallest possible fix, and run validation again. Do not change the architecture.')
           }}
         />
       </div>
       <React.Suspense fallback={null}>
         <TerminalPanel
           sessions={state.terminalSessions}
+          commandEvents={state.executionEvents}
           pendingApproval={state.pendingApproval}
           onClose={(id) => setState(prev => ({ ...prev, terminalSessions: prev.terminalSessions.filter(s => s.id !== id) }))}
           onApprove={(id, approved) => {

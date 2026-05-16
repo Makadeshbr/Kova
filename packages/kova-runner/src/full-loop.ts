@@ -65,12 +65,14 @@ export async function runFullLoop(
   }
 
   const agent = new Agent(providers.codeProvider, projectRoot)
+  const memory = new MemorySystem(projectRoot)
   const applicationEngine = new CodeApplicationEngine(projectRoot)
   const engine = new ExecutionEngine({
     agent,
     orchestrator: new HarnessOrchestrator(),
-    contextEngine: new ContextEngine(new MemorySystem(projectRoot), adapter),
+    contextEngine: new ContextEngine(memory, adapter),
     applicationEngine,
+    memory,
   }, { projectRoot, maxIterations: request.maxIterations ?? 5, autoApply: request.autoApply, onEvent })
 
   const state = await engine.run(task)

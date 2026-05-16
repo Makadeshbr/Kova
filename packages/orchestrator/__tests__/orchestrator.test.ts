@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { HarnessResult, FileChange } from '@kova/shared'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 vi.mock('@kova/harness', () => ({
   runPipeline: vi.fn(),
@@ -8,10 +11,11 @@ vi.mock('@kova/harness', () => ({
   runRulesLayer: vi.fn(),
   runSecurityLayer: vi.fn(),
   runLintLayer: vi.fn(),
+  runTypecheckLayer: vi.fn(),
 }))
 
 import { runPipeline } from '@kova/harness'
-import { HarnessOrchestrator } from '../src/orchestrator'
+import { HarnessOrchestrator, createOrchestratorConfig } from '../src/orchestrator'
 import type { OrchestratorConfig } from '../src/orchestrator'
 
 const mockPipeline = vi.mocked(runPipeline)
@@ -21,7 +25,7 @@ function fakeResult(score: number, passed = true): HarnessResult {
 }
 
 const cfg: OrchestratorConfig = {
-  projectRoot: '/tmp',
+  projectRoot: join(tmpdir(), 'kova-orchestrator-missing-root'),
   adapter: 'typescript',
   buildCommand: 'tsc --noEmit',
   typecheckCommand: 'tsc --noEmit',
@@ -73,6 +77,96 @@ describe('HarnessOrchestrator — seleção de modo', () => {
   it('deve respeitar modo explícito ignorando heurística', async () => {
     const result = await o.run(srcChange, cfg, 'full')
     expect(result.mode).toBe('full')
+  })
+})
+
+describe('HarnessOrchestrator - staging isolado', () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+  })
+
+  it('valida em workspace temporario sem escrever alteracoes no worktree real', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kova-orchestrator-real-'))
+    try {
+      mkdirSync(join(root, 'src'), { recursive: true })
+      writeFileSync(join(root, 'src', 'engine.ts'), 'export const value = 1\n', 'utf-8')
+
+      mockPipeline.mockImplementation(async (_layers, config) => {
+        expect(config.projectRoot).not.toBe(root)
+        expect(readFileSync(join(config.projectRoot, 'src', 'engine.ts'), 'utf-8')).toBe('export const value = 2\n')
+        expect(readFileSync(join(root, 'src', 'engine.ts'), 'utf-8')).toBe('export const value = 1\n')
+        return fakeResult(80)
+      })
+
+      const o = new HarnessOrchestrator()
+      await o.run(
+        [{ path: 'src/engine.ts', type: 'modify', diff: 'export const value = 2\n', before: 'export const value = 1\n' }],
+        { ...cfg, projectRoot: root },
+      )
+
+      expect(readFileSync(join(root, 'src', 'engine.ts'), 'utf-8')).toBe('export const value = 1\n')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('remove o workspace temporario depois da validacao', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kova-orchestrator-cleanup-'))
+    let stagedRoot = ''
+    try {
+      mockPipeline.mockImplementation(async (_layers, config) => {
+        stagedRoot = config.projectRoot
+        return fakeResult(80)
+      })
+
+      const o = new HarnessOrchestrator()
+      await o.run([{ path: 'created.ts', type: 'create', diff: 'export const ok = true\n' }], { ...cfg, projectRoot: root })
+
+      expect(stagedRoot).toBeTruthy()
+      expect(existsSync(stagedRoot)).toBe(false)
+      expect(existsSync(join(root, 'created.ts'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('createOrchestratorConfig - workspace cwd', () => {
+  it('usa o root do subprojeto quando o ProjectProfile detecta scope', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kova-subproject-config-'))
+    try {
+      mkdirSync(join(root, 'task-tracker-api'))
+      writeFileSync(join(root, 'task-tracker-api', 'go.mod'), 'module example.com/task-tracker-api\n', 'utf-8')
+      writeFileSync(join(root, 'task-tracker-api', 'main.go'), 'package main\n', 'utf-8')
+
+      const config = createOrchestratorConfig(root, 1, ['task-tracker-api/main.go'])
+
+      expect(config.testCommand).toContain('go test')
+      expect(config.testCwd).toBe('task-tracker-api')
+      expect(config.buildCwd).toBe('task-tracker-api')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('createOrchestratorConfig â€” Python validation commands', () => {
+  it('compila todos os arquivos Python reais no estado final e usa unittest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kova-python-config-'))
+    try {
+      writeFileSync(join(root, 'task_manager.py'), 'def ok():\n    return True\n', 'utf-8')
+      writeFileSync(join(root, 'test_task_manager.py'), 'import unittest\n', 'utf-8')
+
+      const config = createOrchestratorConfig(root, 2, ['task_manager.py'])
+
+      expect(config.adapter).toBe('python')
+      expect(config.buildCommand).toContain('python -m py_compile')
+      expect(config.buildCommand).toContain('"task_manager.py"')
+      expect(config.buildCommand).toContain('"test_task_manager.py"')
+      expect(config.testCommand).toBe('python -m unittest discover -v')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

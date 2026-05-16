@@ -110,7 +110,7 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
           )}
         </div>
 
-        <button onClick={onOpenSettings} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 8px', fontSize: 14 }} title="Configurações">⚙</button>
+        <button onClick={onOpenSettings} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 8px', fontSize: 14 }} title="Settings">⚙</button>
         {!isMac && <>
           <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
           <button onClick={() => window.kova.windowMinimize()} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 10px' }}>─</button>

@@ -14,11 +14,15 @@
  * message is always returned so the model has something to respond to.
  */
 
+import type { StructuredAgentMessage } from '@kova/shared'
+
 export interface HistoryInputMessage {
   role: string
   content: string
   /** True when this message is the direct task/engineering request (not chitchat). */
   isTask?: boolean
+  /** Structured assistant card rendered in the chat; serialized for LLM history. */
+  structured?: StructuredAgentMessage
 }
 
 export interface HistoryOutputMessage {
@@ -58,6 +62,8 @@ export function buildTokenBudgetedHistory(
   const eligible = messages
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .filter(m => !taskOnly || m.isTask === true || m.role === 'user')
+    .map(m => ({ ...m, content: historyContentFor(m) }))
+    .filter(m => m.content.trim().length > 0)
 
   let remainingBudget = charBudget
   const selected: HistoryOutputMessage[] = []
@@ -77,4 +83,34 @@ export function buildTokenBudgetedHistory(
   }
 
   return selected
+}
+
+export function structuredMessageToHistoryText(message: StructuredAgentMessage): string {
+  if (message.kind === 'plan_result') {
+    return [
+      `Plan created: ${message.objective}`,
+      message.files.length
+        ? `Files: ${message.files.map(file => `${file.path}${file.reason ? ` (${file.reason})` : ''}`).join(', ')}`
+        : '',
+      message.approach ? `Approach: ${message.approach}` : '',
+      message.validations.length ? `Validations: ${message.validations.join(', ')}` : '',
+      `Risk: ${message.risk}`,
+    ].filter(Boolean).join('\n')
+  }
+
+  const changed = message.filesChanged.map(file => `${file.path} (${file.status})`).join(', ')
+  const validations = message.validations.map(v => `${v.command}: ${v.status}`).join(', ')
+  return [
+    `${message.title}: ${message.summary}`,
+    changed ? `Files changed: ${changed}` : 'Files changed: none',
+    validations ? `Validations: ${validations}` : '',
+    message.notes.length ? `Notes: ${message.notes.join(' ')}` : '',
+    `Decision: ${message.decision}; risk: ${message.risk}`,
+  ].filter(Boolean).join('\n')
+}
+
+function historyContentFor(message: HistoryInputMessage): string {
+  const content = message.content.trim()
+  if (content) return content
+  return message.structured ? structuredMessageToHistoryText(message.structured) : ''
 }

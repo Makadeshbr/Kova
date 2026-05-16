@@ -26,7 +26,9 @@ describe('runFullLoop', () => {
 
     expect(result.handled).toBe(false)
     expect(result.status).toBe('skipped')
-    expect(result.reason).toContain('Nenhum provider LLM')
+    // FIX-004: provider error messages were translated PT → EN. Match the
+    // exact phrase produced by buildProviderFromEnv() in src/llm-provider.ts.
+    expect(result.reason).toContain('No LLM provider configured')
   })
 })
 

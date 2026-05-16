@@ -144,10 +144,10 @@ function buildTask(
 
 function validateTask(task: TaskDefinition): TaskStructuringResult {
   if (!task.objective || task.objective.length < 10) {
-    return invalid('Objetivo insuficiente', ['Inclua o resultado esperado da mudança.'])
+    return invalid('Insufficient objective', ['Include the expected result of the change.'])
   }
   if (task.validationCriteria.length === 0) {
-    return invalid('Critérios ausentes', ['Inclua pelo menos um critério verificável de validação.'])
+    return invalid('Missing criteria', ['Include at least one verifiable validation criterion.'])
   }
   return { valid: true, task }
 }

@@ -246,7 +246,7 @@ describe('ExecutionEngine', () => {
       expect(state.proofPack?.results?.validationConfidence).toBe('none')
       expect(state.proofPack?.finalUiDecision).toBe('needs_review')
       expect(state.proofPack?.validationsNotRun.map(v => v.kind)).toEqual(expect.arrayContaining(['rules', 'build', 'typecheck', 'tests']))
-      expect(state.proofPack?.residualRisk.join(' ')).toContain('Nenhuma validacao real')
+      expect(state.proofPack?.residualRisk.join(' ')).toContain('No real validation executed')
     })
   })
 
@@ -287,9 +287,9 @@ describe('ExecutionEngine', () => {
       expect(state.currentIteration).toBeGreaterThanOrEqual(1)
     })
 
-    it('deve lançar erro ao resumir engine que não está pausada', async () => {
+    it('throws when resuming an engine that is not paused', async () => {
       const engine = new ExecutionEngine(makeDeps(), makeOptions())
-      await expect(engine.resume()).rejects.toThrow('não está pausada')
+      await expect(engine.resume()).rejects.toThrow('Engine is not paused')
     })
 
     it('deve retomar execução e continuar iterando após resume', async () => {
@@ -498,5 +498,71 @@ describe('ExecutionEngine — Contract enforcement', () => {
     const last = state.iterationHistory.at(-1)
     expect(last?.decision.decision).toBe('reject')
     expect(last?.decision.score).toBeLessThan(70)
+  })
+})
+
+describe('ExecutionEngine — dynamic maxIterations (FIX-007)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('low-impact task gets ≥5 iterations even when user passes a smaller value', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1 }))
+    const state = await engine.run(makeTask('t', { impact: 'low' }))
+    // contract.maxFilesChanged for low impact = 6 → ceil(6 * 0.6) = 4 → floor max(1, 4) = 4
+    // Actually the floor is bumped to at least 5 by the helper to keep minimum sanity.
+    expect(state.maxIterations).toBeGreaterThanOrEqual(5)
+  })
+
+  it('medium-impact task auto-scales above default of 5', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5 }))
+    const state = await engine.run(makeTask('t', { impact: 'medium' }))
+    // contract.maxFilesChanged for medium = 12 → ceil(12 * 0.6) = 8 → max(5, 8) = 8
+    expect(state.maxIterations).toBe(8)
+  })
+
+  it('high-impact task scales up to 12 even with user default 5', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5 }))
+    const state = await engine.run(makeTask('t', { impact: 'high' }))
+    // contract.maxFilesChanged for high = 20 → ceil(20 * 0.6) = 12 → max(5, 12) = 12
+    expect(state.maxIterations).toBe(12)
+  })
+
+  it('respects an explicit user override above the computed floor', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 15 }))
+    const state = await engine.run(makeTask('t', { impact: 'low' }))
+    expect(state.maxIterations).toBe(15)
+  })
+
+  it('uses contract from options when provided, instead of recomputing from task', async () => {
+    const deps = makeDeps()
+    const customContract = {
+      id: 'c-1',
+      taskId: 't',
+      objective: 'test',
+      stackAdapter: 'typescript',
+      allowedPaths: ['**'],
+      forbiddenPaths: [],
+      safeZones: [],
+      allowedCommands: [],
+      forbiddenCommands: [],
+      validationCriteria: [],
+      requiresTests: false,
+      maxFilesChanged: 18,
+      createdAt: new Date().toISOString(),
+    }
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5, contract: customContract }))
+    const state = await engine.run(makeTask('t', { impact: 'low' }))
+    // ceil(18 * 0.6) = 11 → max(5, 11) = 11
+    expect(state.maxIterations).toBe(11)
+  })
+
+  it('uses safe default of 5 when no maxIterations is provided and impact is low', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions({}))
+    const state = await engine.run(makeTask('t', { impact: 'low' }))
+    expect(state.maxIterations).toBeGreaterThanOrEqual(5)
   })
 })

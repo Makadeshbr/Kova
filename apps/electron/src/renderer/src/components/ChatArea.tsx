@@ -4,6 +4,7 @@ import type { ChatMessage, ChatMode, QueuedMessage, ReasoningState, SessionUsage
 import type { AgentResultMessage } from '@kova/shared'
 import { FileCard } from './FileCard'
 import { ActivityFeed } from './ActivityFeed'
+import { getValidationConfidenceCopy } from '../lib/validation-confidence-copy'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ interface Props {
   reasoning: ReasoningState
   events: ExecutionEvent[]
   projectRoot: string | null
-  onSend: (text: string) => void
+  onSend: (text: string, modeOverride?: ChatMode) => void
   onOpenFolder: () => void
   queuedMessages: QueuedMessage[]
   activeMode: ChatMode
@@ -30,8 +31,8 @@ interface Props {
 // ─── Slash command palette ────────────────────────────────────────────────────
 
 const SLASH_COMMANDS = [
-  { cmd: '/plan',   label: 'Planejar',  detail: 'Analisa e cria plano técnico sem alterar arquivos' },
-  { cmd: '/review', label: 'Revisar',   detail: 'Revisão de código read-only com findings' },
+  { cmd: '/plan',   label: 'Plan',   detail: 'Analyze and create a technical plan — no file changes' },
+  { cmd: '/review', label: 'Review', detail: 'Read-only code review with detailed findings' },
 ]
 
 function SlashPalette({ query, onSelect }: { query: string; onSelect: (cmd: string) => void }): React.ReactElement | null {
@@ -251,7 +252,7 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
 
         {msg.validations.length > 0 && (
           <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)', display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontSize: 10, color: 'var(--text-3)' }}>validações:</span>
+            <span style={{ fontSize: 10, color: 'var(--text-3)' }}>checks:</span>
             {(expandV ? msg.validations : msg.validations.slice(0, 5)).map((v, i) => (
               <span key={i} style={{
                 fontSize: 10, padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)',
@@ -261,7 +262,7 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
             ))}
             {msg.validations.length > 5 && (
               <button onClick={() => setExpandV(e => !e)} style={{ fontSize: 10, color: 'var(--text-3)', background: 'transparent' }}>
-                {expandV ? 'menos' : `+${msg.validations.length - 5}`}
+                {expandV ? 'less' : `+${msg.validations.length - 5}`}
               </button>
             )}
           </div>
@@ -292,45 +293,201 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
   )
 }
 
+// ─── Plan card helpers ────────────────────────────────────────────────────────
+
+function fileExtensionBadge(path: string): { label: string; color: string } {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  const map: Record<string, { label: string; color: string }> = {
+    ts: { label: 'TS', color: '#3178C6' }, tsx: { label: 'TSX', color: '#3178C6' },
+    js: { label: 'JS', color: '#F7DF1E' }, jsx: { label: 'JSX', color: '#F7DF1E' },
+    py: { label: 'PY', color: '#3776AB' }, go: { label: 'GO', color: '#00ADD8' },
+    rs: { label: 'RS', color: '#DEA584' }, java: { label: 'JV', color: '#B07219' },
+    rb: { label: 'RB', color: '#CC342D' }, php: { label: 'PHP', color: '#777BB4' },
+    cs: { label: 'C#', color: '#178600' }, cpp: { label: 'C++', color: '#F34B7D' },
+    c: { label: 'C', color: '#555555' }, swift: { label: 'SW', color: '#FFAC45' },
+    kt: { label: 'KT', color: '#A97BFF' }, dart: { label: 'DART', color: '#00B4AB' },
+    html: { label: 'HTML', color: '#E34C26' }, css: { label: 'CSS', color: '#563D7C' },
+    scss: { label: 'SCSS', color: '#C6538C' }, json: { label: 'JSON', color: '#999999' },
+    md: { label: 'MD', color: '#888888' }, yml: { label: 'YML', color: '#CB171E' },
+    yaml: { label: 'YML', color: '#CB171E' }, sql: { label: 'SQL', color: '#E38C00' },
+  }
+  return map[ext] ?? { label: ext.slice(0, 4).toUpperCase() || 'FILE', color: 'var(--text-3)' }
+}
+
+/** Splits "1. step one 2. step two 3. step three" into ["step one", "step two", "step three"]. */
+function parseApproachSteps(approach: string): string[] {
+  const trimmed = approach.trim().replace(/\r\n/g, '\n')
+  const numbered = trimmed
+    .replace(/\s+(\d+[.)]\s+)/g, '\n$1')
+    .split(/\n+/)
+    .map(line => line.trim())
+    .filter(line => /^\d+[.)]\s+/.test(line))
+  if (numbered.length >= 2) {
+    return numbered.map(s => s.replace(/^\d+[.)]\s+/, '').trim()).filter(Boolean)
+  }
+  const bullets = trimmed.split(/\n+/).filter(line => /^\s*[-*]\s+/.test(line))
+  if (bullets.length >= 2) {
+    return bullets.map(s => s.replace(/^\s*[-*]\s+/, '').trim()).filter(Boolean)
+  }
+  return trimmed ? [trimmed] : []
+}
+
 function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage }): React.ReactElement {
   const riskColor = msg.risk === 'low' ? 'var(--teal)' : msg.risk === 'medium' ? 'var(--yellow)' : 'var(--red)'
+  const riskBg = msg.risk === 'low' ? 'var(--teal-dim)' : msg.risk === 'medium' ? 'var(--yellow-dim)' : 'var(--red-dim)'
+  const steps = parseApproachSteps(msg.approach)
+  const hasContent = msg.files.length > 0 || steps.length > 0 || msg.validations.length > 0
+
   return (
-    <div className="animate-fade-in" style={{ marginBottom: 16 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: '2px 12px 12px 12px', overflow: 'hidden' }}>
-        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border)', background: 'var(--bg-1)' }}>
-          <span style={{ color: 'var(--cyan)', fontSize: 14, fontWeight: 700 }}>◈</span>
-          <div style={{ flex: 1 }}>
-            <div style={{ color: 'var(--text-1)', fontSize: 13, fontWeight: 600 }}>Plano técnico</div>
-            <div style={{ color: 'var(--text-3)', fontSize: 11, marginTop: 1 }}>{msg.objective}</div>
+    <div className="animate-fade-in" style={{ marginBottom: 18 }}>
+      <div style={{
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        overflow: 'hidden',
+        background: 'var(--bg-1)',
+        boxShadow: '0 1px 0 rgba(255,255,255,0.02), 0 8px 24px rgba(0,0,0,0.25)',
+      }}>
+        {/* HEADER */}
+        <div style={{
+          padding: '14px 18px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 12,
+          borderBottom: '1px solid var(--border)',
+          background: 'linear-gradient(180deg, rgba(164,230,255,0.04) 0%, transparent 100%)',
+        }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: 8,
+            background: 'var(--cyan-dim)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--cyan)', fontSize: 14, fontWeight: 700, flexShrink: 0,
+          }}>P</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4,
+            }}>Implementation Plan</div>
+            <div style={{
+              color: 'var(--text-1)', fontSize: 14, fontWeight: 500,
+              lineHeight: 1.45, wordBreak: 'break-word',
+            }}>{msg.objective}</div>
           </div>
-          <span style={{ fontSize: 10, color: riskColor, fontFamily: 'var(--font-mono)', background: 'var(--bg-3)', padding: '1px 7px', borderRadius: 8 }}>risco: {msg.risk}</span>
+          <span style={{
+            fontSize: 10, color: riskColor, background: riskBg,
+            padding: '4px 10px', borderRadius: 8, fontFamily: 'var(--font-mono)',
+            fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
+            flexShrink: 0, alignSelf: 'flex-start', marginTop: 2,
+          }}>{msg.risk} risk</span>
         </div>
+
+        {/* FILES */}
         {msg.files.length > 0 && (
-          <div style={{ padding: '6px 10px', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)' }}>
-            <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 3, paddingLeft: 4 }}>Arquivos</div>
-            {msg.files.map((f, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, padding: '2px 4px' }}>
-                <span style={{ color: 'var(--cyan)', fontFamily: 'var(--font-mono)', fontSize: 10, flexShrink: 0, marginTop: 2 }}>~</span>
-                <div>
-                  <div style={{ color: 'var(--text-2)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>{f.path}</div>
-                  {f.reason && <div style={{ color: 'var(--text-3)', fontSize: 11 }}>{f.reason}</div>}
-                </div>
-              </div>
-            ))}
+          <div style={{ padding: '14px 18px', borderBottom: hasContent ? '1px solid var(--border)' : undefined }}>
+            <div style={{
+              color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10,
+              display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              <span>Files</span>
+              <span style={{
+                fontSize: 9, padding: '1px 6px', borderRadius: 8,
+                background: 'var(--bg-active)', color: 'var(--text-3)',
+                fontFamily: 'var(--font-mono)', textTransform: 'none',
+              }}>{msg.files.length}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {msg.files.map((f, i) => {
+                const badge = fileExtensionBadge(f.path)
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <span style={{
+                      fontSize: 9, fontWeight: 700, padding: '3px 6px',
+                      borderRadius: 4, background: 'var(--bg-3)',
+                      color: badge.color, fontFamily: 'var(--font-mono)',
+                      flexShrink: 0, minWidth: 32, textAlign: 'center',
+                      letterSpacing: '0.02em',
+                    }}>{badge.label}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        color: 'var(--text-1)', fontSize: 12.5,
+                        fontFamily: 'var(--font-mono)', fontWeight: 500,
+                        wordBreak: 'break-all',
+                      }}>{f.path}</div>
+                      {f.reason && (
+                        <div style={{
+                          color: 'var(--text-3)', fontSize: 11.5, marginTop: 2,
+                          lineHeight: 1.45,
+                        }}>{f.reason}</div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
-        {msg.approach && (
-          <div style={{ padding: '8px 14px', background: 'var(--bg-1)', borderBottom: msg.validations.length > 0 ? '1px solid var(--border)' : undefined }}>
-            <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Abordagem</div>
-            <div style={{ color: 'var(--text-2)', fontSize: 12.5, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{msg.approach}</div>
+
+        {/* APPROACH */}
+        {steps.length > 0 && (
+          <div style={{ padding: '14px 18px', borderBottom: msg.validations.length > 0 ? '1px solid var(--border)' : undefined }}>
+            <div style={{
+              color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10,
+            }}>Approach</div>
+            {steps.length > 1 ? (
+              <ol style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+                {steps.map((step, i) => (
+                  <li key={i} style={{
+                    display: 'flex', gap: 12, padding: '6px 0',
+                    borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : undefined,
+                  }}>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, color: 'var(--cyan)',
+                      background: 'var(--cyan-dim)', minWidth: 22, height: 22,
+                      borderRadius: '50%', display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', flexShrink: 0, fontFamily: 'var(--font-mono)',
+                    }}>{i + 1}</span>
+                    <span style={{
+                      color: 'var(--text-2)', fontSize: 12.5, lineHeight: 1.6,
+                      paddingTop: 2,
+                    }}>{step}</span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div style={{
+                color: 'var(--text-2)', fontSize: 12.5, lineHeight: 1.65,
+                whiteSpace: 'pre-wrap',
+              }}>{steps[0]}</div>
+            )}
           </div>
         )}
+
+        {/* VALIDATIONS */}
         {msg.validations.length > 0 && (
-          <div style={{ padding: '5px 12px', background: 'var(--bg-3)', display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Validações:</span>
-            {msg.validations.map((v, i) => (
-              <span key={i} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)', color: 'var(--text-2)', background: 'var(--bg-active)' }}>{v}</span>
-            ))}
+          <div style={{ padding: '12px 18px', background: 'var(--bg-2)' }}>
+            <div style={{
+              color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8,
+            }}>Validation</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {msg.validations.map((v, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: 'var(--text-ghost)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>$</span>
+                  <code style={{
+                    fontSize: 11.5, color: 'var(--text-1)',
+                    fontFamily: 'var(--font-mono)', wordBreak: 'break-all',
+                  }}>{v}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Empty-plan hint: model failed to produce structured content. */}
+        {!hasContent && (
+          <div style={{ padding: '14px 18px', color: 'var(--text-3)', fontSize: 12, fontStyle: 'italic' }}>
+            The model did not produce a structured plan. Try rephrasing the request or switch to a stronger model.
           </div>
         )}
       </div>
@@ -363,7 +520,7 @@ function ReasoningPanel({ reasoning }: { reasoning: ReasoningState }): React.Rea
     <div className="kova-reasoning-panel" data-active={reasoning.active}>
       <button type="button" className="kova-reasoning-header" onClick={() => setExpanded(v => !v)} aria-expanded={expanded}>
         <span className="kova-reasoning-orb"><span /></span>
-        <span className="kova-reasoning-title">{reasoning.active ? 'Raciocinando...' : 'Raciocínio concluído'}</span>
+        <span className="kova-reasoning-title">{reasoning.active ? 'Thinking...' : 'Thinking done'}</span>
         <span className="kova-reasoning-time">{elapsed}</span>
         <span className="kova-reasoning-dots" aria-hidden="true"><i /><i /><i /></span>
       </button>
@@ -404,20 +561,21 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
   const modified = changes.filter(c => c.type === 'modify').length
   const deleted  = changes.filter(c => c.type === 'delete').length
   const parts = [
-    created  > 0 && `+${created} criado${created  !== 1 ? 's' : ''}`,
-    modified > 0 && `~${modified} modificado${modified !== 1 ? 's' : ''}`,
-    deleted  > 0 && `−${deleted} deletado${deleted  !== 1 ? 's' : ''}`,
+    created  > 0 && `+${created} created`,
+    modified > 0 && `~${modified} modified`,
+    deleted  > 0 && `−${deleted} deleted`,
   ].filter(Boolean) as string[]
 
   const statusColor = status === 'completed' ? 'var(--teal)' : status === 'paused' ? 'var(--yellow)' : 'var(--red)'
   const statusIcon  = status === 'completed' ? '✓' : status === 'paused' ? '⏸' : '✗'
-  const statusLabel = status === 'completed' ? 'Aplicado'
-    : status === 'paused' ? 'Aguardando revisão'
-    : decision.reason || 'Correção necessária'
+  const statusLabel = status === 'completed' ? 'Applied'
+    : status === 'paused' ? 'Awaiting review'
+    : decision.reason || 'Repair needed'
 
   const passedLayers = harnessResult.layers.filter(l =>  l.passed && !l.skipped)
   const failedLayers = harnessResult.layers.filter(l => !l.passed && !l.skipped)
   const scoreColor   = score >= 90 ? 'var(--teal)' : score >= 70 ? 'var(--yellow)' : 'var(--red)'
+  const validationCopy = getValidationConfidenceCopy(harnessResult.validationConfidence)
 
   return (
     <div className="animate-fade-in" style={{ marginBottom: 16 }}>
@@ -460,6 +618,23 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
         {status !== 'completed' && (
           <div style={{ padding: '4px 14px', borderBottom: '1px solid var(--border)', fontSize: 11, color: statusColor }}>
             {statusLabel}
+          </div>
+        )}
+
+        {validationCopy.show && (
+          <div style={{
+            padding: '8px 14px',
+            borderBottom: '1px solid var(--border)',
+            background: validationCopy.tone === 'warning' ? 'var(--yellow-dim)' : 'var(--cyan-dim)',
+            color: validationCopy.tone === 'warning' ? 'var(--yellow)' : 'var(--cyan)',
+            fontSize: 11,
+            lineHeight: 1.5,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'flex-start',
+          }}>
+            <span style={{ fontSize: 13, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>ⓘ</span>
+            <span>{validationCopy.text}</span>
           </div>
         )}
 
@@ -516,10 +691,13 @@ export function ChatArea({
   const submit = useCallback(() => {
     const t = value.trim()
     if (!t || !projectRoot) return
-    // Detect and strip slash commands from input
+    // The slash command parsing happens canonically inside handleSend (parseUserInput).
+    // We still update the pinned-mode pill visually so subsequent messages without a
+    // slash prefix continue in the same mode. This setState is for UI state only —
+    // the dispatch decision is owned by handleSend.
     if (/^\/plan(\s|$)/i.test(t)) onModeChange('plan')
     else if (/^\/review(\s|$)/i.test(t)) onModeChange('review')
-    onSend(t.replace(/^\/(?:plan|review)\s*/i, '').trim() || t)
+    onSend(t)
     setValue('')
   }, [value, projectRoot, onSend, onModeChange])
 
@@ -561,8 +739,8 @@ export function ChatArea({
             <div style={{ fontSize: 30, fontWeight: 800, color: 'var(--amber)', letterSpacing: '0.12em' }}>KOVA</div>
             <p style={{ color: 'var(--text-3)', fontSize: 13, textAlign: 'center', lineHeight: 1.8, maxWidth: 340 }}>
               {projectRoot
-                ? 'Pergunte, analise, ou peça para criar e corrigir código.'
-                : 'Abra um projeto para começar.'}
+                ? 'Ask, analyze, or request to create and fix code.'
+                : 'Open a project to get started.'}
             </p>
             {!projectRoot && (
               <button onClick={onOpenFolder} style={{
@@ -570,14 +748,14 @@ export function ChatArea({
                 border: '1px solid rgba(193,122,46,0.25)', padding: '8px 22px',
                 borderRadius: 8, fontSize: 13,
               }}>
-                Abrir projeto
+                Open project
               </button>
             )}
             {projectRoot && (
               <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                 {[
-                  { label: '/plan — planeje antes de codar', mode: 'plan' as ChatMode },
-                  { label: '/review — revisão read-only', mode: 'review' as ChatMode },
+                  { label: '/plan — plan before coding', mode: 'plan' as ChatMode },
+                  { label: '/review — read-only review', mode: 'review' as ChatMode },
                 ].map(item => (
                   <button key={item.mode} onClick={() => onModeChange(item.mode)} style={{
                     fontSize: 11, padding: '5px 12px', borderRadius: 8,
@@ -623,12 +801,11 @@ export function ChatArea({
               {events.length > 0 && <ActivityFeed events={events} />}
               {isActive && (
                 <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--amber)', animation: 'pulse-amber 1.2s infinite', flexShrink: 0 }} />
-                  <span style={{ color: 'var(--amber)', fontSize: 11 }}>
-                    {executionState!.status === 'validating' ? 'Validando...'
-                     : executionState!.status === 'applying' ? 'Aplicando...'
-                     : executionState!.status === 'deciding' ? 'Decidindo...'
-                     : 'Processando...'}
+                  <span className="kova-shimmer-text" style={{ fontSize: 12, fontWeight: 500 }}>
+                    {executionState!.status === 'validating' ? 'Validating...'
+                     : executionState!.status === 'applying' ? 'Applying...'
+                     : executionState!.status === 'deciding' ? 'Deciding...'
+                     : 'Processing...'}
                   </span>
                 </div>
               )}
@@ -645,9 +822,9 @@ export function ChatArea({
         {/* Queue banner */}
         {queuedMessages.length > 0 && (
           <div style={{ marginBottom: 8, padding: '6px 10px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-2)', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ color: 'var(--yellow)', fontSize: 11, fontWeight: 700 }}>{queuedMessages.length} na fila</span>
+            <span style={{ color: 'var(--yellow)', fontSize: 11, fontWeight: 700 }}>{queuedMessages.length} queued</span>
             <span style={{ color: 'var(--text-3)', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{queuedMessages[0]?.content}</span>
-            <button onClick={onClearQueue} style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 11, padding: '1px 6px' }}>limpar</button>
+            <button onClick={onClearQueue} style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 11, padding: '1px 6px' }}>clear</button>
           </div>
         )}
 
@@ -660,10 +837,10 @@ export function ChatArea({
               fontFamily: 'var(--font-mono)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5,
             }}>
               /{activeMode}
-              <button onClick={() => onModeChange('patch')} style={{ background: 'transparent', color: 'var(--cyan)', opacity: 0.7, padding: 0, fontSize: 12, lineHeight: 1, marginLeft: 2 }} title="Sair do modo">✕</button>
+              <button onClick={() => onModeChange('patch')} style={{ background: 'transparent', color: 'var(--cyan)', opacity: 0.7, padding: 0, fontSize: 12, lineHeight: 1, marginLeft: 2 }} title="Exit mode">✕</button>
             </span>
             <span style={{ fontSize: 10, color: 'var(--text-3)' }}>
-              {activeMode === 'plan' ? 'Planejamento — sem alterar arquivos' : 'Revisão — sem alterar arquivos'}
+              {activeMode === 'plan' ? 'Plan mode — no file changes' : 'Review mode — no file changes'}
             </span>
           </div>
         )}
@@ -699,9 +876,9 @@ export function ChatArea({
               onKeyDown={onKeyDown}
               disabled={!projectRoot}
               placeholder={
-                !projectRoot ? 'Abra um projeto para começar...'
-                : isRunning || isThinking ? 'Mensagem entrará na fila...'
-                : 'Pergunte ou peça para criar algo. Use @arquivo ou /plan, /review'
+                !projectRoot ? 'Open a project to get started...'
+                : isRunning || isThinking ? 'Message will be queued...'
+                : 'Ask, analyze, or request code changes. Use @file or /plan, /review'
               }
               rows={1}
               style={{
@@ -768,7 +945,7 @@ export function ChatArea({
         </div>
 
         <p style={{ marginTop: 5, fontSize: 10, color: 'var(--text-ghost)', textAlign: 'center' }}>
-          Enter · Shift+Enter nova linha · @arquivo inclui contexto
+          Enter · Shift+Enter new line · @file includes context
         </p>
       </div>
     </div>

@@ -200,4 +200,105 @@ describe('OpenAICompatibleProvider', () => {
       expect(result.thought).toBe('Visible')
     })
   })
+
+  // FIX-011: Adversarial reasoning isolation tests. The audit confirmed reasoning
+  // never leaks via the happy path; these tests verify edge cases (split tags,
+  // multiple blocks, unclosed tags, partial prefix at end) cannot bypass the filter.
+  describe('reasoning isolation — adversarial cases (FIX-011)', () => {
+    let projectRoot: string
+    beforeEach(() => { projectRoot = mkdtempSync(join(tmpdir(), 'kova-oai-rfx11-')) })
+    afterEach(() => rmSync(projectRoot, { recursive: true, force: true }))
+
+    async function runAndCapture(chunks: unknown[]): Promise<{ tokens: string; reasoning: string; result: { thought: string } }> {
+      mockStream(chunks)
+      const tokens: string[] = []
+      const reasoning: string[] = []
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'task' }],
+        {
+          system: 'sys',
+          tools: [],
+          executor,
+          onToken: token => tokens.push(token),
+          onReasoningDelta: delta => reasoning.push(delta),
+        },
+      )
+      return { tokens: tokens.join(''), reasoning: reasoning.join(''), result }
+    }
+
+    it('opening <think> split across SSE chunks does not leak the tag', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { content: 'Hello <thi' } }] },
+        { choices: [{ delta: { content: 'nk>secret</think>World' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('Hello World')
+      expect(tokens).not.toContain('<thi')
+      expect(tokens).not.toContain('<think>')
+      expect(reasoning).toBe('secret')
+    })
+
+    it('closing </think> split across chunks does not leak reasoning to tokens', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { content: '<think>private plan</thi' } }] },
+        { choices: [{ delta: { content: 'nk>visible answer' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('visible answer')
+      expect(tokens).not.toContain('private plan')
+      expect(tokens).not.toContain('</thi')
+      expect(reasoning).toContain('private plan')
+    })
+
+    it('multiple <think> blocks in one stream are all filtered', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { content: '<think>step 1</think>Apple <think>step 2</think>Banana' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('Apple Banana')
+      expect(reasoning).toContain('step 1')
+      expect(reasoning).toContain('step 2')
+    })
+
+    it('unclosed <think> at end of stream is flushed as reasoning, not as tokens', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { content: 'Visible <think>thought never closes' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('Visible ')
+      expect(tokens).not.toContain('thought never closes')
+      expect(reasoning).toContain('thought never closes')
+    })
+
+    it('reasoning_content interleaved with content keeps streams separate', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { reasoning_content: 'part A' } }] },
+        { choices: [{ delta: { content: 'visible 1 ' } }] },
+        { choices: [{ delta: { reasoning_content: 'part B' } }] },
+        { choices: [{ delta: { content: 'visible 2' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('visible 1 visible 2')
+      expect(tokens).not.toContain('part A')
+      expect(tokens).not.toContain('part B')
+      expect(reasoning).toBe('part Apart B')
+    })
+
+    it('partial-tail-that-looks-like-tag is held back, not emitted prematurely', async () => {
+      // The filter must hold back trailing characters that could be the start of '<think>'
+      // until either the full tag arrives or the stream ends.
+      const { tokens } = await runAndCapture([
+        { choices: [{ delta: { content: 'Result is 42 <thi' } }] },
+        { choices: [{ delta: { content: 's is plain text' }, finish_reason: 'stop' }] },
+      ])
+      // Combined: "Result is 42 <this is plain text" — no real think tag
+      expect(tokens).toBe('Result is 42 <this is plain text')
+    })
+
+    it('content arriving AFTER reasoning_content does not pull reasoning into tokens', async () => {
+      const { tokens, reasoning } = await runAndCapture([
+        { choices: [{ delta: { reasoning_content: 'inner monologue' } }] },
+        { choices: [{ delta: { content: 'final answer' }, finish_reason: 'stop' }] },
+      ])
+      expect(tokens).toBe('final answer')
+      expect(reasoning).toBe('inner monologue')
+    })
+  })
 })

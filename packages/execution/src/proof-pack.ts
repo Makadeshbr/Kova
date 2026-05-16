@@ -50,12 +50,12 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
       }
     }
     if (harness.validationConfidence === 'none') {
-      residualRisk.push('Nenhuma validacao real executada; revisao humana obrigatoria.')
+      residualRisk.push('No real validation executed; human review is required.')
     } else if (harness.validationConfidence === 'partial') {
-      residualRisk.push('Validacao parcial executada; nao declarar seguranca completa.')
+      residualRisk.push('Only partial validation executed; do not claim complete safety.')
     }
     for (const layer of harness.layers.filter(l => !l.skipped && !l.passed)) {
-      residualRisk.push(`${layer.name} falhou com ${layer.errors.length} erro(s).`)
+      residualRisk.push(`${layer.name} failed with ${layer.errors.length} error(s).`)
     }
     for (const reason of harness.evidenceScore?.risk.reasons ?? []) residualRisk.push(reason)
     for (const reason of harness.evidenceScore?.completeness.reasons ?? []) notes.push(reason)
@@ -107,9 +107,9 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
 }
 
 function summarizeChangeReason(change: FileChange): string {
-  if (change.type === 'create') return 'Arquivo criado pela iteracao.'
-  if (change.type === 'delete') return 'Arquivo removido pela iteracao.'
-  return 'Arquivo modificado pela iteracao.'
+  if (change.type === 'create') return 'File created by iteration.'
+  if (change.type === 'delete') return 'File removed by iteration.'
+  return 'File modified by iteration.'
 }
 
 function summarizeLayer(layer: HarnessResult['layers'][number]): string | undefined {
@@ -138,11 +138,11 @@ function buildDiffSummary(
 }
 
 function buildProofSummary(state: ExecutionState, harness?: HarnessResult): string {
-  if (state.status === 'completed') return 'Alteracoes aplicadas apos validacao do harness.'
-  if (!harness) return 'Tarefa encerrada sem resultado de harness.'
-  if (!harness.passed) return 'Tarefa encerrada com validacao falhando no harness.'
-  if (harness.validationConfidence !== 'full') return 'Tarefa requer revisao porque a validacao foi parcial ou ausente.'
-  return 'Tarefa validada pelo harness e aguardando decisao/aplicacao.'
+  if (state.status === 'completed') return 'Changes applied after harness validation.'
+  if (!harness) return 'Task ended without harness results.'
+  if (!harness.passed) return 'Task ended with harness validation failing.'
+  if (harness.validationConfidence !== 'full') return 'Task requires review — validation was partial or missing.'
+  return 'Task validated by harness, awaiting decision/apply.'
 }
 
 function mapProofPackDecision(
@@ -163,10 +163,10 @@ function recommendNextStep(
   decision: NonNullable<ProofPack['finalUiDecision']>,
   harness?: HarnessResult,
 ): string {
-  if (decision === 'repair_needed') return 'Corrigir as falhas do harness e executar validacao novamente.'
-  if (decision === 'needs_review') return 'Revisar evidencias, diff e riscos antes de aplicar.'
-  if (harness?.validationConfidence === 'partial') return 'Executar validacoes adicionais antes de auto-apply.'
-  if (harness?.validationConfidence === 'none') return 'Configurar validacao real do projeto antes de aprovar.'
-  if (status === 'completed') return 'Nenhuma acao obrigatoria.'
-  return 'Revisar o Proof Pack e decidir o proximo passo.'
+  if (decision === 'repair_needed') return 'Fix the harness failures and run validation again.'
+  if (decision === 'needs_review') return 'Review evidence, diff, and risks before applying.'
+  if (harness?.validationConfidence === 'partial') return 'Run additional validation before auto-apply.'
+  if (harness?.validationConfidence === 'none') return 'Configure real project validation before approving.'
+  if (status === 'completed') return 'No required action.'
+  return 'Review the Proof Pack and decide the next step.'
 }

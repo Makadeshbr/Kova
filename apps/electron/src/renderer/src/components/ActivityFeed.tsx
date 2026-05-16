@@ -21,7 +21,12 @@ interface Activity {
   status: 'pending' | 'success' | 'error'
   label: string
   detail?: string
+  commandId?: string
+  /** FIX-003: run_command output streamed live, capped to last N lines. */
+  lines?: string[]
 }
+
+const MAX_STREAMED_LINES = 40
 
 export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
   const activities = useMemo(() => {
@@ -39,13 +44,13 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         let label = ''
         
         if (e.toolName === 'write_file' || e.toolName === 'delete_file') {
-          type = 'write'; label = e.toolName === 'write_file' ? `Escrevendo ${shortPath}` : `Deletando ${shortPath}`
+          type = 'write'; label = e.toolName === 'write_file' ? `Writing ${shortPath}` : `Deleting ${shortPath}`
         } else if (e.toolName === 'run_command') {
-          type = 'command'; label = `Executando comando`
+          type = 'command'; label = `Running command`
         } else if (e.toolName === 'list_files') {
-          type = 'list'; label = `Lendo diretório`
+          type = 'list'; label = `Reading directory`
         } else {
-          type = 'read'; label = `Lendo ${shortPath}`
+          type = 'read'; label = `Reading ${shortPath}`
         }
         
         list.push({ id: `tool_${i}`, type, status: 'pending', label, detail: rawPath })
@@ -66,7 +71,7 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         list.push({ id: `pss_${i}`, type: 'read', status: m.fallback ? 'error' : 'success', label, detail: m.fallbackReason })
       }
       else if (e.type === 'validation_started') {
-        list.push({ id: `val_${i}`, type: 'validate', status: 'pending', label: 'Validando regras com Harness' })
+        list.push({ id: `val_${i}`, type: 'validate', status: 'pending', label: 'Running harness validation' })
       }
       else if (e.type === 'harness_layer_start') {
         const layer = e.harnessLayer ?? 'harness'
@@ -78,9 +83,23 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         const lastHarness = [...list].reverse().find(a => a.type === 'command' && a.status === 'pending')
         if (lastHarness) lastHarness.detail = e.harnessLine?.slice(0, 120)
       }
+      else if (e.type === 'command_output') {
+        const lastCmd = [...list].reverse().find(a =>
+          a.type === 'command' &&
+          a.status === 'pending' &&
+          a.id.startsWith('tool_') &&
+          (!a.commandId || a.commandId === e.commandId),
+        )
+        if (lastCmd && e.commandLine !== undefined) {
+          lastCmd.commandId = e.commandId
+          if (!lastCmd.lines) lastCmd.lines = []
+          lastCmd.lines.push(e.commandLine)
+          if (lastCmd.lines.length > MAX_STREAMED_LINES) lastCmd.lines = lastCmd.lines.slice(-MAX_STREAMED_LINES)
+        }
+      }
       else if (e.type === 'context_ref_denied') {
-        const path = String(e.toolInput?.path ?? e.message ?? 'arquivo protegido')
-        list.push({ id: `deny_${i}`, type: 'read', status: 'error', label: `Bloqueado ${path.split(/[/\\]/).pop()}`, detail: e.message })
+        const path = String(e.toolInput?.path ?? e.message ?? 'protected file')
+        list.push({ id: `deny_${i}`, type: 'read', status: 'error', label: `Blocked ${path.split(/[/\\]/).pop()}`, detail: e.message })
       }
       else if (e.type === 'file_mutation') {
         const change = e.changes?.[0]
@@ -91,7 +110,7 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         if (lastVal) {
           lastVal.status = e.harnessResult?.passed ? 'success' : 'error'
           const failed = e.harnessResult?.layers.filter(layer => !layer.skipped && !layer.passed).map(layer => layer.command || layer.name)
-          lastVal.detail = failed?.length ? `Falhou: ${failed.join(', ')}` : `Score: ${e.harnessResult?.score ?? 0}/100`
+          lastVal.detail = failed?.length ? `Failed: ${failed.join(', ')}` : `Score: ${e.harnessResult?.score ?? 0}/100`
         }
       }
     }
@@ -110,7 +129,7 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, marginBottom: 12 }}>
       {activities.length > 5 && (
         <div style={{ fontSize: 11, color: 'var(--text-3)', paddingLeft: 8, marginBottom: 2 }}>
-          ... {activities.length - 5} passos anteriores
+          ... {activities.length - 5} previous steps
         </div>
       )}
       
@@ -162,7 +181,7 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
                   </span>
                 )}
               </div>
-              {!isPending && act.detail && act.type === 'command' && (
+              {!isPending && act.detail && act.type === 'command' && !act.lines && (
                 <pre style={{
                   margin: '4px 0 0',
                   maxHeight: 90,
@@ -173,6 +192,24 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
                   fontFamily: 'var(--font-mono)'
                 }}>
                   {act.detail.slice(0, 700)}
+                </pre>
+              )}
+              {act.lines && act.lines.length > 0 && act.type === 'command' && (
+                <pre style={{
+                  margin: '4px 0 0',
+                  maxHeight: isPending ? 180 : 140,
+                  overflow: 'auto',
+                  color: act.status === 'error' ? 'var(--red)' : 'var(--text-3)',
+                  fontSize: 10,
+                  lineHeight: 1.45,
+                  whiteSpace: 'pre-wrap',
+                  fontFamily: 'var(--font-mono)',
+                  background: 'rgba(0,0,0,0.25)',
+                  padding: '6px 8px',
+                  borderRadius: 4,
+                  border: '1px solid rgba(255,255,255,0.04)',
+                }}>
+                  {act.lines.join('\n')}
                 </pre>
               )}
             </div>

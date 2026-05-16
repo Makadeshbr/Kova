@@ -248,12 +248,12 @@ function ContextEvidenceCard({ sessionUsage }: { sessionUsage: SessionUsage }): 
     <section className="kova-panel-section kova-context-evidence">
       <div className="kova-section-title">
         <span>Context Pack</span>
-        <strong>{selected.length} usados</strong>
+        <strong>{selected.length} used</strong>
       </div>
 
       {selected.length > 0 && (
         <div className="kova-context-card-group">
-          <div className="kova-mini-title">Arquivos usados</div>
+          <div className="kova-mini-title">Files used</div>
           {selected.slice(0, 6).map(file => (
             <div key={file.path} className="kova-context-file used">
               <div>
@@ -268,7 +268,7 @@ function ContextEvidenceCard({ sessionUsage }: { sessionUsage: SessionUsage }): 
 
       {blocked.length > 0 && (
         <div className="kova-context-card-group">
-          <div className="kova-mini-title danger">Bloqueados</div>
+          <div className="kova-mini-title danger">Blocked</div>
           {blocked.slice(0, 4).map(file => (
             <div key={file.path} className="kova-context-file blocked">
               <div>
@@ -282,7 +282,7 @@ function ContextEvidenceCard({ sessionUsage }: { sessionUsage: SessionUsage }): 
 
       {rejected.length > 0 && (
         <div className="kova-context-card-group">
-          <div className="kova-mini-title muted">Rejeitados</div>
+          <div className="kova-mini-title muted">Rejected</div>
           {rejected.slice(0, 4).map(file => (
             <div key={`${file.path}:${file.reason}`} className="kova-context-file rejected">
               <div>
@@ -315,9 +315,9 @@ function EvidenceScoreCard({ last }: { last: NonNullable<ExecutionState['iterati
         <strong>{evidence.score}</strong>
       </div>
       <div className="kova-evidence-grid">
-        <div><span>Confiança</span><strong>{evidence.validationConfidence}</strong></div>
-        <div><span>Validações</span><strong>{evidence.validation.passedLayers.length}/{evidence.validation.executedLayers.length}</strong></div>
-        <div><span>Risco</span><strong>{evidence.risk.riskLevel}</strong></div>
+        <div><span>Confidence</span><strong>{evidence.validationConfidence}</strong></div>
+        <div><span>Validations</span><strong>{evidence.validation.passedLayers.length}/{evidence.validation.executedLayers.length}</strong></div>
+        <div><span>Risk</span><strong>{evidence.risk.riskLevel}</strong></div>
         <div><span>Patch</span><strong>{evidence.risk.patchSize}</strong></div>
       </div>
       {(evidence.blockers.length > 0 || evidence.notes.length > 0) && (
@@ -346,9 +346,9 @@ function ProofPackCard({ executionState }: { executionState: ExecutionState | nu
       {proof.summary && <p className="kova-proof-summary">{proof.summary}</p>}
       <div className="kova-evidence-grid">
         <div><span>Score</span><strong>{proof.finalScore}</strong></div>
-        <div><span>Confiança</span><strong>{proof.results?.validationConfidence ?? '-'}</strong></div>
-        <div><span>Validações</span><strong>{proof.validationsRun.filter(v => v.passed).length}/{proof.validationsRun.length}</strong></div>
-        <div><span>Arquivos</span><strong>{proof.diffSummary?.filesChanged ?? proof.changes.length}</strong></div>
+        <div><span>Confidence</span><strong>{proof.results?.validationConfidence ?? '-'}</strong></div>
+        <div><span>Validations</span><strong>{proof.validationsRun.filter(v => v.passed).length}/{proof.validationsRun.length}</strong></div>
+        <div><span>Files</span><strong>{proof.diffSummary?.filesChanged ?? proof.changes.length}</strong></div>
       </div>
 
       {failed.length > 0 && (
@@ -364,7 +364,7 @@ function ProofPackCard({ executionState }: { executionState: ExecutionState | nu
 
       {proof.validationsNotRun.length > 0 && (
         <div className="kova-proof-list">
-          <div className="kova-mini-title muted">Não executadas</div>
+          <div className="kova-mini-title muted">Not run</div>
           {proof.validationsNotRun.slice(0, 4).map(validation => (
             <p key={`${validation.kind}:${validation.reason}`}>{validation.kind}: {validation.reason}</p>
           ))}
@@ -429,31 +429,31 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
   let heroLabel = 'Idle'
   let heroColor = 'var(--text-3)'
   let heroBg = 'var(--bg-active)'
-  let heroSub = 'Aguardando tarefa.'
+  let heroSub = 'Waiting for a task.'
 
   if (uxMode === 'Chat') {
-    if (isRunning) { heroLabel = 'Conversando'; heroColor = 'var(--purple)'; heroBg = 'var(--purple-dim)'; heroSub = 'Entendendo o pedido...' }
+    if (isRunning) { heroLabel = 'Chatting'; heroColor = 'var(--purple)'; heroBg = 'var(--purple-dim)'; heroSub = 'Processing request...' }
   } else if (uxMode === 'Review') {
-    if (isRunning) { heroLabel = 'Revisando'; heroColor = 'var(--blue)'; heroBg = 'var(--blue-dim)'; heroSub = 'Lendo arquivos e preparando diagnóstico...' }
-    else { heroLabel = 'Review concluído'; heroColor = 'var(--teal)'; heroBg = 'var(--teal-dim)'; heroSub = 'Nenhuma alteração foi aplicada.' }
+    if (isRunning) { heroLabel = 'Reviewing'; heroColor = 'var(--blue)'; heroBg = 'var(--blue-dim)'; heroSub = 'Reading files and preparing analysis...' }
+    else { heroLabel = 'Review complete'; heroColor = 'var(--teal)'; heroBg = 'var(--teal-dim)'; heroSub = 'No changes applied.' }
   } else if (uxMode === 'Task') {
     const tone = statusTone(status)
     heroLabel = tone.label
     heroColor = tone.color
     heroBg = tone.bg
-    heroSub = decision?.reason ?? 'Aplicando modificações e validações...'
+    heroSub = decision?.reason ?? 'Running changes and validation...'
     if (isRepairLoop) {
-      heroLabel = `Reparo ${currentIteration}/${maxIterations}`
+      heroLabel = `Repair ${currentIteration}/${maxIterations}`
       heroColor = 'var(--amber)'
       heroBg = 'var(--amber-dim)'
       const failing = failedLayers.map(layer => LAYER_LABEL[layer.name] ?? layer.name).join(', ')
-      heroSub = failing ? `Corrigindo: ${failing}` : 'Aplicando correção...'
+      heroSub = failing ? `Fixing: ${failing}` : 'Applying fix...'
     }
     if (needsRepair) {
       heroLabel = 'Repair needed'
       heroColor = 'var(--red)'
       heroBg = 'var(--red-dim)'
-      heroSub = `${failedLayers.map(layer => LAYER_LABEL[layer.name] ?? layer.name).join(', ')} falhou; precisa nova correção.`
+      heroSub = `${failedLayers.map(layer => LAYER_LABEL[layer.name] ?? layer.name).join(', ')} failed; needs another fix.`
     }
   }
 
@@ -461,7 +461,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
   if (uxMode === 'Chat' && !isRunning && meaningfulEvents.length === 0) {
     return (
       <aside className="kova-run-panel" style={{ justifyContent: 'center', alignItems: 'center', opacity: 0.5 }}>
-        <p style={{ fontSize: 13, color: 'var(--text-3)' }}>Nenhuma tarefa ativa</p>
+        <p style={{ fontSize: 13, color: 'var(--text-3)' }}>No active task</p>
       </aside>
     )
   }
@@ -472,7 +472,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: heroColor, padding: '2px 6px', background: heroBg, borderRadius: 4 }}>
-              Modo {uxMode}
+              Mode {uxMode}
             </span>
           </div>
           <h2 style={{ color: heroColor }}>{heroLabel}</h2>
@@ -494,14 +494,14 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
         {(tab === 'timeline' || tab === 'events') && (sessionUsage.contextTokens > 0 || totalTokens > 0 || visibleContextFiles > 0) && (
           <section className="kova-panel-section">
             <div className="kova-section-title">
-              <span>Contexto</span>
+              <span>Context</span>
               <strong>{contextPercent !== null ? `${contextPercent}%` : '-'}</strong>
             </div>
             <div className="kova-contract-grid">
-              <div><span>Arquivos</span><strong>{visibleContextFiles}</strong></div>
-              <div><span>Contexto</span><strong>{(sessionUsage.contextTokens / 1000).toFixed(1)}k</strong></div>
+              <div><span>Files</span><strong>{visibleContextFiles}</strong></div>
+              <div><span>Context</span><strong>{(sessionUsage.contextTokens / 1000).toFixed(1)}k</strong></div>
               <div><span>Total</span><strong>{totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : totalTokens}</strong></div>
-              {executionState && <div><span>Duração</span><strong>{formatDuration(elapsedMs)}</strong></div>}
+              {executionState && <div><span>Duration</span><strong>{formatDuration(elapsedMs)}</strong></div>}
             </div>
           </section>
         )}
@@ -515,7 +515,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
               <strong>{meaningfulEvents.length}</strong>
             </div>
             <div className="kova-event-list">
-              {latestEvents.length === 0 && <p className="kova-muted">Nenhuma ação ainda.</p>}
+              {latestEvents.length === 0 && <p className="kova-muted">No actions yet.</p>}
               {latestEvents.map((event, index) => <EventRow key={`${event.timestamp}:timeline:${index}`} event={event} />)}
             </div>
           </section>
@@ -544,7 +544,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
                 <strong>{changes.length}</strong>
               </div>
               <div className="kova-file-list">
-                {changes.length === 0 && <p className="kova-muted">Nenhum arquivo alterado.</p>}
+                {changes.length === 0 && <p className="kova-muted">No files changed.</p>}
                 {changes.slice(0, 6).map(change => (
                   <div key={`${change.type}:${change.path}`} className="kova-file-row">
                     <span>{change.type}</span>
@@ -571,7 +571,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
                   <div><span>Tests</span><strong>{contract.requiresTests ? 'required' : 'optional'}</strong></div>
                   <div><span>Scope</span><strong>{contract.allowedPaths.slice(0, 2).join(', ') || '**'}</strong></div>
                 </div>
-              ) : <p className="kova-muted">Criado ao iniciar alterações.</p>}
+              ) : <p className="kova-muted">Created when task starts.</p>}
             </section>
 
             <section className="kova-panel-section">
@@ -582,8 +582,8 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
                 </strong>
               </div>
               <div className="kova-findings">
-                {!review && <p className="kova-muted">Aguardando validação.</p>}
-                {review?.findings.length === 0 && <p className="kova-muted">Nenhum alerta.</p>}
+                {!review && <p className="kova-muted">Waiting for validation.</p>}
+                {review?.findings.length === 0 && <p className="kova-muted">No findings.</p>}
                 {review?.findings.map((finding, index) => <FindingRow key={index} finding={finding} />)}
               </div>
             </section>
@@ -597,7 +597,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
               <strong>{meaningfulEvents.length}</strong>
             </div>
             <div className="kova-event-list">
-              {latestEvents.length === 0 && <p className="kova-muted">Nenhum evento registrado.</p>}
+              {latestEvents.length === 0 && <p className="kova-muted">No events recorded.</p>}
               {latestEvents.map((event, index) => <EventRow key={`${event.timestamp}:${index}`} event={event} />)}
             </div>
           </section>
@@ -605,13 +605,13 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
       </div>
 
       <div className="kova-run-actions">
-        {needsRepair && onRepair && <button className="primary repair" onClick={onRepair}>Corrigir falhas</button>}
-        {onViewDiff && uxMode === 'Task' && <button className="secondary" onClick={onViewDiff}>Revisar arquivos</button>}
-        {isPaused && uxMode === 'Task' && <button className="primary" onClick={onApply}>Aplicar mudanças</button>}
+        {needsRepair && onRepair && <button className="primary repair" onClick={onRepair}>Fix failures</button>}
+        {onViewDiff && uxMode === 'Task' && <button className="secondary" onClick={onViewDiff}>Review files</button>}
+        {isPaused && uxMode === 'Task' && <button className="primary" onClick={onApply}>Apply changes</button>}
         {isRunning && (
           <div className="kova-action-row">
-            {uxMode === 'Task' && <button className="secondary" onClick={onPause}>Pausar</button>}
-            <button className="danger" onClick={onAbort}>Cancelar</button>
+            {uxMode === 'Task' && <button className="secondary" onClick={onPause}>Pause</button>}
+            <button className="danger" onClick={onAbort}>Cancel</button>
           </div>
         )}
       </div>

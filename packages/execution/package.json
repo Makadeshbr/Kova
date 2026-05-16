@@ -10,7 +10,8 @@
   "dependencies": {
     "@kova/shared": "workspace:*",
     "@kova/orchestrator": "workspace:*",
-    "@kova/decision": "workspace:*"
+    "@kova/decision": "workspace:*",
+    "@kova/observability": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

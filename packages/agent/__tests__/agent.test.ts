@@ -41,6 +41,21 @@ function mockEndTurn(text: string) {
   })
 }
 
+/**
+ * FIX-014 made the provider send `system` and string-content messages as
+ * `TextBlockParam[]` with cache_control. Tests that only care about the
+ * underlying text use this to flatten either shape into a plain string.
+ */
+function flattenContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map(b => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text ?? '') : ''))
+      .join('')
+  }
+  return ''
+}
+
 function mockToolUse(text: string, toolName: string, toolInput: Record<string, string>) {
   mockCreate.mockResolvedValueOnce({
     content: [
@@ -60,8 +75,10 @@ describe('AnthropicProvider', () => {
     const provider = new AnthropicProvider({ apiKey: 'test-key' })
     await provider.generate([{ role: 'user', content: 'do something' }], { system: 'be helpful' })
     const call = mockCreate.mock.calls[0][0]
-    expect(call.system).toBe('be helpful')
-    expect(call.messages[0].content).toBe('do something')
+    // FIX-014: system is now TextBlockParam[] with cache_control; content too
+    expect(flattenContent(call.system)).toBe('be helpful')
+    expect(flattenContent(call.messages[0].content)).toBe('do something')
+    expect(call.system[0].cache_control).toEqual({ type: 'ephemeral' })
   })
 
   it('generate() não envia tools — é single-turn para task structuring', async () => {
@@ -147,7 +164,7 @@ describe('Agent', () => {
     mockEndTurn('OK')
     const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
     await agent.execute(makeTask({ constraints: ['no external deps'] }), makeContext())
-    const content = mockCreate.mock.calls[0][0].messages[0].content
+    const content = flattenContent(mockCreate.mock.calls[0][0].messages[0].content)
     expect(content).toContain('no external deps')
   })
 
@@ -156,7 +173,7 @@ describe('Agent', () => {
     const ctx = makeContext({ files: [{ path: 'src/utils.ts', content: 'export const x = 1', tokens: 5, relevance: 'direct_dep' }] })
     const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
     await agent.execute(makeTask(), ctx)
-    const content = mockCreate.mock.calls[0][0].messages[0].content
+    const content = flattenContent(mockCreate.mock.calls[0][0].messages[0].content)
     expect(content).toContain('src/utils.ts')
   })
 
@@ -185,7 +202,7 @@ describe('Agent', () => {
     })
     const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
     await agent.execute(makeTask(), ctx)
-    const content = mockCreate.mock.calls[0][0].messages[0].content
+    const content = flattenContent(mockCreate.mock.calls[0][0].messages[0].content)
     expect(content).toContain('Context pack evidence')
     expect(content).toContain('Explicitly affected by the task.')
     expect(content).toContain('test: npm test')

@@ -31,7 +31,7 @@ export function useSessionPersistence(opts: {
     const id = sessionId || Date.now().toString()
     if (!sessionId) onCreatedRef.current(id)
 
-    const title = messages.find(m => m.role === 'user')?.content.slice(0, 30) || 'Nova Sessão'
+    const title = messages.find(m => m.role === 'user')?.content.slice(0, 30) || 'New Session'
     const session = {
       id, title, updatedAt: new Date().toISOString(),
       messages, task, sessionUsage, executionState, events: executionEvents,

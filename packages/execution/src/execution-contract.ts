@@ -85,7 +85,7 @@ export function validateContractChanges(
     if (matchesAny(change.path, contract.forbiddenPaths)) {
       violations.push({
         severity: 'critical',
-        message: `${change.path} está em path proibido`,
+        message: `${change.path} is in a forbidden path`,
         file: change.path,
         rule: 'forbidden_path',
       })
@@ -96,7 +96,7 @@ export function validateContractChanges(
     if (matchesAny(change.path, CREDENTIAL_PATHS)) {
       violations.push({
         severity: 'high',
-        message: `${change.path} é arquivo de credenciais — criação e modificação exigem revisão humana`,
+        message: `${change.path} is a credentials file — creation and modification require human review`,
         file: change.path,
         rule: 'safe_zone',
       })
@@ -107,7 +107,7 @@ export function validateContractChanges(
     if (change.type !== 'create' && matchesAny(change.path, contract.safeZones)) {
       violations.push({
         severity: 'high',
-        message: `${change.path} é safe zone — modificação exige revisão humana`,
+        message: `${change.path} is a safe zone — modification requires human review`,
         file: change.path,
         rule: 'safe_zone',
       })
@@ -117,7 +117,7 @@ export function validateContractChanges(
     if (!isStackCompatible(change.path, contract.stackAdapter)) {
       violations.push({
         severity: 'high',
-        message: `${change.path} não é compatível com stack ${contract.stackAdapter}`,
+        message: `${change.path} is not compatible with stack ${contract.stackAdapter}`,
         file: change.path,
         rule: 'stack_mismatch',
       })
@@ -127,7 +127,7 @@ export function validateContractChanges(
     if (!matchesAny(change.path, contract.allowedPaths)) {
       violations.push({
         severity: 'high',
-        message: `${change.path} está fora do escopo permitido`,
+        message: `${change.path} is outside the allowed scope`,
         file: change.path,
         rule: 'allowed_paths',
       })

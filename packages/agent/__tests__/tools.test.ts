@@ -210,17 +210,52 @@ describe('read_file', () => {
     expect(result).toMatch(/Error: not found/)
   })
 
-  it('trunca arquivos grandes do disco', async () => {
-    writeFileSync(join(projectRoot, 'big.go'), 'x'.repeat(9_000), 'utf-8')
-    const result = await executor.execute('read_file', { path: 'big.go' })
-    expect(result).toMatch(/truncated/)
-    expect(result.length).toBeLessThan(9_000)
+  it('FIX-006: trunca apenas arquivos acima de 32K chars (era 8K)', async () => {
+    // 9K chars used to truncate; now must NOT truncate (limit raised to 32K)
+    writeFileSync(join(projectRoot, 'medium.go'), 'x'.repeat(9_000), 'utf-8')
+    const result = await executor.execute('read_file', { path: 'medium.go' })
+    expect(result).not.toMatch(/TRUNCATED|truncated/)
+    expect(result.length).toBeGreaterThanOrEqual(9_000)
   })
 
-  it('trunca conteúdo staged grande', async () => {
-    await executor.execute('write_file', { path: 'big.go', content: 'y'.repeat(9_000) })
-    const result = await executor.execute('read_file', { path: 'big.go' })
-    expect(result).toMatch(/truncated/)
+  it('FIX-006: arquivo acima de 32K é truncado com mensagem explícita', async () => {
+    writeFileSync(join(projectRoot, 'huge.go'), 'a'.repeat(40_000), 'utf-8')
+    const result = await executor.execute('read_file', { path: 'huge.go' })
+    expect(result).toMatch(/TRUNCATED/)
+    expect(result).toMatch(/40000 chars total/)
+    expect(result).toMatch(/offset=32000/)
+  })
+
+  it('FIX-006: read_file aceita offset para ler chunks subsequentes', async () => {
+    writeFileSync(join(projectRoot, 'huge.go'), 'a'.repeat(20_000) + 'b'.repeat(20_000), 'utf-8')
+    const second = await executor.execute('read_file', { path: 'huge.go', offset: 32_000 })
+    // Bytes 32000-40000 should be all 'b'
+    expect(second.startsWith('b')).toBe(true)
+    expect(second).not.toMatch(/TRUNCATED/)
+  })
+
+  it('FIX-006: offset além do final retorna mensagem clara', async () => {
+    writeFileSync(join(projectRoot, 'small.go'), 'hello', 'utf-8')
+    const result = await executor.execute('read_file', { path: 'small.go', offset: 1_000 })
+    expect(result).toMatch(/offset 1000 is beyond file end \(5 chars\)/)
+  })
+
+  it('FIX-006: offset 0 = comportamento default (sem offset)', async () => {
+    writeFileSync(join(projectRoot, 'file.go'), 'short content', 'utf-8')
+    const withOffset = await executor.execute('read_file', { path: 'file.go', offset: 0 })
+    const noOffset = await executor.execute('read_file', { path: 'file.go' })
+    expect(withOffset).toBe(noOffset)
+  })
+
+  it('FIX-006: buffer staged respeita o mesmo limite e offset', async () => {
+    await executor.execute('write_file', { path: 'big.go', content: 'y'.repeat(40_000) })
+    const first = await executor.execute('read_file', { path: 'big.go' })
+    expect(first).toMatch(/TRUNCATED/)
+    expect(first).toMatch(/40000 chars total/)
+
+    const second = await executor.execute('read_file', { path: 'big.go', offset: 32_000 })
+    expect(second).toMatch(/^y+$/)
+    expect(second.length).toBeLessThanOrEqual(32_000)
   })
 
   it('bloqueia path traversal', async () => {
@@ -338,7 +373,7 @@ describe('run_command', () => {
 
   it('git diff fora de repositório é apenas evidência opcional', async () => {
     const result = await executor.execute('run_command', { command: 'git diff' })
-    expect(result).toContain('diff indisponivel')
+    expect(result).toContain('diff unavailable')
     expect(result).not.toContain('Error')
   })
 
@@ -357,6 +392,116 @@ describe('run_command', () => {
 
     expect(pipe).toMatch(/Blocked/)
     expect(redirect).toMatch(/Blocked/)
+  })
+
+  describe('staged file overlay for run_command (FIX-012)', () => {
+    it('runs commands against staged writes and restores disk afterwards', async () => {
+      await executor.execute('write_file', { path: 'src/app.js', content: 'console.log("staged-ok")' })
+      const result = await executor.execute('run_command', { command: 'node src/app.js' })
+      expect(result).toContain('staged-ok')
+      expect(existsSync(join(projectRoot, 'src', 'app.js'))).toBe(false)
+    })
+
+    it('runs normal commands without staged overlay noise', async () => {
+      await executor.execute('write_file', { path: 'src/app.js', content: 'console.log(1)' })
+      const result = await executor.execute('run_command', { command: 'node --version' })
+      expect(result).not.toMatch(/staged path/i)
+    })
+
+    it('does not warn when no files are staged at all', async () => {
+      const result = await executor.execute('run_command', { command: 'node --version' })
+      expect(result).not.toMatch(/staged path/i)
+    })
+
+    it('makes multiple staged files visible to the command', async () => {
+      await executor.execute('write_file', { path: 'a.js', content: 'module.exports = "A"' })
+      await executor.execute('write_file', { path: 'b.js', content: 'console.log(require("./a.js") + "B")' })
+      const result = await executor.execute('run_command', { command: 'node b.js' })
+      expect(result).toContain('AB')
+      expect(existsSync(join(projectRoot, 'a.js'))).toBe(false)
+      expect(existsSync(join(projectRoot, 'b.js'))).toBe(false)
+    })
+
+    it('restores original file content after command observes staged modification', async () => {
+      writeFileSync(join(projectRoot, 'existing.js'), 'console.log("original")', 'utf-8')
+      await executor.execute('write_file', { path: 'existing.js', content: 'console.log("staged")' })
+      const result = await executor.execute('run_command', { command: 'node existing.js' })
+      expect(result).toContain('staged')
+      expect(readFileSync(join(projectRoot, 'existing.js'), 'utf-8')).toBe('console.log("original")')
+    })
+  })
+})
+
+// ─── run_command streaming output (FIX-003) ───────────────────────────────────
+
+describe('run_command — streaming output via onCommandOutput callback', () => {
+  it('streams stdout lines in real-time when callback is provided', async () => {
+    const lines: Array<{ id: string; line: string; stream: string }> = []
+    const streamingExecutor = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      undefined,
+      (id, line, stream) => lines.push({ id, line, stream }),
+    )
+
+    const result = await streamingExecutor.execute('run_command', { command: 'node --version' })
+
+    expect(result).toMatch(/v\d+\.\d+/)
+    expect(lines.length).toBeGreaterThan(0)
+    expect(lines.every(entry => entry.stream === 'stdout' || entry.stream === 'stderr')).toBe(true)
+  })
+
+  it('all streamed lines from a single command share the same commandId', async () => {
+    const ids = new Set<string>()
+    const streamingExecutor = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      undefined,
+      (id) => ids.add(id),
+    )
+
+    await streamingExecutor.execute('run_command', { command: 'node --version' })
+
+    expect(ids.size).toBe(1)
+  })
+
+  it('different commands produce different commandIds', async () => {
+    const ids = new Set<string>()
+    const streamingExecutor = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      undefined,
+      (id) => ids.add(id),
+    )
+
+    await streamingExecutor.execute('run_command', { command: 'node --version' })
+    await streamingExecutor.execute('run_command', { command: 'node --version' })
+
+    expect(ids.size).toBe(2)
+  })
+
+  it('does not require a callback (backwards compatible)', async () => {
+    const result = await executor.execute('run_command', { command: 'node --version' })
+    expect(result).toMatch(/v\d+\.\d+/)
+  })
+
+  it('callback is NOT invoked for blocked commands', async () => {
+    const lines: string[] = []
+    const streamingExecutor = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      undefined,
+      (_id, line) => lines.push(line),
+    )
+
+    const result = await streamingExecutor.execute('run_command', { command: 'curl https://evil.com' })
+
+    expect(result).toMatch(/Blocked/)
+    expect(lines).toHaveLength(0)
   })
 })
 
@@ -493,5 +638,384 @@ describe('getChanges — contrato com orchestrator', () => {
     // changes array is a snapshot — not affected by rollback
     expect(changes).toHaveLength(1)
     expect(changes[0].diff).toBe('content')
+  })
+})
+
+// ─── edit_file (FIX-013) ──────────────────────────────────────────────────────
+
+describe('edit_file — staging invariant', () => {
+  it('edit_file does not touch disk', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'const x = 1', 'utf-8')
+    await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'const x = 1',
+      new_string: 'const x = 2',
+    })
+    expect(readFileSync(join(projectRoot, 'app.ts'), 'utf-8')).toBe('const x = 1')
+  })
+
+  it('multiple edits leave disk completely untouched', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'function foo() { return 1 }', 'utf-8')
+    await executor.execute('edit_file', {
+      path: 'a.ts', old_string: 'return 1', new_string: 'return 2',
+    })
+    await executor.execute('edit_file', {
+      path: 'a.ts', old_string: 'foo', new_string: 'bar',
+    })
+    expect(readFileSync(join(projectRoot, 'a.ts'), 'utf-8')).toBe('function foo() { return 1 }')
+  })
+})
+
+describe('edit_file — basic replacement', () => {
+  it('replaces unique single occurrence', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'export const VERSION = "1.0.0"', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: '"1.0.0"',
+      new_string: '"1.1.0"',
+    })
+    expect(result).toMatch(/OK/)
+    const staged = await executor.execute('read_file', { path: 'app.ts' })
+    expect(staged).toBe('export const VERSION = "1.1.0"')
+  })
+
+  it('reports number of lines after edit', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'line1\nline2\nline3', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'line2',
+      new_string: 'line2-modified',
+    })
+    expect(result).toMatch(/3 lines/)
+  })
+
+  it('records FileChange with type=modify and preserves before', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'const x = 1', 'utf-8')
+    await executor.execute('edit_file', {
+      path: 'app.ts', old_string: 'const x = 1', new_string: 'const x = 2',
+    })
+    const [change] = executor.getChanges()
+    expect(change.type).toBe('modify')
+    expect(change.path).toBe('app.ts')
+    expect(change.diff).toBe('const x = 2')
+    expect(change.before).toBe('const x = 1')
+  })
+})
+
+describe('edit_file — uniqueness enforcement', () => {
+  it('rejects multi-match without replace_all and reports count + hint', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'foo\nfoo\nfoo', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'foo',
+      new_string: 'bar',
+    })
+    expect(result).toMatch(/3 times/)
+    expect(result).toMatch(/replace_all/)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('replace_all: true substitutes every occurrence', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'foo\nfoo\nfoo', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'foo',
+      new_string: 'bar',
+      replace_all: true,
+    })
+    expect(result).toMatch(/OK/)
+    expect(result).toMatch(/3 occurrences/)
+    const staged = await executor.execute('read_file', { path: 'app.ts' })
+    expect(staged).toBe('bar\nbar\nbar')
+  })
+
+  it('replace_all with single match still works', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'unique', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'unique',
+      new_string: 'changed',
+      replace_all: true,
+    })
+    expect(result).toMatch(/OK/)
+    expect(result).toMatch(/1 occurrence/)
+  })
+
+  it('reports 0 matches with actionable hint', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'const x = 1', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'const y = 2',
+      new_string: 'whatever',
+    })
+    expect(result).toMatch(/not found/)
+    expect(result).toMatch(/read.*file.*first|exact|whitespace/i)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('replace_all with 0 matches still errors (same as without)', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'content', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'missing',
+      new_string: 'whatever',
+      replace_all: true,
+    })
+    expect(result).toMatch(/not found/)
+  })
+})
+
+describe('edit_file — input validation', () => {
+  it('rejects empty old_string', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'content', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: '',
+      new_string: 'inserted',
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/empty|write_file/)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('rejects identical old_string and new_string (no-op)', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'content', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'content',
+      new_string: 'content',
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/identical|same|no edit/i)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('rejects edit of non-existent file with actionable hint', async () => {
+    const result = await executor.execute('edit_file', {
+      path: 'missing.ts',
+      old_string: 'foo',
+      new_string: 'bar',
+    })
+    expect(result).toMatch(/not found/)
+    expect(result).toMatch(/write_file|read_file/)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('rejects edit on file deleted in this session', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'content', 'utf-8')
+    await executor.execute('delete_file', { path: 'app.ts' })
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'content',
+      new_string: 'new',
+    })
+    expect(result).toMatch(/deleted|not found/)
+  })
+
+  it('rejects edit that would produce empty content', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'only-content', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'only-content',
+      new_string: '',
+    })
+    expect(result).toMatch(/empty|delete_file/i)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+})
+
+describe('edit_file — chaining and staged state', () => {
+  it('successive edits chain on staged result', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'const x = 1\nconst y = 2', 'utf-8')
+    await executor.execute('edit_file', {
+      path: 'app.ts', old_string: 'const x = 1', new_string: 'const x = 10',
+    })
+    await executor.execute('edit_file', {
+      path: 'app.ts', old_string: 'const y = 2', new_string: 'const y = 20',
+    })
+    const staged = await executor.execute('read_file', { path: 'app.ts' })
+    expect(staged).toBe('const x = 10\nconst y = 20')
+    const [change] = executor.getChanges()
+    expect(change.diff).toBe('const x = 10\nconst y = 20')
+  })
+
+  it('edit after write_file in same session keeps type=create', async () => {
+    await executor.execute('write_file', { path: 'new.ts', content: 'export const A = 1' })
+    await executor.execute('edit_file', {
+      path: 'new.ts',
+      old_string: 'const A = 1',
+      new_string: 'const A = 2',
+    })
+    const [change] = executor.getChanges()
+    expect(change.type).toBe('create')
+    expect(change.diff).toBe('export const A = 2')
+    expect(change.before).toBeUndefined()
+  })
+
+  it('edit_file on staged-only file (never on disk) works correctly', async () => {
+    await executor.execute('write_file', { path: 'tmp.ts', content: 'a\nb\nc' })
+    const result = await executor.execute('edit_file', {
+      path: 'tmp.ts', old_string: 'b', new_string: 'B',
+    })
+    expect(result).toMatch(/OK/)
+    expect(await executor.execute('read_file', { path: 'tmp.ts' })).toBe('a\nB\nc')
+  })
+
+  it('before reflects original disk content, not intermediate staged states', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'v0', 'utf-8')
+    await executor.execute('edit_file', { path: 'app.ts', old_string: 'v0', new_string: 'v1' })
+    await executor.execute('edit_file', { path: 'app.ts', old_string: 'v1', new_string: 'v2' })
+    const [change] = executor.getChanges()
+    expect(change.before).toBe('v0')
+    expect(change.diff).toBe('v2')
+  })
+
+  it('multiple files edited produce separate FileChange entries', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'aaa', 'utf-8')
+    writeFileSync(join(projectRoot, 'b.ts'), 'bbb', 'utf-8')
+    await executor.execute('edit_file', { path: 'a.ts', old_string: 'aaa', new_string: 'AAA' })
+    await executor.execute('edit_file', { path: 'b.ts', old_string: 'bbb', new_string: 'BBB' })
+    expect(executor.getChanges()).toHaveLength(2)
+  })
+})
+
+describe('edit_file — special content', () => {
+  it('handles regex special characters in old_string literally', async () => {
+    writeFileSync(join(projectRoot, 'r.ts'), 'matches /^[a-z]+$/g', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'r.ts',
+      old_string: '/^[a-z]+$/g',
+      new_string: '/^[A-Z]+$/g',
+    })
+    expect(result).toMatch(/OK/)
+    expect(await executor.execute('read_file', { path: 'r.ts' })).toBe('matches /^[A-Z]+$/g')
+  })
+
+  it('handles multi-line old_string', async () => {
+    writeFileSync(
+      join(projectRoot, 'app.ts'),
+      'function foo() {\n  return 1\n}\n',
+      'utf-8',
+    )
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'function foo() {\n  return 1\n}',
+      new_string: 'function foo() {\n  return 42\n}',
+    })
+    expect(result).toMatch(/OK/)
+    expect(await executor.execute('read_file', { path: 'app.ts' }))
+      .toBe('function foo() {\n  return 42\n}\n')
+  })
+
+  it('handles dollar signs in new_string literally (no $1 substitution)', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'placeholder', 'utf-8')
+    const result = await executor.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'placeholder',
+      new_string: 'cost is $100 ($1 each)',
+    })
+    expect(result).toMatch(/OK/)
+    expect(await executor.execute('read_file', { path: 'app.ts' }))
+      .toBe('cost is $100 ($1 each)')
+  })
+
+  it('rejects Python edit that creates an empty block', async () => {
+    writeFileSync(
+      join(projectRoot, 'mod.py'),
+      'def foo(x):\n    return x\n',
+      'utf-8',
+    )
+    const result = await executor.execute('edit_file', {
+      path: 'mod.py',
+      old_string: '    return x',
+      new_string: '',
+    })
+    expect(result).toMatch(/Python syntax invalid/)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+})
+
+describe('edit_file — security and permissions', () => {
+  it('blocks path traversal', async () => {
+    const result = await executor.execute('edit_file', {
+      path: '../outside.ts',
+      old_string: 'foo',
+      new_string: 'bar',
+    })
+    expect(result).toMatch(/Blocked/)
+  })
+
+  it('blocks under READ_ONLY_PERMISSION_POLICY', async () => {
+    const readOnlyExec = new ToolExecutor(projectRoot, undefined, READ_ONLY_PERMISSION_POLICY)
+    writeFileSync(join(projectRoot, 'app.ts'), 'content', 'utf-8')
+    const result = await readOnlyExec.execute('edit_file', {
+      path: 'app.ts',
+      old_string: 'content',
+      new_string: 'edited',
+    })
+    expect(result).toMatch(/Blocked|denied/i)
+  })
+
+  it('respects .env deny pattern (edit permission key)', async () => {
+    writeFileSync(join(projectRoot, '.env'), 'SECRET=value', 'utf-8')
+    // edit permission is 'allow' globally, but read denies .env — edit
+    // should at least be evaluated through the edit policy. For DEFAULT
+    // policy, edit is 'allow', so this is allowed; we assert the result
+    // is not a permission block, ensuring policy is wired through.
+    const result = await executor.execute('edit_file', {
+      path: '.env',
+      old_string: 'SECRET=value',
+      new_string: 'SECRET=newvalue',
+    })
+    // Either succeeds (default edit=allow) or is blocked explicitly — both
+    // are valid; what we assert is no crash and the buffer state is consistent.
+    if (result.startsWith('Blocked') || result.startsWith('Approval')) {
+      expect(executor.getChanges()).toHaveLength(0)
+    } else {
+      expect(result).toMatch(/OK/)
+    }
+  })
+})
+
+describe('edit_file — tool registration', () => {
+  it('is registered in AGENT_TOOLS with required schema fields', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'edit_file')
+    expect(tool).toBeDefined()
+    const schema = tool!.inputSchema as {
+      type: string
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.type).toBe('object')
+    expect(schema.properties.path).toBeDefined()
+    expect(schema.properties.old_string).toBeDefined()
+    expect(schema.properties.new_string).toBeDefined()
+    expect(schema.properties.replace_all).toBeDefined()
+    expect(schema.required).toEqual(expect.arrayContaining(['path', 'old_string', 'new_string']))
+    // replace_all must be optional
+    expect(schema.required).not.toContain('replace_all')
+  })
+
+  it('is NOT included in READ_ONLY_TOOLS', async () => {
+    const { READ_ONLY_TOOLS } = await import('../src/tools')
+    expect(READ_ONLY_TOOLS.find(t => t.name === 'edit_file')).toBeUndefined()
+  })
+
+  it('tool description mentions preferring edit_file over write_file for changes', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'edit_file')!
+    expect(tool.description.toLowerCase()).toMatch(/prefer|surgical|existing|change|edit/)
+  })
+})
+
+describe('edit_file — rollback', () => {
+  it('rollbackWrites clears edits and getChanges returns empty', async () => {
+    writeFileSync(join(projectRoot, 'app.ts'), 'v0', 'utf-8')
+    await executor.execute('edit_file', { path: 'app.ts', old_string: 'v0', new_string: 'v1' })
+    executor.rollbackWrites()
+    expect(executor.getChanges()).toHaveLength(0)
+    // Re-reading reads from disk (no staged buffer)
+    expect(await executor.execute('read_file', { path: 'app.ts' })).toBe('v0')
   })
 })

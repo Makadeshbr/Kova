@@ -110,6 +110,6 @@ describe('structureTask', () => {
 
     expect(result.valid).toBe(false)
     if (result.valid) throw new Error('expected invalid result')
-    expect(result.reason).toContain('Crit')
+    expect(result.reason).toContain('Missing criteria')
   })
 })

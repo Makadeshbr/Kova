@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { AppState, ChatMessage } from '../app-state'
+import { structuredMessageToHistoryText } from '../../../main/history-utils'
 
 type SetState = React.Dispatch<React.SetStateAction<AppState>>
 
@@ -145,10 +146,11 @@ export function useEngineEvents(setState: SetState): void {
         if (event.type === 'stream_end') {
           const text = prev.streamingText.trim()
           const structured = event.structuredMessage
+          const historyText = text || (structured ? structuredMessageToHistoryText(structured) : '')
           const assistantMsg: ChatMessage = {
-            id: Date.now().toString(), role: 'assistant', content: text || '', isTask: !!structured, structured,
+            id: Date.now().toString(), role: 'assistant', content: historyText, isTask: !!structured, structured,
           }
-          const newMessages = (text || structured)
+          const newMessages = historyText || structured
             ? [...prev.messages, assistantMsg]
             : prev.messages
           return {

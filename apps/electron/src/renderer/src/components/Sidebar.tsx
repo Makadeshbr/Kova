@@ -67,9 +67,9 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
           {(sessionUsage.contextTokens > 0 || sessionUsage.contextFiles.length > 0) && (
             <div style={{ marginTop: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Contexto</span>
+                <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Context</span>
                 <span style={{ fontSize: 10, color: 'var(--amber)', fontFamily: 'var(--font-mono)' }}>
-                  {sessionUsage.contextFiles.length} arq · {(sessionUsage.contextTokens / 1000).toFixed(1)}k
+                  {sessionUsage.contextFiles.length} files · {(sessionUsage.contextTokens / 1000).toFixed(1)}k
                 </span>
               </div>
               <div style={{ height: 4, background: 'var(--bg-active)', borderRadius: 3, overflow: 'hidden' }}>
@@ -94,20 +94,20 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>history</span> Log {history.length > 0 && `(${history.length})`}
         </button>
         <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>dataset</span> Sessões
+          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>dataset</span> Sessions
         </button>
       </div>
 
       {tab === 'files' && (
         projectRoot
           ? <ProjectFiles projectRoot={projectRoot} changedPaths={changedPaths} onOpenFile={onOpenFile} refreshKey={refreshKey} />
-          : <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '16px 14px' }}>Abra um projeto para ver os arquivos</p>
+          : <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '16px 14px' }}>Open a project to view files</p>
       )}
 
       {tab === 'history' && (
         <div style={{ flex: 1, overflow: 'auto', padding: '8px 0' }}>
           {history.length === 0 && (
-            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>Nenhuma iteração ainda</p>
+            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>No iterations yet</p>
           )}
           {history.map((iter, i) => {
             const scoreColor = iter.harnessResult.score >= 90 ? 'var(--teal)' : iter.harnessResult.score >= 70 ? 'var(--yellow)' : 'var(--red)'
@@ -118,7 +118,7 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
                   <span style={{ fontSize: 11, color: scoreColor, fontWeight: 600 }}>{iter.harnessResult.score}</span>
                 </div>
                 <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 3 }}>
-                  {iter.changes.length} arquivo{iter.changes.length !== 1 ? 's' : ''} · {Math.round(iter.duration / 1000)}s
+                  {iter.changes.length} file{iter.changes.length !== 1 ? 's' : ''} · {Math.round(iter.duration / 1000)}s
                 </p>
                 {iter.changes.slice(0, 3).map((c, ci) => (
                   <button key={ci} onClick={() => onOpenFile(c.path)} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', color: 'var(--teal)', fontSize: 10, padding: '1px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -126,7 +126,7 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
                   </button>
                 ))}
                 {iter.changes.length > 3 && (
-                  <span style={{ fontSize: 10, color: 'var(--text-3)' }}>+ {iter.changes.length - 3} arquivo{iter.changes.length - 3 !== 1 ? 's' : ''}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text-3)' }}>+ {iter.changes.length - 3} file{iter.changes.length - 3 !== 1 ? 's' : ''}</span>
                 )}
               </div>
             )
@@ -137,7 +137,7 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
       {tab === 'sessions' && (
         <div style={{ flex: 1, overflow: 'auto', padding: '8px 0' }}>
           {sessions.length === 0 && (
-            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>Nenhuma sessão salva</p>
+            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>No saved sessions</p>
           )}
           {sessions.map(s => (
             <div key={s.id} style={{ margin: '4px 6px', padding: '8px 10px', background: 'var(--bg-1)', borderRadius: 6, border: '1px solid var(--border)' }}>
@@ -163,7 +163,7 @@ export function Sidebar({ executionState, projectRoot, sessionUsage, changedPath
                   onClick={() => onLoadSession(s)}
                   style={{ background: 'var(--amber-dim)', color: 'var(--amber)', fontSize: 10, padding: '2px 8px', borderRadius: 4, fontWeight: 600 }}
                 >
-                  Carregar
+                  Load
                 </button>
               </div>
             </div>

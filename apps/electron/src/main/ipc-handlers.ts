@@ -272,10 +272,10 @@ export function registerIpcHandlers(win: BrowserWindow, manager: EngineManager):
     assertTrustedIpcSender(event)
     filePath = stringField(filePath, 'filePath', 2_000)
     content = stringField(content, 'content', 2_000_000)
-    if (isProtectedFilePath(filePath)) throw new Error('Arquivo protegido')
+    if (isProtectedFilePath(filePath)) throw new Error('Protected file')
     if (currentProjectRoot) {
       const safe = validateProjectPath(filePath, currentProjectRoot)
-      if (!safe) throw new Error('Caminho fora do projeto — operação bloqueada')
+      if (!safe) throw new Error('Path outside project — operation blocked')
     }
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, content, 'utf-8')
@@ -349,6 +349,9 @@ let currentProjectRoot: string | null = null
  * sessions cannot escape the workspace via cwd manipulation from the renderer or the agent.
  */
 function updateProjectScope(root: string): void {
+  if (currentProjectRoot && currentProjectRoot !== root) {
+    manager.clearProjectCache(currentProjectRoot)
+  }
   currentProjectRoot = root
   terminalManager.setProjectRoot(root)
 }

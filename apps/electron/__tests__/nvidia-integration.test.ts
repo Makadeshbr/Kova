@@ -79,7 +79,7 @@ describe('NVIDIA Integration', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false)
 
       await expect(buildProvider({ objective: '', projectRoot: '', provider: 'nvidia' }))
-        .rejects.toThrow('NVIDIA_API_KEY ausente')
+        .rejects.toThrow('NVIDIA_API_KEY is missing')
     })
 
     it('injects chat_template_kwargs: { thinking: true } when nvidiaEnableThinking is true', async () => {

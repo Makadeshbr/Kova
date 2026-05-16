@@ -7,6 +7,7 @@
     "build": "tsup src/index.ts --format esm,cjs --dts"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "tsup": "^8.4.0",
     "typescript": "^5.0.0"
   }

@@ -15,7 +15,9 @@ import {
   buildTokenBudgetedHistory,
   HISTORY_CHAR_BUDGET,
   HISTORY_MAX_MESSAGES,
+  structuredMessageToHistoryText,
 } from '../src/main/history-utils'
+import type { AgentResultMessage, PlanResultMessage } from '@kova/shared'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -328,5 +330,42 @@ describe('buildTokenBudgetedHistory — output shape', () => {
     expect(result[0].content).toBe('first')
     expect(result[1].content).toBe('second')
     expect(result[2].content).toBe('third')
+  })
+})
+
+describe('buildTokenBudgetedHistory — structured assistant cards', () => {
+  it('serializes agent result cards so patch follow-ups remember changed files', () => {
+    const structured: AgentResultMessage = {
+      kind: 'agent_result',
+      title: 'Task complete',
+      summary: 'Changes applied successfully.',
+      filesChanged: [{ path: 'src/calc.ts', displayName: 'calc.ts', status: 'created' }],
+      validations: [{ command: 'npm test', status: 'passed' }],
+      risk: 'low',
+      decision: 'apply',
+      notes: ['Created calculator helpers.'],
+    }
+
+    const result = buildTokenBudgetedHistory([
+      user('create calculator'),
+      { role: 'assistant', content: '', isTask: true, structured },
+      user('now add multiply'),
+    ])
+
+    expect(result.map(m => m.content).join('\n')).toContain('src/calc.ts (created)')
+    expect(result.map(m => m.content).join('\n')).toContain('Created calculator helpers.')
+  })
+
+  it('serializes plan cards into compact history text', () => {
+    const structured: PlanResultMessage = {
+      kind: 'plan_result',
+      objective: 'add login',
+      files: [{ path: 'src/login.ts', reason: 'new flow' }],
+      approach: 'Create the login flow.',
+      validations: ['npm test'],
+      risk: 'medium',
+    }
+
+    expect(structuredMessageToHistoryText(structured)).toContain('src/login.ts (new flow)')
   })
 })

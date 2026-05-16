@@ -4,15 +4,23 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts",
-    "test": "vitest run"
+    "build": "tsup src/index.ts src/real-dogfood.ts --format esm,cjs --dts",
+    "test": "vitest run",
+    "dogfood:real": "node dist/real-dogfood.js"
   },
   "dependencies": {
     "@kova/shared": "workspace:*",
     "@kova/execution": "workspace:*",
-    "@kova/decision": "workspace:*"
+    "@kova/decision": "workspace:*",
+    "@kova/orchestrator": "workspace:*",
+    "@kova/application": "workspace:*",
+    "@kova/context": "workspace:*",
+    "@kova/memory": "workspace:*",
+    "@kova/adapters": "workspace:*",
+    "@kova/agent": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "tsup": "^8.4.0",
     "typescript": "^5.0.0",
     "vitest": "^1.0.0"

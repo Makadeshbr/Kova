@@ -6,8 +6,17 @@ import { ContextEngine, estimateTokens } from '@kova/context'
 import { resolveTaskStack } from '@kova/execution'
 import { MemorySystem } from '@kova/memory'
 
-export function buildContextEngine(projectRoot: string, adapter: StackAdapter): ContextEngine {
-  return new ContextEngine(new MemorySystem(projectRoot), adapter)
+/**
+ * Build a ContextEngine. The `memory` argument is optional — if omitted, a fresh
+ * MemorySystem is created. Callers that need cross-session memory continuity
+ * (EngineManager) pass a cached MemorySystem so learnings persist across turns.
+ */
+export function buildContextEngine(
+  projectRoot: string,
+  adapter: StackAdapter,
+  memory?: MemorySystem,
+): ContextEngine {
+  return new ContextEngine(memory ?? new MemorySystem(projectRoot), adapter)
 }
 
 export function contextBudgetFor(provider: AgentProvider): number {

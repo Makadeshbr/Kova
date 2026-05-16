@@ -58,7 +58,7 @@ function NodeRow({ node, depth, changedPaths, onOpenFile }: {
         </span>
 
         {isProtected && (
-          <span title="Arquivo protegido" style={{ color: 'var(--yellow)', fontSize: 10, flexShrink: 0 }}>lock</span>
+          <span title="Protected file" style={{ color: 'var(--yellow)', fontSize: 10, flexShrink: 0 }}>lock</span>
         )}
 
         {(isChanged || childChanged) && (
@@ -90,8 +90,8 @@ export function ProjectFiles({ projectRoot, changedPaths, onOpenFile, refreshKey
   return (
     <div style={{ flex: 1, overflow: 'auto', paddingBottom: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px 4px' }}>
-        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Arquivos</span>
-        <button onClick={refresh} style={{ background: 'transparent', color: 'var(--text-3)', padding: '2px 4px', fontSize: 13, lineHeight: 1 }} title="Atualizar">⟳</button>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Files</span>
+        <button onClick={refresh} style={{ background: 'transparent', color: 'var(--text-3)', padding: '2px 4px', fontSize: 13, lineHeight: 1 }} title="Refresh">⟳</button>
       </div>
       {loading && <p style={{ fontSize: 11, color: 'var(--text-3)', padding: '6px 14px' }}>Carregando...</p>}
       {!loading && tree.length === 0 && <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '6px 14px' }}>Pasta vazia</p>}

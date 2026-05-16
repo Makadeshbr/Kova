@@ -1,13 +1,15 @@
-import React, { useEffect, useRef, useCallback, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { TerminalSessionInfo, PendingApproval } from '../app-state'
+import type { ExecutionEvent } from '../types'
 
 export type { TerminalSessionInfo, PendingApproval }
 
 interface Props {
   sessions: TerminalSessionInfo[]
+  commandEvents: ExecutionEvent[]
   pendingApproval: PendingApproval | null
   onClose: (id: string) => void
   onApprove: (id: string, approved: boolean) => void
@@ -91,7 +93,7 @@ function TerminalInstance({ sessionId, onClose }: { sessionId: string; onClose: 
         <button
           onClick={onClose}
           style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 14, padding: '2px 6px' }}
-          title="Fechar terminal"
+          title="Close terminal"
         >
           ✕
         </button>
@@ -112,7 +114,7 @@ function ApprovalDialog({ approval, onApprove }: { approval: PendingApproval; on
         borderRadius: 10, padding: 24, maxWidth: 480, width: '90%',
       }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-1)', marginBottom: 12 }}>
-          Kova quer executar um comando interativo
+          Kova wants to run an interactive command
         </div>
         <div style={{
           background: 'var(--bg-1)', borderRadius: 6, padding: '10px 14px',
@@ -127,7 +129,7 @@ function ApprovalDialog({ approval, onApprove }: { approval: PendingApproval; on
           </div>
         )}
         <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 20 }}>
-          Um painel de terminal será aberto. Você poderá interagir com o processo.
+          A terminal panel will open. You will be able to interact with the process.
         </div>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button
@@ -137,7 +139,7 @@ function ApprovalDialog({ approval, onApprove }: { approval: PendingApproval; on
               background: 'transparent', color: 'var(--text-2)', fontSize: 13,
             }}
           >
-            Negar
+            Deny
           </button>
           <button
             onClick={() => onApprove(approval.id, true)}
@@ -146,7 +148,7 @@ function ApprovalDialog({ approval, onApprove }: { approval: PendingApproval; on
               background: 'var(--teal)', color: '#000', fontSize: 13, fontWeight: 600,
             }}
           >
-            Permitir
+            Allow
           </button>
         </div>
       </div>
@@ -154,7 +156,59 @@ function ApprovalDialog({ approval, onApprove }: { approval: PendingApproval; on
   )
 }
 
-export function TerminalPanel({ sessions, pendingApproval, onClose, onApprove }: Props): React.ReactElement | null {
+function CommandOutputLog({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
+  const blocks: Array<{ id: string; command: string; lines: string[]; status: 'running' | 'done' | 'error' }> = []
+
+  for (const event of events) {
+    if (event.type === 'tool_call' && event.toolName === 'run_command') {
+      blocks.push({
+        id: `${blocks.length}`,
+        command: String(event.toolInput?.command ?? event.message ?? 'run_command'),
+        lines: [],
+        status: 'running',
+      })
+    } else if (event.type === 'command_output') {
+      const block = [...blocks].reverse().find(item => item.status === 'running')
+      if (block && event.commandLine) block.lines.push(event.commandLine)
+    } else if (event.type === 'tool_result') {
+      const block = [...blocks].reverse().find(item => item.status === 'running')
+      if (block) {
+        block.status = event.message?.startsWith('Error:') || event.message?.startsWith('Blocked:') ? 'error' : 'done'
+        if (event.message && block.lines.length === 0) block.lines.push(event.message)
+      }
+    }
+  }
+
+  const visible = blocks.slice(-3)
+  if (visible.length === 0) return null
+
+  return (
+    <div style={{
+      position: 'fixed', right: 18, bottom: 18, width: 'min(720px, calc(100vw - 36px))',
+      maxHeight: '42vh', background: '#0D0F14', color: '#E8E8EB',
+      border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden',
+      boxShadow: '0 18px 50px rgba(0,0,0,0.45)', zIndex: 40,
+    }}>
+      <div style={{ padding: '7px 10px', borderBottom: '1px solid var(--border)', color: 'var(--text-2)', fontSize: 11 }}>
+        Command output
+      </div>
+      <div style={{ overflow: 'auto', maxHeight: 'calc(42vh - 32px)' }}>
+        {visible.map(block => (
+          <div key={block.id} style={{ padding: '9px 10px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ color: block.status === 'error' ? 'var(--red)' : 'var(--cyan)', fontFamily: 'var(--font-mono)', fontSize: 11, marginBottom: 6 }}>
+              $ {block.command}
+            </div>
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: 'var(--text-2)', fontSize: 11, lineHeight: 1.45 }}>
+              {block.lines.slice(-80).join('\n') || '(running...)'}
+            </pre>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export function TerminalPanel({ sessions, commandEvents, pendingApproval, onClose, onApprove }: Props): React.ReactElement | null {
   const [activeId, setActiveId] = useState<string | null>(null)
 
   // Auto-select newest session
@@ -168,10 +222,13 @@ export function TerminalPanel({ sessions, pendingApproval, onClose, onApprove }:
 
   const activeSession = sessions.find(s => s.id === activeId)
 
-  if (sessions.length === 0 && !pendingApproval) return null
+  const commandLog = <CommandOutputLog events={commandEvents} />
+
+  if (sessions.length === 0 && !pendingApproval) return commandLog
 
   return (
     <>
+      {commandLog}
       {pendingApproval && (
         <ApprovalDialog approval={pendingApproval} onApprove={onApprove} />
       )}

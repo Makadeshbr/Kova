@@ -1,5 +1,5 @@
 import type {
-  AgentContext, AgentMode, AgentOutput, DecisionResult, ExecutionContract,
+  AgentContext, AgentMode, AgentOutput, CommandOutputCallback, DecisionResult, ExecutionContract,
   DiffReviewSelection, ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
   IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation
 } from '@kova/shared'
@@ -25,6 +25,7 @@ interface IAgent {
     onToolCall?: (name: string, input: Record<string, unknown>) => void
     onToolResult?: (name: string, result: string) => void
     interactiveRunner?: InteractiveCommandRunner
+    onCommandOutput?: CommandOutputCallback
   }): Promise<AgentOutput>
 }
 
@@ -69,6 +70,8 @@ export interface ExecutionEngineOptions extends StopOptions {
   onHarnessLine?: (layer: string, line: string, stream: 'stdout' | 'stderr') => void
   /** Injected by EngineManager to allow agent tools to run interactive PTY sessions. */
   interactiveRunner?: InteractiveCommandRunner
+  /** FIX-003: forwarded to the agent so run_command can stream stdout/stderr live. */
+  onCommandOutput?: CommandOutputCallback
 }
 
 export class ExecutionEngine {
@@ -90,7 +93,13 @@ export class ExecutionEngine {
     this.contract = this.options.contract ?? createExecutionContract(task)
     this.paused = false
     this.aborted = false
-    this.state = createInitialState(task, this.options.maxIterations)
+    // FIX-007: dynamic maxIterations. The repair loop needs more iterations for
+    // bigger tasks. We compute a floor from the contract scope (`maxFilesChanged`)
+    // and honour user override when it's higher. The user can ALWAYS raise above
+    // the floor; the floor protects against tasks that would otherwise fail on
+    // an arbitrarily small limit.
+    const maxIterations = resolveMaxIterations(this.options.maxIterations, this.contract.maxFilesChanged)
+    this.state = createInitialState(task, maxIterations)
     this.event({ type: 'contract_created', contract: this.contract, message: 'Execution contract created' })
     this.emit()
     return this.loop()
@@ -100,7 +109,7 @@ export class ExecutionEngine {
 
   async resume(): Promise<ExecutionState> {
     if (!this.task || !this.state || this.state.status !== 'paused') {
-      throw new Error('Engine não está pausada')
+      throw new Error('Engine is not paused')
     }
     this.paused = false
     return this.loop()
@@ -202,7 +211,7 @@ export class ExecutionEngine {
       const proofPack = generateProofPack(this.state!, this.contract ?? createExecutionContract(this.task!))
       this.state = { ...this.state!, proofPack }
       this.emit()
-      this.event({ type: 'proof_pack', proofPack, message: 'Proof Pack gerado' })
+      this.event({ type: 'proof_pack', proofPack, message: 'Proof Pack generated' })
       try { recordTrace(this.state!, this.options.projectRoot) } catch { /* traces are best-effort */ }
     }
 
@@ -266,6 +275,7 @@ export class ExecutionEngine {
       history: this.options.history,
       signal: this.abortController.signal,
       interactiveRunner: this.options.interactiveRunner,
+      onCommandOutput: this.options.onCommandOutput,
       onToken: (token: string) => {
         reasoning.end()
         this.event({ type: 'token', token })
@@ -430,6 +440,24 @@ export class ExecutionEngine {
     const last = this.state?.iterationHistory.at(-1)
     return last?.harnessResult.layers.flatMap(layer => layer.errors) ?? []
   }
+}
+
+/**
+ * FIX-007: Compute the dynamic maxIterations for the repair loop.
+ *
+ * Floor is derived from the contract scope (bigger task = more retries needed):
+ *   maxFilesChanged * 0.6, rounded up, clamped to [5, 12].
+ *
+ * The user value (from settings) is honoured when it's >= the floor — they can
+ * always raise the ceiling. When the user value is lower than the floor, the
+ * floor wins so realistic-sized tasks don't fail on an arbitrarily small limit.
+ *
+ * Pure function, exported for testing.
+ */
+export function resolveMaxIterations(userValue: number | undefined, maxFilesChanged: number): number {
+  const scopeFloor = Math.min(12, Math.max(5, Math.ceil(maxFilesChanged * 0.6)))
+  if (userValue === undefined || userValue <= 0) return scopeFloor
+  return Math.max(userValue, scopeFloor)
 }
 
 function buildRecord(

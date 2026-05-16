@@ -4,6 +4,13 @@ import { basename, resolve, relative } from 'node:path'
 
 export type ValidationCommandKind = 'test' | 'build' | 'lint' | 'typecheck' | 'format' | 'security' | 'run'
 
+/**
+ * Real-time callback fired for each line of stdout/stderr emitted by a `run_command`
+ * tool invocation. `commandId` correlates lines back to a single command (set by the
+ * caller, typically a UUID generated when the command starts).
+ */
+export type CommandOutputCallback = (commandId: string, line: string, stream: 'stdout' | 'stderr') => void
+
 export interface CommandInvocationInput {
   command: string
   workspaceRoot: string
@@ -94,7 +101,7 @@ const PROJECT_MANIFESTS = [
 export function normalizeCommandInvocation(input: CommandInvocationInput): CommandPolicyResult {
   const workspaceRoot = resolve(input.workspaceRoot)
   const command = input.command.trim()
-  if (!command) return block('Comando vazio.')
+  if (!command) return block('Empty command.')
 
   const baseCwd = resolveCommandCwd(workspaceRoot, input.cwd)
   if (!baseCwd.ok) return baseCwd
@@ -108,9 +115,9 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
     if (!cdCwd.ok) return cdCwd
     cwd = cdCwd.cwd
     effectiveCommand = cd.command.trim()
-    warning = 'Comando com cd foi convertido para execução estruturada com cwd.'
+    warning = 'Command with cd was converted to structured execution with cwd.'
   } else if (/^\s*cd\s+/i.test(command)) {
-    return block('Comando bloqueado porque usa cd/shell composition.', 'Use execução estruturada com cwd.')
+    return block('Command blocked because it uses cd/shell composition.', 'Use structured execution with cwd.')
   }
 
   const stripped = stripNativeStderrMerge(effectiveCommand)
@@ -119,27 +126,27 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
 
   const meta = findShellMeta(effectiveCommand)
   if (meta) {
-    return block(`Comando bloqueado porque contém shell composition/redirecionamento (${meta}).`, 'Use um único comando de validação e capture stdout/stderr pelo executor.')
+    return block(`Command blocked because it contains shell composition/redirection (${meta}).`, 'Use a single validation command and let the executor capture stdout/stderr.')
   }
 
   if (DANGEROUS_PATTERNS.some(pattern => pattern.test(effectiveCommand))) {
-    return block('Comando perigoso bloqueado pela policy.')
+    return block('Dangerous command blocked by policy.')
   }
 
   const parsed = parseCommandLine(effectiveCommand)
   if (!parsed.ok) return block(parsed.reason)
-  if (parsed.tokens.length === 0) return block('Comando vazio.')
+  if (parsed.tokens.length === 0) return block('Empty command.')
 
   const executable = normalizeExecutableName(parsed.tokens[0])
   if (!ALLOWED_EXECUTABLES.has(executable)) {
-    return block(`Comando "${parsed.tokens[0]}" não está na allowlist segura.`, 'Use comandos de build, test, lint, typecheck, format ou leitura.')
+    return block(`Command "${parsed.tokens[0]}" is not in the safe allowlist.`, 'Use build, test, lint, typecheck, format, or read-only commands.')
   }
 
   if (executable === 'git' && !isAllowedGitCommand(parsed.tokens)) {
-    return block('Comando git bloqueado. Apenas diff/status/log/branch/show são permitidos.')
+    return block('Git command blocked. Only diff/status/log/branch/show are allowed.')
   }
   if (executable === 'chmod' && parsed.tokens[1] !== '+x') {
-    return block('chmod bloqueado. Apenas chmod +x é permitido.')
+    return block('chmod blocked. Only chmod +x is allowed.')
   }
 
   const manifestError = validateManifestRequirement(executable, parsed.tokens, cwd)
@@ -181,13 +188,15 @@ export async function runCommandInvocation(input: CommandInvocationInput): Promi
 
   return new Promise(resolveResult => {
     const prepared = prepareExecFile(normalized.executable, normalized.args)
+    let cancelEscalation: () => void = () => {}
     try {
-      execFile(prepared.executable, prepared.args, {
+      const child = execFile(prepared.executable, prepared.args, {
       cwd: normalized.cwd,
       timeout: input.timeoutMs,
       signal: input.signal,
       windowsHide: true,
       }, (error, stdout, stderr) => {
+        cancelEscalation()
         const err = error as ({ code?: number | string; killed?: boolean } | null)
         resolveResult({
           command: normalized.command,
@@ -201,7 +210,11 @@ export async function runCommandInvocation(input: CommandInvocationInput): Promi
           timedOut: Boolean(err?.killed),
         })
       })
+      // FIX-009: SIGKILL escalation in case the child swallows SIGTERM.
+      // Must be attached AFTER child is created. Cancelled in the close callback.
+      cancelEscalation = attachAbortEscalation(child, input.signal)
     } catch (error) {
+      cancelEscalation()
       resolveResult({
         command: normalized.command,
         cwd: normalized.cwd,
@@ -237,6 +250,9 @@ function runWithSpawn(
       signal: input.signal,
     })
 
+    // FIX-009: SIGKILL escalation if the child swallows SIGTERM.
+    const cancelEscalation = attachAbortEscalation(child, input.signal)
+
     const timeoutHandle = input.timeoutMs
       ? setTimeout(() => {
           timedOut = true
@@ -267,6 +283,7 @@ function runWithSpawn(
 
     child.on('close', (code) => {
       if (timeoutHandle) clearTimeout(timeoutHandle)
+      cancelEscalation()
       if (partialStdout) input.onLine!(partialStdout, 'stdout')
       if (partialStderr) input.onLine!(partialStderr, 'stderr')
       resolveResult({
@@ -284,6 +301,7 @@ function runWithSpawn(
 
     child.on('error', (error) => {
       if (timeoutHandle) clearTimeout(timeoutHandle)
+      cancelEscalation()
       resolveResult({
         command: normalized.command,
         cwd: normalized.cwd,
@@ -299,6 +317,54 @@ function runWithSpawn(
   })
 }
 
+/**
+ * FIX-009: Attach a SIGKILL escalation to a child process when its abort signal
+ * fires. Defense-in-depth on top of Node's built-in `signal: AbortSignal` (which
+ * sends SIGTERM only). On POSIX, well-behaved processes die on SIGTERM; misbehaved
+ * ones (with a `process.on('SIGTERM', () => {})` handler) would survive without this.
+ *
+ * Returns a cleanup function — MUST be called when the child exits naturally so
+ * the escalation timer is cancelled.
+ *
+ * Cross-platform notes:
+ *   - Windows: child.kill() always invokes TerminateProcess (effectively SIGKILL).
+ *     The escalation is still applied for consistency and defense in depth.
+ *   - Linux/Mac: SIGTERM may be ignored by the child. SIGKILL after grace is fatal.
+ */
+const KILL_GRACE_MS = 3_000
+
+function attachAbortEscalation(
+  child: { kill: (signal?: NodeJS.Signals | number) => boolean; killed: boolean; exitCode: number | null },
+  signal: AbortSignal | undefined,
+): () => void {
+  if (!signal) return () => {}
+  let killTimer: NodeJS.Timeout | null = null
+
+  const onAbort = (): void => {
+    if (child.killed || child.exitCode !== null) return
+    // Schedule SIGKILL fallback. Node's auto-kill on AbortSignal sends SIGTERM
+    // immediately; we follow up with SIGKILL after the grace period if needed.
+    killTimer = setTimeout(() => {
+      if (!child.killed && child.exitCode === null) {
+        try { child.kill('SIGKILL') } catch { /* already dead */ }
+      }
+    }, KILL_GRACE_MS)
+    // Don't keep the Node event loop alive just for the kill timer.
+    if (killTimer && typeof killTimer.unref === 'function') killTimer.unref()
+  }
+
+  if (signal.aborted) {
+    onAbort()
+  } else {
+    signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  return (): void => {
+    if (killTimer) clearTimeout(killTimer)
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
 function extractSimpleCd(command: string): { dir: string; command: string } | null {
   const match = /^cd\s+(.+?)\s*(?:&&|;)\s*(.+)$/i.exec(command.trim())
   if (!match) return null
@@ -312,7 +378,7 @@ function resolveCommandCwd(workspaceRoot: string, cwd?: string): { ok: true; cwd
   const resolved = raw ? resolve(workspaceRoot, raw) : workspaceRoot
   const rel = relative(workspaceRoot, resolved)
   if (rel.startsWith('..') || rel === '..' || rel.includes(`..\\`) || rel.includes('../')) {
-    return block('cwd bloqueado porque aponta para fora do workspace permitido.')
+    return block('cwd blocked because it points outside the allowed workspace.')
   }
   return { ok: true, cwd: resolved }
 }
@@ -321,7 +387,7 @@ function stripNativeStderrMerge(command: string): { command: string; warning?: s
   if (/\s+2>&1\s*$/.test(command)) {
     return {
       command: command.replace(/\s+2>&1\s*$/, '').trim(),
-      warning: 'Redirecionamento 2>&1 removido; stdout/stderr são capturados nativamente.',
+      warning: 'Redirection 2>&1 removed; stdout/stderr are captured natively.',
     }
   }
   return { command }
@@ -371,7 +437,7 @@ function parseCommandLine(command: string): { ok: true; tokens: string[] } | { o
     }
     current += ch
   }
-  if (quote) return { ok: false, reason: 'Comando com aspas não fechadas.' }
+  if (quote) return { ok: false, reason: 'Command has an unclosed quote.' }
   if (current) tokens.push(current)
   return { ok: true, tokens }
 }
@@ -412,7 +478,7 @@ function validateManifestRequirement(executable: string, tokens: string[], cwd: 
   if (!MANIFEST_REQUIRED.has(executable)) return null
   if (executable === 'dotnet' && tokens.some(token => token.endsWith('.csproj') || token.endsWith('.sln'))) return null
   if (PROJECT_MANIFESTS.some(file => existsSync(resolve(cwd, file)))) return null
-  return `Validação bloqueada: nenhum manifest/build file reconhecido foi encontrado em ${cwd}. Execute no root do projeto/módulo correto ou crie o manifest necessário antes da validação.`
+  return `Validation blocked: no recognized manifest/build file was found in ${cwd}. Run from the correct project/module root or create the required manifest before validation.`
 }
 
 function inferCommandKind(tokens: string[]): ValidationCommandKind {

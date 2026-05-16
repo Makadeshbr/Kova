@@ -8,15 +8,15 @@ interface Props {
 }
 
 const STATUS_LABEL: Record<string, string> = {
-  structuring: 'Estruturando tarefa...',
-  planning: 'Planejando abordagem...',
-  coding: 'Gerando código...',
-  validating: 'Validando com harness...',
-  deciding: 'Analisando resultado...',
-  applying: 'Aplicando mudanças...',
-  completed: 'Concluído',
-  failed: 'Falhou',
-  paused: 'Aguardando revisão',
+  structuring: 'Structuring task...',
+  planning: 'Planning approach...',
+  coding: 'Generating code...',
+  validating: 'Validating with harness...',
+  deciding: 'Analyzing result...',
+  applying: 'Applying changes...',
+  completed: 'Completed',
+  failed: 'Failed',
+  paused: 'Awaiting review',
 }
 
 export function AgentStream({ executionState, task, error }: Props): React.ReactElement {
@@ -42,8 +42,8 @@ export function AgentStream({ executionState, task, error }: Props): React.React
       {!executionState && !error && (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <p style={{ color: 'var(--text-3)', fontSize: 13, textAlign: 'center', lineHeight: 2 }}>
-            Selecione um projeto e descreva uma tarefa.<br />
-            O agente vai gerar código e o harness valida automaticamente.
+            Select a project and describe a task.<br />
+            The agent will generate code and the harness validates automatically.
           </p>
         </div>
       )}
@@ -82,7 +82,7 @@ export function AgentStream({ executionState, task, error }: Props): React.React
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
             <span style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-              Iteração {iter.iteration + 1} · {iter.agentMode}
+              Iteration {iter.iteration + 1} · {iter.agentMode}
             </span>
             <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
               {Math.round(iter.duration / 1000)}s · {iter.tokensUsed.toLocaleString()} tokens
@@ -95,7 +95,7 @@ export function AgentStream({ executionState, task, error }: Props): React.React
           )}
           {iter.changes.length > 0 && (
             <p style={{ marginTop: 8, fontSize: 11, color: 'var(--teal)' }}>
-              {iter.changes.length} arquivo{iter.changes.length !== 1 ? 's' : ''} modificado{iter.changes.length !== 1 ? 's' : ''}: {iter.changes.map(c => c.path.split('/').at(-1)).join(', ')}
+              {iter.changes.length} file{iter.changes.length !== 1 ? 's' : ''} changed: {iter.changes.map(c => c.path.split('/').at(-1)).join(', ')}
             </p>
           )}
         </div>

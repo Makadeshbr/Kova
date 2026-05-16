@@ -18,3 +18,11 @@ product.overrides.json
 .tmp2/
 .tool-versions
 .kova/checkpoints/
+.kova/sessions/
+.kova/traces/
+
+# Build / cache artifacts (never tracked)
+.turbo/
+**/.turbo/
+packages/*/dist/
+apps/cli/dist/

@@ -48,7 +48,7 @@ export function TaskInput({ projectRoot, isRunning, onStart, onOpenFolder }: Pro
             justifyContent: 'center',
           }}
         >
-          + Selecionar projeto para começar
+          + Select a project to start
         </button>
       )}
 

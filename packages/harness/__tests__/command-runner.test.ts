@@ -59,7 +59,7 @@ describe('safe command normalization', () => {
     })
 
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toContain('fora do workspace')
+    if (!result.ok) expect(result.reason).toContain('outside the allowed workspace')
   })
 
   it('blocks path traversal through cd', () => {
@@ -70,7 +70,7 @@ describe('safe command normalization', () => {
     })
 
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toContain('fora do workspace')
+    if (!result.ok) expect(result.reason).toContain('outside the allowed workspace')
   })
 
   it('blocks arbitrary pipe and redirection', () => {

@@ -44,7 +44,7 @@ function makeWebContents() {
 }
 
 describe('TerminalManager', () => {
-  it('bloqueia comandos interativos fora da allowlist antes de pedir aprovacao', async () => {
+  it('blocks interactive commands outside the allowlist before asking approval', async () => {
     const { pty } = makePty()
     const wc = makeWebContents()
     const manager = new TerminalManager(pty as never)
@@ -53,7 +53,7 @@ describe('TerminalManager', () => {
     const result = await manager.runInteractive('powershell -nop', process.cwd(), 'unsafe shell')
 
     expect(result.exitCode).toBe(1)
-    expect(result.output).toContain('nao esta na allowlist')
+    expect(result.output).toContain('not in the interactive command allowlist')
     expect(pty.spawn).not.toHaveBeenCalled()
     expect(wc.sent.some(item => item.channel === 'kova:interactive-request')).toBe(false)
   })
@@ -127,7 +127,7 @@ describe('TerminalManager — workspace path containment', () => {
     const result = await manager.runInteractive('npm test', '/etc/passwd', 'test')
 
     expect(result.exitCode).toBe(1)
-    expect(result.output).toContain('fora do projeto')
+    expect(result.output).toContain('outside project')
     expect(pty.spawn).not.toHaveBeenCalled()
     expect(wc.sent.some(item => item.channel === 'kova:interactive-request')).toBe(false)
   })
@@ -161,7 +161,7 @@ describe('TerminalManager — workspace path containment', () => {
     expect(pty.spawn).toHaveBeenCalled()
   })
 
-  it('runInteractive bloqueia execucao quando projectRoot nao foi configurado', async () => {
+  it('runInteractive blocks execution when projectRoot was not configured', async () => {
     const { pty } = makePty()
     const wc = makeWebContents()
     const manager = new TerminalManager(pty as never)
@@ -171,7 +171,7 @@ describe('TerminalManager — workspace path containment', () => {
     const result = await manager.runInteractive('npm test', '/tmp', 'test')
 
     expect(result.exitCode).toBe(1)
-    expect(result.output).toContain('projeto')
+    expect(result.output).toContain('No project open')
     expect(pty.spawn).not.toHaveBeenCalled()
   })
 
@@ -378,7 +378,7 @@ describe('TerminalManager — approval edge cases', () => {
 
     const result = await promise
     expect(result.exitCode).toBe(1)
-    expect(result.output).toContain('negou')
+    expect(result.output).toContain('User denied')
     expect(pty.spawn).not.toHaveBeenCalled()
   })
 
@@ -406,7 +406,7 @@ describe('TerminalManager — approval edge cases', () => {
     const r2 = await p2
 
     expect(r1.exitCode).toBe(1)     // gh negado
-    expect(r1.output).toContain('negou')
+    expect(r1.output).toContain('User denied')
     expect(r2.exitCode).toBe(0)     // npm concluiu com sucesso
     expect(pty.spawn).toHaveBeenCalledOnce()  // apenas npm abriu PTY
   })

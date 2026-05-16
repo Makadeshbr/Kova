@@ -113,7 +113,7 @@ export function MemoryPanel({ projectRoot, refreshKey }: Props): React.ReactElem
 function InvalidatedSection({ items }: { items: ContradictedLearning[] }): React.ReactElement {
   return (
     <div>
-      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Aprendizados invalidados</div>
+      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Invalidated learnings</div>
       {items.slice(0, 5).map(item => (
         <div key={item.id} style={{
           padding: '6px 8px', borderRadius: 6, background: 'var(--bg-3)',
@@ -123,7 +123,7 @@ function InvalidatedSection({ items }: { items: ContradictedLearning[] }): React
             {item.description.slice(0, 140)}
           </div>
           <div style={{ color: 'var(--text-3)', fontSize: 10, marginTop: 2 }}>
-            {item.invalidationReason ?? 'Invalidado por mudanca no perfil do projeto.'}
+            {item.invalidationReason ?? 'Invalidated by project profile change.'}
           </div>
         </div>
       ))}
@@ -134,7 +134,7 @@ function InvalidatedSection({ items }: { items: ContradictedLearning[] }): React
 function PendingSection({ items }: { items: PendingLearning[] }): React.ReactElement {
   return (
     <div>
-      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Aguardando revisão humana</div>
+      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Awaiting human review</div>
       {items.slice(0, 5).map((item, i) => (
         <div key={i} style={{
           padding: '6px 8px', borderRadius: 6, background: 'var(--bg-3)',
@@ -160,7 +160,7 @@ function PendingSection({ items }: { items: PendingLearning[] }): React.ReactEle
       ))}
       {items.length > 5 && (
         <div style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'center', marginTop: 2 }}>
-          +{items.length - 5} pendentes
+          +{items.length - 5} pending
         </div>
       )}
     </div>
@@ -170,7 +170,7 @@ function PendingSection({ items }: { items: PendingLearning[] }): React.ReactEle
 function ContradictedSection({ items }: { items: ContradictedLearning[] }): React.ReactElement {
   return (
     <div>
-      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Aprendizados contraditos</div>
+      <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 4 }}>Contradicted learnings</div>
       {items.slice(0, 5).map(item => (
         <div key={item.id} style={{
           padding: '6px 8px', borderRadius: 6, background: 'var(--bg-3)',
@@ -178,7 +178,7 @@ function ContradictedSection({ items }: { items: ContradictedLearning[] }): Reac
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
             <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: 'var(--red-dim)', color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>
-              {item.contradictions} × contradição
+              {item.contradictions} × contradiction
             </span>
             <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: 'var(--bg-active)', color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>
               {item.status}
@@ -191,7 +191,7 @@ function ContradictedSection({ items }: { items: ContradictedLearning[] }): Reac
       ))}
       {items.length > 5 && (
         <div style={{ fontSize: 10, color: 'var(--text-3)', textAlign: 'center', marginTop: 2 }}>
-          +{items.length - 5} contraditos
+          +{items.length - 5} contradicted
         </div>
       )}
     </div>

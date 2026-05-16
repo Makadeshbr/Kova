@@ -1,4 +1,4 @@
-import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage } from '@kova/shared'
+import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage, CommandOutputCallback } from '@kova/shared'
 import type { AgentProvider, LLMResponse } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
 import type { InteractiveRunner } from './tools'
@@ -37,15 +37,11 @@ export class Agent {
       onToolCall?: (name: string, input: Record<string, unknown>) => void
       onToolResult?: (name: string, result: string) => void
       interactiveRunner?: InteractiveRunner
+      /** FIX-003: forwarded to ToolExecutor for live stdout/stderr streaming. */
+      onCommandOutput?: CommandOutputCallback
     }
   ): Promise<AgentOutput> {
     const tools = WRITE_MODES.has(mode) ? AGENT_TOOLS : READ_ONLY_TOOLS
-    const executor = new ToolExecutor(
-      this.projectRoot,
-      options?.signal,
-      WRITE_MODES.has(mode) ? undefined : READ_ONLY_PERMISSION_POLICY,
-      options?.interactiveRunner,
-    )
     const caps = this.provider.capabilities()
     const system = buildSystemPrompt(mode, task, caps.supportsToolCalls)
     const userMessage = buildUserMessage(task, context)
@@ -62,6 +58,13 @@ export class Agent {
     const composedSignal = options?.signal
       ? AbortSignal.any([options.signal, timeoutController.signal])
       : timeoutController.signal
+    const executor = new ToolExecutor(
+      this.projectRoot,
+      composedSignal,
+      WRITE_MODES.has(mode) ? undefined : READ_ONLY_PERMISSION_POLICY,
+      options?.interactiveRunner,
+      options?.onCommandOutput,
+    )
 
     const timeoutId = setTimeout(
       () => timeoutController.abort(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 60_000} minutes — LLM may be overloaded`)),

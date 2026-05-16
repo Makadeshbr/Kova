@@ -3,9 +3,9 @@ import type { FileChange } from '../types'
 import { EXT_LANG, EXT_COLOR, fileIconInfo, getExt, getFileName, getFolder } from '../file-utils'
 
 const TYPE_BADGE = {
-  create: { label: 'Novo', color: 'var(--teal)', bg: 'var(--teal-dim)' },
-  modify: { label: 'Modificado', color: 'var(--yellow)', bg: 'var(--yellow-dim)' },
-  delete: { label: 'Deletado', color: 'var(--red)', bg: 'var(--red-dim)' },
+  create: { label: 'New', color: 'var(--teal)', bg: 'var(--teal-dim)' },
+  modify: { label: 'Modified', color: 'var(--yellow)', bg: 'var(--yellow-dim)' },
+  delete: { label: 'Deleted', color: 'var(--red)', bg: 'var(--red-dim)' },
 }
 
 type DiffLineType = 'add' | 'remove' | 'same'

@@ -94,8 +94,8 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
     >
       <div style={{ width: 560, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100vh - 32px)', overflow: 'auto', background: 'var(--bg-2)', borderRadius: 8, border: '1px solid var(--border)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: 15, fontWeight: 700 }}>Configuracoes</h2>
-          <button onClick={onClose} aria-label="Fechar" style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 16, padding: '4px 8px' }}>x</button>
+          <h2 style={{ fontSize: 15, fontWeight: 700 }}>Settings</h2>
+          <button onClick={onClose} aria-label="Close" style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 16, padding: '4px 8px' }}>x</button>
         </div>
 
         <Field label="Intelligence Engine">
@@ -256,8 +256,8 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
         </div>
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-          <button onClick={onClose} style={{ background: 'var(--bg-active)', color: 'var(--text-2)', padding: '8px 16px', borderRadius: 6 }}>Cancelar</button>
-          <button onClick={() => onSave(form)} style={{ background: 'var(--cyan)', color: '#000', padding: '8px 16px', fontWeight: 700, borderRadius: 6 }}>Salvar</button>
+          <button onClick={onClose} style={{ background: 'var(--bg-active)', color: 'var(--text-2)', padding: '8px 16px', borderRadius: 6 }}>Cancel</button>
+          <button onClick={() => onSave(form)} style={{ background: 'var(--cyan)', color: '#000', padding: '8px 16px', fontWeight: 700, borderRadius: 6 }}>Save</button>
         </div>
       </div>
     </div>

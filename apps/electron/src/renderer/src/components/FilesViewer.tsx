@@ -12,9 +12,9 @@ type DiffLineType = 'add' | 'remove' | 'same'
 interface DiffLine { text: string; type: DiffLineType; hunkId?: string }
 
 const TYPE_META = {
-  create: { label: 'Novo', color: 'var(--teal)', bg: 'var(--teal-dim)' },
-  modify: { label: 'Modificado', color: 'var(--yellow)', bg: 'var(--yellow-dim)' },
-  delete: { label: 'Deletado', color: 'var(--red)', bg: 'var(--red-dim)' },
+  create: { label: 'New', color: 'var(--teal)', bg: 'var(--teal-dim)' },
+  modify: { label: 'Modified', color: 'var(--yellow)', bg: 'var(--yellow-dim)' },
+  delete: { label: 'Deleted', color: 'var(--red)', bg: 'var(--red-dim)' },
 }
 
 const LINE_BG: Record<DiffLineType, string> = {
@@ -197,13 +197,13 @@ export function FilesViewer({ changes, onClose, onApplySelection }: Props): Reac
   return (
     <div style={{ height: 360, display: 'flex', flexDirection: 'column', background: 'var(--bg-2)', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)', gap: 10 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Arquivos gerados</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Generated files</span>
         <span style={{ fontSize: 11, color: 'var(--text-3)', background: 'var(--bg-active)', padding: '1px 8px', borderRadius: 10 }}>{changes.length}</span>
         {active && (
           <>
-            <button onClick={() => setDecision(active.path, 'approve')} style={{ marginLeft: 'auto', fontSize: 11 }}>Aprovar arquivo</button>
-            <button onClick={() => setDecision(active.path, 'reject')} style={{ fontSize: 11 }}>Rejeitar arquivo</button>
-            {onApplySelection && <button onClick={() => onApplySelection(selection)} style={{ fontSize: 11, color: 'var(--teal)' }}>Aplicar aprovado</button>}
+            <button onClick={() => setDecision(active.path, 'approve')} style={{ marginLeft: 'auto', fontSize: 11 }}>Approve file</button>
+            <button onClick={() => setDecision(active.path, 'reject')} style={{ fontSize: 11 }}>Reject file</button>
+            {onApplySelection && <button onClick={() => onApplySelection(selection)} style={{ fontSize: 11, color: 'var(--teal)' }}>Apply approved</button>}
           </>
         )}
         <button onClick={onClose} style={{ marginLeft: 'auto', background: 'transparent', color: 'var(--text-3)', padding: '2px 8px', fontSize: 14 }}>✕</button>
@@ -216,7 +216,7 @@ export function FilesViewer({ changes, onClose, onApplySelection }: Props): Reac
         </div>
         {active ? <CodeView change={active} approvedHunks={activeApproved} onToggleHunk={(id) => toggleHunk(active.path, id)} /> : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-3)', fontSize: 12 }}>
-            Selecione um arquivo
+            Select a file
           </div>
         )}
       </div>

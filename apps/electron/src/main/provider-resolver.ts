@@ -75,7 +75,7 @@ export async function buildProvider(
   if (providerName === 'nvidia') {
     const settings = getSettingsInternal()
     apiKey = process.env.NVIDIA_API_KEY || settings.nvidiaKey || ''
-    if (!apiKey) throw new Error('NVIDIA_API_KEY ausente. Configure via .env ou nas configurações.')
+    if (!apiKey) throw new Error('NVIDIA_API_KEY is missing. Configure it via .env or Settings.')
     if (settings.nvidiaEnableThinking !== false) {
       extraBody = { chat_template_kwargs: { thinking: true } }
     }
@@ -109,9 +109,9 @@ export async function buildProvider(
     resolvedModel: model,
     fallback: usedFallback || (!!safeConfigured && resolved !== safeConfigured),
     fallbackReason: usedFallback
-      ? `Modelo nao detectado em ${baseUrl}; usando preset "${presetFallback}"`
+      ? `Model not detected at ${baseUrl}; using preset "${presetFallback}"`
       : (safeConfigured && resolved !== safeConfigured)
-        ? `Modelo "${safeConfigured}" nao encontrado; usando "${resolved}"`
+        ? `Model "${safeConfigured}" not found; using "${resolved}"`
         : undefined,
   }
 }

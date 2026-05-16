@@ -11,12 +11,13 @@ import { ExecutionEngine } from '@kova/execution'
 import { HarnessOrchestrator } from '@kova/orchestrator'
 import type { AgentContext, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage } from '@kova/shared'
 import { basename } from 'node:path'
+import { readdirSync } from 'node:fs'
 import { MemorySystem } from '@kova/memory'
 import { adapterFromProjectProfile, detectStack } from '@kova/adapters'
 import { buildProjectProfile } from '@kova/project'
 import { resolveAtRefs, shouldShortCircuitDeniedRefs, deniedRefsMessage } from './at-refs'
 import type { ResolvedAtRefs } from './at-refs'
-import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, inferRunMode, parsePlanResult } from './session-prompts'
+import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, inferRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
 import type { KovaRunMode } from './session-prompts'
 import {
   buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
@@ -25,6 +26,7 @@ import {
 import { buildProvider, tryFallbackProvider } from './provider-resolver'
 import type { ProviderFactory, ProviderResolution } from './provider-resolver'
 import { buildPatchTask } from './task-structurer'
+import { LruCache } from './lru-cache'
 
 // Re-export provider types so existing consumers of engine-manager keep working unchanged.
 export { autoResolveModel, buildProvider } from './provider-resolver'
@@ -49,7 +51,45 @@ export interface StartTaskParams {
   openedFiles?: string[]
 }
 
+// FIX-004: User-facing copy used to build the AgentResultMessage card after a patch
+// session completes. Centralised so translations and tweaks stay together.
+const RESULT_COPY = {
+  diffReviewMessage: (count: number) => `${count} file${count === 1 ? '' : 's'} awaiting review`,
+  contextLoaded: (count: number) => `${count} file${count === 1 ? '' : 's'} in context`,
+  titleCompleted: 'Task complete',
+  titlePaused: 'Awaiting review',
+  titleFailed: 'Repair needed',
+  summaryCompleted: 'Changes applied successfully.',
+  summaryPaused: 'Review required before applying.',
+  summaryMaxIterationsReached: 'Maximum repair attempts reached.',
+  summaryFailedLayers: (layers: string, attempts: number) =>
+    `${layers} failed after ${attempts} attempt${attempts === 1 ? '' : 's'}.`,
+} as const
+
 // ——— Engine Manager ——————————————————————————————————————————————————————————
+
+const BLANK_PROJECT_IGNORED_ENTRIES = new Set([
+  '.git',
+  '.kova',
+  '.turbo',
+  'node_modules',
+  'dist',
+  'out',
+  'build',
+  '.DS_Store',
+  '.gitignore',
+  '.gitattributes',
+])
+
+function projectLooksBlank(projectRoot: string): boolean {
+  try {
+    return readdirSync(projectRoot, { withFileTypes: true })
+      .filter(entry => !BLANK_PROJECT_IGNORED_ENTRIES.has(entry.name))
+      .length === 0
+  } catch {
+    return false
+  }
+}
 
 export class EngineManager {
   private engine: ExecutionEngine | null = null
@@ -60,17 +100,45 @@ export class EngineManager {
   private onModelDetected: ((model: string) => void) | null = null
   private onChatResponse: ((msg: string) => void) | null = null
   private onExecutionEvent: ((event: ExecutionEvent) => void) | null = null
-  // Cache ContextEngine + MemorySystem per projectRoot to avoid recreating on every session
-  private readonly contextEngineCache = new Map<string, ReturnType<typeof buildContextEngine>>()
+  // FIX-002 + FIX-010: Cache MemorySystem + ContextEngine per projectRoot, bounded by
+  // LruCache so opening many projects does not pin instances forever. Both caches share
+  // the same key (projectRoot) and the same capacity — when a project is evicted from
+  // one, the matching entry is dropped from the other so they stay in sync.
+  private static readonly MAX_CACHED_PROJECTS = 3
+  private readonly memorySystemCache = new LruCache<string, MemorySystem>(EngineManager.MAX_CACHED_PROJECTS)
+  private readonly contextEngineCache = new LruCache<string, { adapterName: string; engine: ContextEngine }>(EngineManager.MAX_CACHED_PROJECTS)
 
   constructor(private readonly providerFactory: ProviderFactory = buildProvider) {}
 
+  private getMemorySystem(projectRoot: string): MemorySystem {
+    const cached = this.memorySystemCache.get(projectRoot)
+    if (cached) return cached
+    const memory = new MemorySystem(projectRoot)
+    const { evicted } = this.memorySystemCache.set(projectRoot, memory)
+    // FIX-010: keep the two caches in sync — when one project ages out of the
+    // memory cache, drop its ContextEngine too (the engine holds a reference
+    // to the now-evicted memory and would drift on the next access).
+    if (evicted) this.contextEngineCache.delete(evicted.key)
+    return memory
+  }
+
   private getContextEngine(projectRoot: string, adapter: ReturnType<typeof detectStack>): ContextEngine {
     const cached = this.contextEngineCache.get(projectRoot)
-    if (cached) return cached
-    const engine = buildContextEngine(projectRoot, adapter)
-    this.contextEngineCache.set(projectRoot, engine)
+    if (cached?.adapterName === adapter.name) return cached.engine
+    const engine = buildContextEngine(projectRoot, adapter, this.getMemorySystem(projectRoot))
+    const { evicted } = this.contextEngineCache.set(projectRoot, { adapterName: adapter.name, engine })
+    if (evicted) this.memorySystemCache.delete(evicted.key)
     return engine
+  }
+
+  /**
+   * FIX-010: Explicit cache cleanup for a project. Called when the user closes or
+   * switches projects — frees the in-memory ContextEngine + MemorySystem instances
+   * for that root so they don't linger if they would otherwise survive eviction.
+   */
+  clearProjectCache(projectRoot: string): void {
+    this.contextEngineCache.delete(projectRoot)
+    this.memorySystemCache.delete(projectRoot)
   }
 
   /** Thin wrapper that injects this instance's state into the pure tryFallbackProvider helper. */
@@ -128,7 +196,7 @@ export class EngineManager {
     if (resolution.denied.length) {
       for (const ref of resolution.denied) this.emit({ type: 'context_ref_denied', message: ref.reason, toolInput: { path: ref.path } })
     }
-    if (resolution.missing.length) this.emit({ type: 'tool_result', message: `@ nao encontrado: ${resolution.missing.join(', ')}` })
+    if (resolution.missing.length) this.emit({ type: 'tool_result', message: `@ not found: ${resolution.missing.join(', ')}` })
 
     if (shouldShortCircuitDeniedRefs(rawContent, resolution)) {
       this.onChatResponse?.(deniedRefsMessage(resolution))
@@ -153,11 +221,11 @@ export class EngineManager {
     }
     if (!resolution2) {
       // Try fallback when primary returned null (auth missing, no model)
-      const fallback = await this.resolveFallbackProvider(params, new Error('Provider primario nao configurado'))
+      const fallback = await this.resolveFallbackProvider(params, new Error('Primary provider not configured'))
       if (fallback) {
         resolution2 = fallback
       } else {
-        this.onChatResponse?.('Provider nao configurado. Abra Configuracoes.')
+        this.onChatResponse?.('Provider not configured. Open Settings.')
         this.emit({ type: 'stream_end' })
         return
       }
@@ -168,8 +236,8 @@ export class EngineManager {
     this.emit({
       type: 'provider_session_start',
       message: resolution2.fallback
-        ? `Provider: ${resolution2.resolvedProvider} / modelo: ${resolution2.resolvedModel} (fallback — ${resolution2.fallbackReason ?? 'modelo configurado nao disponivel'})`
-        : `Provider: ${resolution2.resolvedProvider} / modelo: ${resolution2.resolvedModel ?? 'auto'}`,
+        ? `Provider: ${resolution2.resolvedProvider} / model: ${resolution2.resolvedModel} (fallback — ${resolution2.fallbackReason ?? 'configured model unavailable'})`
+        : `Provider: ${resolution2.resolvedProvider} / model: ${resolution2.resolvedModel ?? 'auto'}`,
       providerMeta: {
         requestedProvider: params.provider ?? 'anthropic',
         requestedModel: params.model || undefined,
@@ -195,13 +263,13 @@ export class EngineManager {
     }
     const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter)
     this.onStructured?.(task)
-    // Patch mode does not receive raw conversation history. The agent rediscovers project
-    // state from disk via read_file/list_files — that is more reliable than chat transcripts
-    // that may include narration, failed attempts, or context from a different task.
-    // Chat/Plan/Review modes still receive history because they ARE conversation-driven.
+    // FIX-001: Patch mode receives history so the agent has memory of prior turns
+    // ("now add X to the file you just created" requires knowing what was created).
+    // Caller (App.tsx) already filters via buildTokenBudgetedHistory — only clean
+    // user/assistant turns reach here, never tool-call narration.
     await this.runUnifiedSession(
       resolution.userContent,
-      [],
+      history,
       params,
       provider,
       projectRoot,
@@ -235,7 +303,7 @@ export class EngineManager {
         const ctx = await contextEngine.buildContext(task, projectRoot, contextBuildOptions(projectRoot, maxContextTokens, explicitFiles, params.openedFiles ?? []))
         this.emit({
           type: 'context_loaded',
-          message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
+          message: RESULT_COPY.contextLoaded(ctx.files.length),
           context: contextEventPayload(ctx, maxContextTokens),
         })
         if (ctx.files.length > 0) {
@@ -294,7 +362,7 @@ export class EngineManager {
 
       this.emit({
         type: 'context_loaded',
-        message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
+        message: RESULT_COPY.contextLoaded(ctx.files.length),
         context: {
           ...contextEventPayload(ctx as AgentContext, maxContextTokens),
         },
@@ -375,7 +443,7 @@ export class EngineManager {
 
       this.emit({
         type: 'context_loaded',
-        message: `${ctx.files.length} arquivo${ctx.files.length === 1 ? '' : 's'} no contexto`,
+        message: RESULT_COPY.contextLoaded(ctx.files.length),
         context: {
           ...contextEventPayload(ctx as AgentContext, maxContextTokens),
         },
@@ -402,15 +470,31 @@ export class EngineManager {
         },
       ]
 
+      const planTools = ctx.files.length > 0 || explicitFiles.length > 0 || openedFiles.length > 0 || !projectLooksBlank(projectRoot)
+        ? READ_ONLY_TOOLS
+        : []
       const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY)
       reasoning.start()
+      // FIX-005: suppress raw <plan_result> XML from leaking into the chat as tokens.
+      // We accumulate the buffer and only emit text that lives OUTSIDE the XML envelope.
+      // Anything emitted up to now is replayed if the new visible text grows.
+      let streamBuffer = ''
+      let lastVisibleLen = 0
       const output = await provider.runAgentLoop(messages, {
         system: planOnlyPrompt(adapter.name),
-        tools: READ_ONLY_TOOLS,
+        tools: planTools,
         executor,
         maxTurns: 8,
         signal,
-        onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
+        onToken: t => {
+          reasoning.end()
+          streamBuffer += t
+          const visible = stripPlanXml(streamBuffer)
+          if (visible.length > lastVisibleLen) {
+            this.emit({ type: 'token', token: visible.slice(lastVisibleLen) })
+            lastVisibleLen = visible.length
+          }
+        },
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: delta => reasoning.delta(delta),
         onReasoningEnd: () => reasoning.end(),
@@ -429,12 +513,10 @@ export class EngineManager {
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
       this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
 
-      // Parse XML plan result → emit structured card so the UI renders it properly
-      const planMsg = parsePlanResult(output.thought, userContent)
-      const planEndEvent = planMsg
-        ? { type: 'stream_end' as const, structuredMessage: planMsg }
-        : { type: 'stream_end' as const }
-      this.emit(planEndEvent)
+      // FIX-005: robust 3-tier parser (strict XML → markdown → minimal). Always produces
+      // a card so /plan never fails silently when the model deviates from the XML format.
+      const planMsg = parsePlanResultRobust(output.thought, userContent)
+      this.emit({ type: 'stream_end', structuredMessage: planMsg })
       streamEndEmitted = true
     } catch (err) {
       if (!signal?.aborted) {
@@ -459,14 +541,16 @@ export class EngineManager {
   ): Promise<void> {
     const appEngine = new CodeApplicationEngine(projectRoot)
 
-    // Create the ExecutionEngine with skipPlan and history enabled
+    // FIX-002: Reuse cached ContextEngine + MemorySystem (single instance per project)
+    // so learnings persist across patch turns and disk scans are not repeated.
+    const memory = this.getMemorySystem(projectRoot)
     this.engine = new ExecutionEngine(
       {
         agent: new Agent(provider, projectRoot),
         orchestrator: new HarnessOrchestrator(),
-        contextEngine: new ContextEngine(new MemorySystem(projectRoot), adapter),
+        contextEngine: this.getContextEngine(projectRoot, adapter),
         applicationEngine: appEngine,
-        memory: new MemorySystem(projectRoot),
+        memory,
       },
       {
         projectRoot,
@@ -480,6 +564,15 @@ export class EngineManager {
         onEvent: (event) => this.onExecutionEvent?.(event),
         interactiveRunner: (command, cwd, reason) =>
           terminalManager.runInteractive(command, cwd, reason),
+        // FIX-003: surface live stdout/stderr from run_command to the UI as
+        // command_output events. The UI groups lines by commandId under the
+        // originating tool_call activity entry.
+        onCommandOutput: (commandId, commandLine, commandStream) => this.emit({
+          type: 'command_output',
+          commandId,
+          commandLine,
+          commandStream,
+        }),
       },
     )
 
@@ -514,21 +607,24 @@ export class EngineManager {
           timestamp: new Date().toISOString(),
           iteration: last?.iteration,
           type: 'diff_review_ready',
-          message: `${files.length} arquivo(s) aguardando review`,
+          message: RESULT_COPY.diffReviewMessage(files.length),
           diffReview: createDiffReviewDecision(files),
         })
         // Emit a structured result so the renderer renders a visual card
-        const title = state.status === 'completed' ? 'Tarefa concluída'
-          : state.status === 'paused' ? 'Aguardando revisão'
-          : 'Correção necessária'
+        const title = state.status === 'completed' ? RESULT_COPY.titleCompleted
+          : state.status === 'paused' ? RESULT_COPY.titlePaused
+          : RESULT_COPY.titleFailed
         const failedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && !layer.passed) ?? []
         const failedSummary = failedLayers.length > 0
-          ? `${failedLayers.map(layer => layer.command || layer.name).join(', ')} falhou após ${state.iterationHistory.length} tentativa(s).`
-          : 'Máximo de tentativas atingido.'
+          ? RESULT_COPY.summaryFailedLayers(
+              failedLayers.map(layer => layer.command || layer.name).join(', '),
+              state.iterationHistory.length,
+            )
+          : RESULT_COPY.summaryMaxIterationsReached
         const summary = state.status === 'completed'
-          ? 'Modificações aplicadas com sucesso.'
+          ? RESULT_COPY.summaryCompleted
           : state.status === 'paused'
-          ? 'Revisão necessária antes de aplicar.'
+          ? RESULT_COPY.summaryPaused
           : failedSummary
 
         const structuredMsg: import('@kova/shared').AgentResultMessage = {
@@ -615,17 +711,17 @@ function formatProviderError(err: unknown): string {
   if (normalized.name === 'KovaProviderError') return normalized.safeMessage
   const msg = err instanceof Error ? err.message : String(err)
   if (classifyProviderError(err) === 'provider_rate_limited')
-    return 'Limite do provider atingido. Tente novamente depois ou troque de provider.'
+    return 'Rate limit reached. Try again later or switch provider.'
   if (msg.includes('model') && (msg.includes('not found') || msg.includes('404')))
-    return 'Modelo nao encontrado. Verifique o nome do modelo nas configuracoes.'
+    return 'Model not found. Check the model name in Settings.'
   if (msg.includes('400') && msg.includes('crash'))
-    return 'O modelo local crashou (falta de memoria). Reinicie o servidor LLM.'
+    return 'Local model crashed (out of memory). Restart the LLM server.'
   if (msg.includes('reasoning_content'))
-    return 'Erro no contexto do modelo. Reinicie a conversa.'
+    return 'Model context error. Restart the conversation.'
   if (msg.includes('fetch') || msg.includes('ECONNREFUSED') || msg.includes('network'))
-    return 'Servidor LLM nao responde. Verifique se esta rodando.'
+    return 'LLM server not responding. Check if it is running.'
   if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('api key'))
-    return 'API key invalida. Verifique nas configuracoes.'
+    return 'Invalid API key. Check Settings.'
   return msg
 }
 

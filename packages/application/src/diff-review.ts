@@ -136,7 +136,12 @@ function diffLines(before: string[], after: string[]): DiffLine[] {
     if (i > 0 && j > 0 && before[i - 1] === after[j - 1]) {
       result.unshift({ type: 'same', text: before[i - 1], beforeLine: i, afterLine: j })
       i--; j--
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] > dp[i - 1][j])) {
+      // Strict ">": on LCS ties, prefer the remove branch first. Result: at
+      // substitution points the diff sequence is [..., add, remove, ...] in
+      // forward order. This matters for partial-hunk apply — when a user
+      // approves the +new and rejects the −old, the new line appears at the
+      // intended position with the preserved old line shifted below it.
       result.unshift({ type: 'add', text: after[j - 1], afterLine: j, beforeLine: i + 1 })
       j--
     } else {

@@ -6,7 +6,7 @@ const kovaAPI = {
   detectModel: (url) => electron.ipcRenderer.invoke("kova:detect-model", url),
   pause: () => electron.ipcRenderer.invoke("kova:pause"),
   abort: () => electron.ipcRenderer.invoke("kova:abort"),
-  forceApply: () => electron.ipcRenderer.invoke("kova:force-apply"),
+  forceApply: (selection) => electron.ipcRenderer.invoke("kova:force-apply", selection),
   getState: () => electron.ipcRenderer.invoke("kova:get-state"),
   getSettings: () => electron.ipcRenderer.invoke("kova:get-settings"),
   saveSettings: (settings) => electron.ipcRenderer.invoke("kova:save-settings", settings),
@@ -53,6 +53,43 @@ const kovaAPI = {
   listSessions: (root) => electron.ipcRenderer.invoke("kova:list-sessions", root),
   saveSession: (root, session) => electron.ipcRenderer.invoke("kova:save-session", root, session),
   deleteSession: (root, id) => electron.ipcRenderer.invoke("kova:delete-session", root, id),
+  // ─── Terminal / PTY ───────────────────────────────────────────────────────
+  terminalOpen: (id, command, cwd) => electron.ipcRenderer.invoke("kova:terminal-open", id, command, cwd),
+  terminalInput: (id, data) => {
+    electron.ipcRenderer.invoke("kova:terminal-input", id, data);
+  },
+  terminalResize: (id, cols, rows) => {
+    electron.ipcRenderer.invoke("kova:terminal-resize", id, cols, rows);
+  },
+  terminalKill: (id) => {
+    electron.ipcRenderer.invoke("kova:terminal-kill", id);
+  },
+  terminalApprove: (id, approved) => {
+    electron.ipcRenderer.invoke("kova:terminal-approve", id, approved);
+  },
+  onTerminalData: (cb) => {
+    const h = (_, payload) => cb(payload.id, payload.data);
+    electron.ipcRenderer.on("kova:terminal-data", h);
+    return () => electron.ipcRenderer.removeListener("kova:terminal-data", h);
+  },
+  onTerminalStarted: (cb) => {
+    const h = (_, p) => cb(p.id, p.command, p.cwd);
+    electron.ipcRenderer.on("kova:terminal-started", h);
+    return () => electron.ipcRenderer.removeListener("kova:terminal-started", h);
+  },
+  onTerminalExit: (cb) => {
+    const h = (_, payload) => cb(payload.id, payload.exitCode);
+    electron.ipcRenderer.on("kova:terminal-exit", h);
+    return () => electron.ipcRenderer.removeListener("kova:terminal-exit", h);
+  },
+  onInteractiveRequest: (cb) => {
+    const h = (_, p) => cb(p.id, p.command, p.reason);
+    electron.ipcRenderer.on("kova:interactive-request", h);
+    return () => electron.ipcRenderer.removeListener("kova:interactive-request", h);
+  },
+  getPendingLearnings: (root) => electron.ipcRenderer.invoke("kova:get-pending-learnings", root),
+  getContradictedLearnings: (root) => electron.ipcRenderer.invoke("kova:get-contradicted-learnings", root),
+  getInvalidatedLearnings: (root) => electron.ipcRenderer.invoke("kova:get-invalidated-learnings", root),
   windowMinimize: () => electron.ipcRenderer.send("kova:window-minimize"),
   windowMaximize: () => electron.ipcRenderer.send("kova:window-maximize"),
   windowClose: () => electron.ipcRenderer.send("kova:window-close"),
