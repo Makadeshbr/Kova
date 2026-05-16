@@ -44,6 +44,7 @@ Guidance:
 
 Tools:
 - grep_codebase — locate symbols, usages, or patterns. ALWAYS prefer this over run_command grep/rg/findstr.
+- glob_files — list files matching a path glob (e.g. "**/*.tsx"). ALWAYS prefer this over run_command find/ls.
 - read_file — inspect before editing.
 - edit_file — surgical change to an existing file (exact old_string → new_string).
 - write_file — new file, or complete rewrite when most of the file changes.
@@ -65,7 +66,8 @@ Guidance:
 - A short sentence before a tool call is fine; avoid long monologues.
 
 Tools:
-- grep_codebase / read_file — discover existing tests and conventions.
+- grep_codebase / glob_files — discover existing tests, fixtures, and conventions. Prefer over run_command grep/find.
+- read_file — inspect targets before writing tests.
 - write_file — add new test files. edit_file — extend an existing test file.
 - run_command — execute the test command and iterate on failures.
 
@@ -81,6 +83,7 @@ Guidance:
 
 Tools:
 - grep_codebase — locate the broken symbol or string. ALWAYS prefer this over run_command grep/rg/findstr.
+- glob_files — list files matching a path glob (e.g. "**/*.test.ts"). ALWAYS prefer this over run_command find/ls.
 - read_file — inspect the failing file before editing.
 - edit_file — preferred for fixes (exact old_string → new_string).
 - write_file — only when the entire file must change.
@@ -120,6 +123,7 @@ Guidance:
 
 Tools:
 - grep_codebase — locate symbols and usages. ALWAYS prefer this over run_command grep/rg/findstr.
+- glob_files — list files matching a path glob. ALWAYS prefer this over run_command find/ls.
 - read_file / list_files — inspect before editing.
 - edit_file — surgical change. write_file — new file or full rewrite.
 - run_command — build, test, lint.

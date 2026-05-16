@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { CommandOutputCallback, FileChange, ValidationCommandKind } from '@kova/shared'
 import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
+import { globFiles, type GlobOptions } from './glob-files'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
 export type PermissionKey = 'read' | 'edit' | 'list' | 'bash'
@@ -201,6 +202,26 @@ Inputs:
     },
   },
   {
+    name: 'glob_files',
+    description: `List project files matching a glob pattern, sorted most-recently-modified first. Prefer this over run_command find/ls — it works on every OS, ignores node_modules/dist/.git/.turbo/out by default, and respects the staged buffer (files you wrote earlier in the same turn are visible).
+
+Inputs:
+- pattern (required): glob, forward-slash style. Examples: "**/*.ts", "src/**/components/*.tsx", "**/*.{md,mdx}".
+- path: subdir scope relative to project root. Defaults to the whole project.
+- head_limit: max paths returned, default 100, hard ceiling 500.
+
+Returns paths relative to the project root with forward slashes, newest first. Symbolic links are not followed.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Glob pattern (e.g. "**/*.ts", "src/**/components/*.tsx")' },
+        path: { type: 'string', description: 'Optional subdirectory relative to project root' },
+        head_limit: { type: 'number', description: 'Max paths returned (default 100, max 500)' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
     name: 'run_command',
     description: 'Run a single safe command in the project root or a structured cwd. Use for build, test, lint, typecheck, format, or read-only inspection. Do not use cd, pipes, redirects, &&, or ;.',
     inputSchema: {
@@ -237,8 +258,8 @@ The user will see an approval dialog before the terminal opens. Examples:
 ]
 
 // Read-only subset for plan and review modes — no side effects.
-// grep_codebase is read-only: it inspects file contents but never mutates anything.
-const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase'])
+// grep_codebase and glob_files are read-only: they inspect files but never mutate anything.
+const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase', 'glob_files'])
 export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(t => READ_ONLY_TOOL_NAMES.has(t.name))
 
 export type InteractiveRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
@@ -298,6 +319,7 @@ export class ToolExecutor {
       case 'delete_file': return this.deleteFile(String(input.path ?? ''))
       case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
       case 'grep_codebase': return this.grepCodebase(input)
+      case 'glob_files':    return this.globFiles(input)
       case 'run_command': return this.runCommand(
         String(input.command ?? ''),
         stringOrUndefined(input.cwd),
@@ -585,6 +607,30 @@ export class ToolExecutor {
 
     const header = `${result.lines.length} ${options.outputMode === 'content' ? 'matching line(s)' : 'result(s)'}${result.truncated ? ' (truncated)' : ''}:`
     return `${header}\n${result.lines.join('\n')}`
+  }
+
+  /**
+   * FIX-016: glob_files dispatcher. Sanitises LLM input, delegates to the pure
+   * helper, and materialises staged writes so the agent can discover files it
+   * created earlier in the same iteration.
+   */
+  private async globFiles(rawInput: Record<string, unknown>): Promise<string> {
+    const pattern = typeof rawInput.pattern === 'string' ? rawInput.pattern : ''
+    if (!pattern.trim()) return 'Error: glob_files requires a non-empty pattern.'
+
+    const options: GlobOptions = {
+      pattern,
+      path: stringOrUndefined(rawInput.path),
+      headLimit: typeof rawInput.head_limit === 'number' ? rawInput.head_limit : undefined,
+    }
+
+    const result = await this.withStagedFilesOnDisk(() => globFiles(this.projectRoot, options, this.signal))
+
+    if (!result.ok) return `Error: ${result.error ?? 'glob_files failed'}`
+    if (result.paths.length === 0) return 'No files matched.'
+
+    const header = `${result.paths.length} file(s)${result.truncated ? ' (truncated; head_limit reached)' : ''}:`
+    return `${header}\n${result.paths.join('\n')}`
   }
 
   private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {

@@ -25,7 +25,7 @@
 | FIX-013 | 🔴 Crítico | ✅ | Sem `edit_file` (diff-based) — toda alteração reescreve arquivo inteiro |
 | FIX-014 | 🔴 Crítico | ✅ | Sem prompt caching Anthropic — todo turno paga 100% dos tokens |
 | FIX-015 | 🔴 Crítico | ✅ | Sem `grep_codebase` — modelo trabalha cego no projeto |
-| FIX-016 | 🟠 Alto | ⬜ | Sem `glob_files` — sem busca de paths por padrão |
+| FIX-016 | 🟠 Alto | ✅ | Sem `glob_files` — sem busca de paths por padrão |
 | FIX-017 | 🟠 Alto | ✅ | Prompts adversariais — proíbem narração e travam stack duro |
 | FIX-018 | 🟠 Alto | ⬜ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
 | FIX-019 | 🟡 Médio | ⬜ | ContextEngine rebuilda do zero a cada iteração de reparo |
@@ -364,23 +364,46 @@
 
 ---
 
-### FIX-016 — Tool `glob_files` ⬜
-**Problema:** Para encontrar "todos os tsx em components" o modelo lista diretórios recursivamente com `list_files` em loop, ou tenta `run_command find` (bloqueado em Windows, frágil em \*nix). Claude Code resolve isso com Glob dedicado.
+### FIX-016 — Tool `glob_files` (fast-glob wrapper, mtime-sorted) ✅
+**Problema:** Para encontrar "todos os tsx em components" o modelo listava diretórios recursivamente com `list_files` em loop, ou tentava `run_command find` (bloqueado em Windows, frágil em \*nix). Claude Code resolve isso com Glob dedicado — Kova não tinha.
 
-**Fix proposto:**
-- Nova tool `glob_files(pattern, path?)` em `packages/agent/src/tools.ts`.
-- Pattern estilo glob (`**/*.tsx`, `src/**/components/*.ts`).
-- Wrapper de `fast-glob` (já no monorepo) ou `globby`.
-- Retorna paths relativos ao projectRoot, ordenados por mtime descendente (recém-modificado primeiro — alinha com Claude Code).
-- Limite default: 100 paths.
-- Filtros: ignora `node_modules`, `dist`, `out`, `.git` por padrão (mesmas STAGING_SKIP_DIRS do orchestrator).
-- Disponível em todos os modos (read-only).
+**Fix aplicado:**
+- Novo módulo puro `packages/agent/src/glob-files.ts` (≈110 linhas), zero side effects. Exporta `globFiles(projectRoot, opts, signal?)` e tipos `GlobOptions` / `GlobResult`.
+- **Engine único**: `fast-glob` (mesma dep já adicionada no FIX-015). `followSymbolicLinks: false` por segurança.
+- **Parâmetros**: `pattern` (required, glob forward-slash), `path?` (subdir, validado contra path traversal incluindo absolute paths fora do root), `headLimit?` (default 100, ceiling defensivo 500 para impedir blow-up de contexto).
+- **Ordenação canônica**: `mtime` descendente (newest first — alinha com Claude Code), com desempate lexicográfico para ser determinístico em testes.
+- **Default ignore dirs**: `node_modules`, `dist`, `out`, `build`, `.next`, `.turbo`, `.git`, `coverage`, `.kova` — exatamente o mesmo conjunto do `grep_codebase`.
+- **Paths sempre forward-slash** (`replace(/\\/g, '/')`) — Windows-safe sem branching especial.
+- **Filtra somente arquivos**: `onlyFiles: true` + segundo guard `stat.isFile()` (diretórios com nome `*.ts` não vazam para o resultado).
+- Tool `glob_files` registrada em `AGENT_TOOLS` (`packages/agent/src/tools.ts`) com schema `{ pattern, path?, head_limit? }` e em `READ_ONLY_TOOL_NAMES` — disponível em todos os modos, incluindo `plan` e `review`.
+- **Respeita staged buffer**: dispatcher envolve a chamada em `withStagedFilesOnDisk()` — agente vê arquivos que ele mesmo acabou de criar (`write_file`) e *não* vê arquivos staged-deleted (`delete_file`) no mesmo turno.
+- Dispatcher em `ToolExecutor.execute()` adiciona o case `glob_files` invocando o helper puro com o `signal` composto do agent.
+- `MODE_PROMPTS` (`code`, `test`, `fix`, `unified`) recebeu a linha do `glob_files` na seção **Tools**: `glob_files — list files matching a path glob. ALWAYS prefer this over run_command find/ls.`
+- `packages/agent/CLAUDE.md` tabela `AGENT_TOOLS` atualizada + seção `READ_ONLY_TOOLS` agora inclui `glob_files`.
+- `apps/electron/__tests__/engine-manager.test.ts` atualizado para refletir o novo conjunto `['glob_files', 'grep_codebase', 'list_files', 'read_file']` em modo `/plan`.
 
-**Critério de pronto:**
-- `glob_files("**/*.test.ts")` lista todos os testes do projeto.
-- Não vaza arquivos de `node_modules`.
-- Funciona em Windows (paths normalizados com `/`).
-- Testes: glob básico, glob aninhado, path scope, sem matches, ordenação por mtime, ignore patterns.
+**Evidência:**
+- **27 testes TDD novos** em `packages/agent/__tests__/glob-files.test.ts` (helper puro): basic glob, recursive glob, brace expansion, nested glob, no-matches, path scoping com subdir, path traversal blocked (relative e absolute), default ignores (9 diretórios cobertos), forward-slash normalization, mtime descending sort, lexicographic tie-break, head_limit default, smaller head_limit, MAX_HEAD_LIMIT ceiling, no-truncated flag when fits, empty pattern rejected, whitespace-only pattern rejected, head_limit ≤ 0 → default, symlinks not followed (skip on Windows EPERM), abort signal honored, directories excluded, return shape OK e FAIL.
+- **15 testes de integração novos** em `packages/agent/__tests__/tools.test.ts` (tool registration: schema completa, READ_ONLY membership, description steers from find/ls, documenta forward-slash + mtime; dispatch: header documentado, "No files matched.", empty pattern, path traversal, path scope, head_limit + truncated, default ignores, forward-slash output, staged writes via overlay, staged deletes ocultos, plan/review policy permits).
+- **364/364** testes em `@kova/agent` (vs 322 antes — +42 novos, 0 regressões).
+- **Zero regressão downstream**: 218/218 electron (com o teste de plan-mode ajustado para 4 tools), todos os outros packages verdes em `pnpm -r test`.
+- Build limpo: `tsup` ESM/CJS/DTS sem erro. Bundle CJS 73.65 KB → 79.01 KB (+5.36 KB do helper + dispatcher + schema), ESM 70.52 → 75.72 KB.
+- **Total agregado: 1135 testes verdes em 14 packages.**
+
+**Cobertura adversarial:**
+- Diretório com nome `*.ts` (ex: `matching.ts/`) → não aparece no resultado (`onlyFiles: true` + `stat.isFile()`).
+- Path absoluto fora do root (`C:\windows\system32`, `/etc`) → rejeitado antes do glob com erro `path traversal`.
+- Path relativo escapando (`../escape`) → rejeitado.
+- `pattern: ''` ou `'   '` → erro `pattern cannot be empty`.
+- `headLimit: 0` ou negativo → coerced para default (100).
+- `headLimit: 999_999` → capped silenciosamente em 500.
+- Symlink para diretório → não recursionado (`followSymbolicLinks: false`), evita ciclos.
+- Symlink test em Windows sem permissão (`EPERM`) → skip gracioso.
+- Match único + headLimit alto → `truncated: false` (não marca prematuramente).
+- Staged write seguido de glob → arquivo aparece, disco fica limpo após o finally.
+- Staged delete seguido de glob → arquivo não aparece, disco mantém arquivo original.
+- mtime tie (3 arquivos com mesmo timestamp) → ordem lexicográfica garantida.
+- Pattern com brace expansion `**/*.{md,mdx}` → suportado via fast-glob.
 
 ---
 

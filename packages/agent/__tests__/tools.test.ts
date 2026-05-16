@@ -1160,3 +1160,143 @@ describe('grep_codebase — dispatch through ToolExecutor.execute()', () => {
     expect(result).toMatch(/^5 /)
   })
 })
+
+// ─── glob_files (FIX-016) ────────────────────────────────────────────────────
+
+describe('glob_files — tool registration', () => {
+  it('is registered in AGENT_TOOLS with required schema fields', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'glob_files')
+    expect(tool).toBeDefined()
+    const schema = tool!.inputSchema as {
+      type: string
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.pattern).toBeDefined()
+    expect(schema.properties.path).toBeDefined()
+    expect(schema.properties.head_limit).toBeDefined()
+    expect(schema.required).toEqual(['pattern'])
+  })
+
+  it('is included in READ_ONLY_TOOLS (listing files is always safe)', async () => {
+    const { READ_ONLY_TOOLS } = await import('../src/tools')
+    expect(READ_ONLY_TOOLS.find(t => t.name === 'glob_files')).toBeDefined()
+  })
+
+  it('description steers the model away from run_command find/ls', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'glob_files')!
+    expect(tool.description.toLowerCase()).toMatch(/find|ls|prefer/)
+  })
+
+  it('description documents forward-slash and most-recent-first ordering', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'glob_files')!
+    expect(tool.description.toLowerCase()).toMatch(/forward[- ]slash|recent|newest|modified/)
+  })
+})
+
+describe('glob_files — dispatch through ToolExecutor.execute()', () => {
+  it('returns matching file paths with the documented header', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), '', 'utf-8')
+    writeFileSync(join(projectRoot, 'b.ts'), '', 'utf-8')
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/^2 file\(s\)/)
+    expect(result).toMatch(/a\.ts/)
+    expect(result).toMatch(/b\.ts/)
+  })
+
+  it('returns "No files matched." when the glob matches nothing', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), '', 'utf-8')
+    const result = await executor.execute('glob_files', { pattern: '**/*.go' })
+    expect(result).toBe('No files matched.')
+  })
+
+  it('rejects empty pattern with descriptive error', async () => {
+    const result = await executor.execute('glob_files', { pattern: '' })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/empty/i)
+  })
+
+  it('rejects path traversal outside projectRoot', async () => {
+    const result = await executor.execute('glob_files', {
+      pattern: '**/*.ts',
+      path: '../escape',
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/outside|traversal/i)
+  })
+
+  it('scopes results when "path" is provided', async () => {
+    mkdirSync(join(projectRoot, 'src'), { recursive: true })
+    writeFileSync(join(projectRoot, 'a.ts'), '', 'utf-8')
+    writeFileSync(join(projectRoot, 'src', 'b.ts'), '', 'utf-8')
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts', path: 'src' })
+    expect(result).toMatch(/src\/b\.ts/)
+    expect(result).not.toMatch(/(^|\s|:)a\.ts/)
+  })
+
+  it('respects head_limit and reports truncation in the header', async () => {
+    for (let i = 0; i < 30; i++) {
+      writeFileSync(join(projectRoot, `f${i}.ts`), '', 'utf-8')
+    }
+    const result = await executor.execute('glob_files', {
+      pattern: '**/*.ts',
+      head_limit: 5,
+    })
+    expect(result).toMatch(/^5 file\(s\) \(truncated/)
+  })
+
+  it('skips default-ignored directories (node_modules, dist, .git, .turbo, out)', async () => {
+    writeFileSync(join(projectRoot, 'keep.ts'), '', 'utf-8')
+    for (const dir of ['node_modules', 'dist', '.git', '.turbo', 'out']) {
+      mkdirSync(join(projectRoot, dir), { recursive: true })
+      writeFileSync(join(projectRoot, dir, 'hidden.ts'), '', 'utf-8')
+    }
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/keep\.ts/)
+    expect(result).not.toMatch(/node_modules/)
+    expect(result).not.toMatch(/dist[/\\]/)
+    expect(result).not.toMatch(/\.git[/\\]/)
+    expect(result).not.toMatch(/\.turbo/)
+    expect(result).not.toMatch(/out[/\\]/)
+  })
+
+  it('returns forward-slash paths regardless of host OS', async () => {
+    mkdirSync(join(projectRoot, 'src', 'deep'), { recursive: true })
+    writeFileSync(join(projectRoot, 'src', 'deep', 'file.ts'), '', 'utf-8')
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/src\/deep\/file\.ts/)
+    expect(result).not.toMatch(/src\\\\deep/)
+  })
+
+  it('finds staged writes via withStagedFilesOnDisk overlay', async () => {
+    // No file on disk — agent stages a write, then globs.
+    await executor.execute('write_file', { path: 'staged.ts', content: '// staged content' })
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/staged\.ts/)
+    // After glob, disk must remain clean (staging invariant)
+    expect(existsSync(join(projectRoot, 'staged.ts'))).toBe(false)
+  })
+
+  it('does not return paths from a staged delete (delete_file)', async () => {
+    writeFileSync(join(projectRoot, 'to-delete.ts'), '', 'utf-8')
+    writeFileSync(join(projectRoot, 'keep.ts'), '', 'utf-8')
+    await executor.execute('delete_file', { path: 'to-delete.ts' })
+    const result = await executor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/keep\.ts/)
+    expect(result).not.toMatch(/to-delete\.ts/)
+    // Disk untouched (staging invariant)
+    expect(existsSync(join(projectRoot, 'to-delete.ts'))).toBe(true)
+  })
+
+  it('is denied for read-only executors with the deny edit policy (but still works — listing is read-only)', async () => {
+    // glob_files lives in READ_ONLY_TOOLS, so it is allowed even under the
+    // restrictive policy used by plan/review modes.
+    const readOnlyExecutor = new ToolExecutor(projectRoot, undefined, READ_ONLY_PERMISSION_POLICY)
+    writeFileSync(join(projectRoot, 'a.ts'), '', 'utf-8')
+    const result = await readOnlyExecutor.execute('glob_files', { pattern: '**/*.ts' })
+    expect(result).toMatch(/a\.ts/)
+  })
+})
