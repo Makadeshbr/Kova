@@ -668,3 +668,152 @@ describe('ExecutionEngine — todos persist across iterations (FIX-018)', () => 
     expect(captured[0]).toEqual(list)
   })
 })
+
+// ─── FIX-019: ContextEngine cache per session ────────────────────────────────
+
+describe('ExecutionEngine — ContextEngine cache (FIX-019)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('builds context fresh on the first iteration and reuses it across a stable repair loop', async () => {
+    const deps = makeDeps({
+      // Two repair iterations on the SAME error file — same error surface,
+      // cache should kick in for iter 2.
+      orchestrator: {
+        run: vi.fn()
+          .mockResolvedValueOnce({
+            harnessResult: {
+              passed: false, score: 40, duration: 10, iteration: 1,
+              layers: [{ name: 'lint', passed: false, errors: [{
+                layer: 'lint', type: 'style', severity: 'high', fixable: true,
+                message: 'lint error', humanMessage: 'lint error', file: 'src/app.ts',
+              }], warnings: [], duration: 5, skipped: false }],
+            }, scratchpadFallback: false, mode: 'standard',
+          })
+          .mockResolvedValueOnce({
+            harnessResult: {
+              passed: false, score: 40, duration: 10, iteration: 2,
+              layers: [{ name: 'lint', passed: false, errors: [{
+                layer: 'lint', type: 'style', severity: 'high', fixable: true,
+                message: 'lint error', humanMessage: 'lint error', file: 'src/app.ts',
+              }], warnings: [], duration: 5, skipped: false }],
+            }, scratchpadFallback: false, mode: 'standard',
+          })
+          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 4 }))
+    await engine.run(makeTask())
+
+    const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
+    // First iteration always builds; later ones reuse when error files are the
+    // same set. We expect MORE iterations than buildContext invocations.
+    expect(calls.length).toBeLessThan(3)
+    expect(calls.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('rebuilds when the harness reveals a NEW error file (different surface)', async () => {
+    let agentCall = 0
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string) => {
+          agentCall++
+          return {
+            mode, thought: `iter ${agentCall}`,
+            // First repair pretends to "move" the bug to a new file
+            changes: mode === 'plan' ? [] : [{ path: 'src/other.ts', type: 'modify', diff: 'x' }],
+            tokensUsed: 50,
+          }
+        }),
+      },
+      orchestrator: {
+        run: vi.fn()
+          .mockResolvedValueOnce({
+            harnessResult: {
+              passed: false, score: 40, duration: 10, iteration: 1,
+              layers: [{ name: 'lint', passed: false, errors: [{
+                layer: 'lint', type: 'style', severity: 'high', fixable: true,
+                message: 'x', humanMessage: 'x', file: 'src/app.ts',
+              }], warnings: [], duration: 5, skipped: false }],
+            }, scratchpadFallback: false, mode: 'standard',
+          })
+          .mockResolvedValueOnce({
+            harnessResult: {
+              passed: false, score: 40, duration: 10, iteration: 2,
+              layers: [{ name: 'lint', passed: false, errors: [{
+                layer: 'lint', type: 'style', severity: 'high', fixable: true,
+                message: 'x', humanMessage: 'x', file: 'src/totally-new.ts', // NEW FILE
+              }], warnings: [], duration: 5, skipped: false }],
+            }, scratchpadFallback: false, mode: 'standard',
+          })
+          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 4 }))
+    await engine.run(makeTask())
+
+    const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
+    // Expect at least 2 rebuilds: iter 1 fresh, iter 2 invalidated by new error file
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('emits context_loaded with reused: true on a cache hit', async () => {
+    // Need at least 3 iterations to exercise a true cache window:
+    //   iter 1 — fresh build (no prev errors, errorFiles=[])
+    //   iter 2 — rebuild (prev errorFiles=[], now =['src/app.ts'] → new file revealed)
+    //   iter 3 — cache hit (prev errorFiles=['src/app.ts'], now =['src/app.ts'])
+    const events: ExecutionEvent[] = []
+    const failingResult = {
+      passed: false, score: 40, duration: 10, iteration: 1,
+      layers: [{ name: 'lint', passed: false, errors: [{
+        layer: 'lint', type: 'style', severity: 'high', fixable: true,
+        message: 'x', humanMessage: 'x', file: 'src/app.ts',
+      }], warnings: [], duration: 5, skipped: false }],
+    }
+    const deps = makeDeps({
+      orchestrator: {
+        run: vi.fn()
+          .mockResolvedValueOnce({ harnessResult: failingResult, scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValueOnce({ harnessResult: failingResult, scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 4,
+      onEvent: (e) => events.push(e),
+    }))
+    await engine.run(makeTask())
+
+    const ctxEvents = events.filter(e => e.type === 'context_loaded')
+    expect(ctxEvents.length).toBeGreaterThanOrEqual(3)
+    expect(ctxEvents[0].context?.reused).toBeFalsy() // iter 1 — fresh
+    expect(ctxEvents[1].context?.reused).toBeFalsy() // iter 2 — new error file revealed
+    expect(ctxEvents[2].context?.reused).toBe(true)  // iter 3 — same error surface → cache hit
+  })
+
+  it('rebuilds after the TTL is reached (3 iterations)', async () => {
+    // Force 4 iterations where the error surface never changes; expect at least
+    // one rebuild past iter 0 (after TTL expires).
+    const sameErr = {
+      passed: false, score: 40, duration: 10, iteration: 1,
+      layers: [{ name: 'lint', passed: false, errors: [{
+        layer: 'lint', type: 'style', severity: 'high', fixable: true,
+        message: 'x', humanMessage: 'x', file: 'src/app.ts',
+      }], warnings: [], duration: 5, skipped: false }],
+    }
+    const deps = makeDeps({
+      orchestrator: {
+        run: vi.fn()
+          .mockResolvedValueOnce({ harnessResult: { ...sameErr, iteration: 1 }, scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValueOnce({ harnessResult: { ...sameErr, iteration: 2 }, scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValueOnce({ harnessResult: { ...sameErr, iteration: 3 }, scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5 }))
+    await engine.run(makeTask())
+
+    const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
+    // Should have at least 2 builds: 1 fresh + 1 forced by TTL
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+  })
+})

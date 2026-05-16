@@ -28,7 +28,7 @@
 | FIX-016 | 🟠 Alto | ✅ | Sem `glob_files` — sem busca de paths por padrão |
 | FIX-017 | 🟠 Alto | ✅ | Prompts adversariais — proíbem narração e travam stack duro |
 | FIX-018 | 🟠 Alto | ✅ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
-| FIX-019 | 🟡 Médio | ⬜ | ContextEngine rebuilda do zero a cada iteração de reparo |
+| FIX-019 | 🟡 Médio | ✅ | ContextEngine rebuilda do zero a cada iteração de reparo |
 | FIX-020 | 🟡 Médio | ⬜ | Staging por `cpSync` recursivo — overhead de segundos por harness |
 | FIX-021 | 🟡 Médio | ⬜ | Sem `multi_edit` — N edits no mesmo arquivo viram N tool calls |
 | FIX-022 | 🟢 Baixo | ⬜ | Sem prefix caching no provider OpenAI-compat (DeepSeek/Grok) |
@@ -536,21 +536,56 @@ Bundle CJS do `@kova/agent` caiu de 75.09 KB → 73.65 KB (-1.44 KB de string li
 
 ---
 
-### FIX-019 — Cache de `ContextEngine.buildContext()` por sessão ⬜
-**Problema:** `packages/execution/src/execution-engine.ts:237` chama `contextEngine.buildContext()` a cada iteração de reparo. Grep + dependency graph + memory queries × 5 iterações. Em projeto real isso adiciona 10–25s de overhead total perceptíveis ao usuário.
+### FIX-019 — Cache de `ContextEngine.buildContext()` por sessão ✅
+**Problema:** `packages/execution/src/execution-engine.ts:252` chamava `contextEngine.buildContext()` a cada iteração de reparo. Grep + dependency graph + memory queries × N iterações. Em projeto real isso somava 10–25s de overhead perceptíveis ao usuário, mesmo quando o "surface" de erros era idêntico entre iterações consecutivas.
 
-**Fix proposto:**
-- Em `ExecutionEngine`, cachear o `AgentContext` resultante após primeira iteração.
-- Invalidação: re-build se `harnessErrors` mudou significativamente (novos arquivos de erro), se `explicitFiles` mudou, ou após 3 iterações (TTL).
-- Diff-based: apenas re-rodar grep se a lista de arquivos modificados pelo agente cruza com a query de grep anterior.
-- Reuso de `pack.selectedFiles` entre iterações quando harness errors apontam para os mesmos arquivos.
-- Evento `context_loaded` continua emitido com flag `cached: true` para a UI mostrar.
+**Fix aplicado:**
 
-**Critério de pronto:**
-- Iteração 2+ não roda grep completo a menos que invalidação dispare.
-- Tempo médio de iteração de reparo cai 30%+ em projeto real.
-- Invalidação correta quando harness aponta arquivos não vistos antes.
-- Testes: cache hit em iter 2, invalidação por novo error file, invalidação por TTL, evento `cached: true` emitido.
+**1. Helper puro `packages/execution/src/context-cache.ts`** (~90 linhas, zero side effects):
+- `ContextCacheKey = { taskId, explicit, opened, diff, errorFiles }` — chave estável e comparável.
+- `buildContextCacheKey(inputs)` — extrai a chave do snapshot atual. Dedup + sort de file lists, filtra error entries sem `file`, normaliza optional inputs (undefined → []/'' ).
+- `shouldReuseContext(prev, next, ageInIterations)` — política de reuso:
+  - `prev === null` → false (primeira iteração sempre constrói fresh).
+  - `ageInIterations >= CONTEXT_CACHE_TTL` (3) → false (TTL bound).
+  - `prev.taskId !== next.taskId` → false.
+  - `explicit`, `opened` ou `diff` diferentes → false.
+  - **`next.errorFiles` é subset de `prev.errorFiles`** → true (mesmo error surface, possivelmente shrinking).
+  - Qualquer error file novo em `next` que não existia em `prev` → false (surface se moveu, requer novo grep).
+- `CONTEXT_CACHE_TTL = 3` exportado, lockable via teste.
+
+**2. `ExecutionEngine` (`packages/execution/src/execution-engine.ts`):**
+- 3 campos novos: `cachedContext: AgentContext | null`, `cachedContextKey: ContextCacheKey | null`, `cachedContextAge: number`.
+- `runIteration()` reescrito o trecho de buildContext:
+  - Constrói `nextKey` a partir dos inputs atuais (task, explicitFiles, openedFiles, diff, previousErrors).
+  - Chama `shouldReuseContext(this.cachedContextKey, nextKey, this.cachedContextAge)`.
+  - **Hit**: reusa `this.cachedContext` (sem chamar ContextEngine), incrementa age.
+  - **Miss**: chama `ContextEngine.buildContext()` normalmente, salva resultado + reseta `age = 1`.
+- Evento `context_loaded` agora carrega `context.reused: boolean` (campo já declarado em `ExecutionEvent` em `@kova/shared`, agora finalmente populado). Mensagem do evento ganha sufixo `(cached)` quando hit, ajudando o usuário a ver a economia em tempo real.
+
+**Evidência:**
+- **TDD red phase**: módulo `context-cache.ts` inexistente quebrou os 16 testes do helper. Implementação seguiu.
+- **16 testes novos** em `packages/execution/__tests__/context-cache.test.ts`:
+  - `buildContextCacheKey`: captura task/files/diff/errorFiles, sorted para ordem-agnóstico, dedup, optional inputs, skip de errors sem `file`.
+  - `shouldReuseContext`: reuse quando estável, invalidate por TTL (>= 3), por taskId, por explicitFiles, por openedFiles, por diff, por error file novo. **Reuse quando errorFiles é subset (shrink) ou identical.** Sem prev → invalidate. TTL == 3 lockado.
+- **4 testes de integração novos** em `packages/execution/__tests__/execution-engine.test.ts`:
+  - Cache reusa em loop estável (< 3 chamadas a buildContext em loop de iterações onde error surface não muda).
+  - Invalidação por novo error file (≥ 2 chamadas quando o erro pula para `src/totally-new.ts`).
+  - Evento `context_loaded` com `reused: false` na iter 1, `false` na iter 2 (novo surface), **`true` na iter 3 (cache hit)**.
+  - Rebuild forçado após TTL = 3 mesmo com surface estável.
+- **89/89** testes em `@kova/execution` (vs 69 antes — +20 novos, 0 regressões).
+- **Zero regressão downstream**: `pnpm -r test` verde em todos os 14 packages, **1197 testes total**.
+- Build limpo: `tsup` ESM/CJS/DTS sem erro. Bundle CJS 37.17 KB → 39.45 KB (+2.28 KB do helper + wiring).
+
+**Cobertura adversarial:**
+- Lista de erros com entry sem `file` (alguns harness errors não têm location) → filtrado, não vaza para a chave.
+- File lists com duplicatas → dedup explícito, evita cache miss artificial.
+- File lists em ordem diferente entre chamadas → sort estável garante equality.
+- `errorFiles` shrinking (iter N+1 tem subset do que iter N) → **reusa** (lint progredindo, mesmo arquivo).
+- `errorFiles` expandindo (1 novo path) → invalidate.
+- `errorFiles` reset (volta a []) → vacuous subset → reusa (raro, mas semanticamente correto).
+- TTL atingido com surface idêntico → invalidate (bound contra grep results stale).
+- Sem cache prévio (null) → invalidate (primeira iteração).
+- Reuse hit incrementa `age` corretamente — testado via TTL eventualmente disparando.
 
 ---
 

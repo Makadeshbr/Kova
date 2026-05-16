@@ -15,6 +15,7 @@ import {
   validateContractChanges,
 } from './execution-contract'
 import { generateProofPack } from './proof-pack'
+import { buildContextCacheKey, shouldReuseContext, type ContextCacheKey } from './context-cache'
 
 type InteractiveCommandRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
 
@@ -97,6 +98,16 @@ export class ExecutionEngine {
    * code → harness → fix cycle so the model can resume its plan after a repair.
    */
   private todos: Todo[] = []
+  /**
+   * FIX-019: cached AgentContext from a previous iteration. Reused when the
+   * inputs (task, explicit/opened files, diff, error file set) are stable.
+   * `cachedContextAge` counts how many iterations since the cached value was
+   * built — TTL caps reuse at CONTEXT_CACHE_TTL (3) so a long repair loop
+   * doesn't carry stale grep results forever.
+   */
+  private cachedContext: AgentContext | null = null
+  private cachedContextKey: ContextCacheKey | null = null
+  private cachedContextAge = 0
 
   constructor(
     private readonly deps: ExecutionDependencies,
@@ -249,20 +260,43 @@ export class ExecutionEngine {
 
     this.state = withStatus(this.state!, 'structuring')
     this.emit()
-    const context = await this.deps.contextEngine.buildContext(task, this.options.projectRoot, {
-      harnessErrors: previousErrors,
+
+    // FIX-019: decide cache hit vs rebuild BEFORE invoking the (expensive)
+    // ContextEngine. The key captures everything that could change selectedFiles.
+    const nextKey = buildContextCacheKey({
+      taskId: task.id,
       explicitFiles: this.options.explicitFiles,
       openedFiles: this.options.openedFiles,
       diff: this.options.diff,
+      harnessErrors: previousErrors,
     })
+    const reuse = shouldReuseContext(this.cachedContextKey, nextKey, this.cachedContextAge)
+
+    let context: AgentContext
+    if (reuse && this.cachedContext) {
+      context = this.cachedContext
+      this.cachedContextAge++
+    } else {
+      context = await this.deps.contextEngine.buildContext(task, this.options.projectRoot, {
+        harnessErrors: previousErrors,
+        explicitFiles: this.options.explicitFiles,
+        openedFiles: this.options.openedFiles,
+        diff: this.options.diff,
+      })
+      this.cachedContext = context
+      this.cachedContextKey = nextKey
+      this.cachedContextAge = 1
+    }
+
     this.event({
       type: 'context_loaded',
-      message: `${context.files.length} context files`,
+      message: `${context.files.length} context files${reuse ? ' (cached)' : ''}`,
       context: {
         files: context.files.map(file => file.path),
         tokensUsed: context.tokensUsed,
         maxTokens: context.pack?.budget.maxTokens,
         learningsCount: context.learnings.length,
+        reused: reuse,
         selectedFiles: context.pack?.selectedFiles.slice(0, 12).map(file => ({
           path: file.path,
           score: file.score,
