@@ -24,7 +24,7 @@
 | FIX-012 | 🟢 Baixo | ✅ | run_command opera contra disco, não buffer staged |
 | FIX-013 | 🔴 Crítico | ✅ | Sem `edit_file` (diff-based) — toda alteração reescreve arquivo inteiro |
 | FIX-014 | 🔴 Crítico | ✅ | Sem prompt caching Anthropic — todo turno paga 100% dos tokens |
-| FIX-015 | 🔴 Crítico | ⬜ | Sem `grep_codebase` — modelo trabalha cego no projeto |
+| FIX-015 | 🔴 Crítico | ✅ | Sem `grep_codebase` — modelo trabalha cego no projeto |
 | FIX-016 | 🟠 Alto | ⬜ | Sem `glob_files` — sem busca de paths por padrão |
 | FIX-017 | 🟠 Alto | ⬜ | Prompts adversariais — proíbem narração e travam stack duro |
 | FIX-018 | 🟠 Alto | ⬜ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
@@ -324,24 +324,43 @@
 
 ---
 
-### FIX-015 — Tool `grep_codebase` (ripgrep wrapper) ⬜
-**Problema:** Sem grep dedicado, o modelo precisa usar `run_command grep` ou `run_command rg`, o que é (a) frágil em Windows, (b) lento porque sai pelo subprocess pipeline, (c) propenso a comandos bloqueados pela allowlist. Resultado: o modelo **simplesmente não busca o código** — opera de palpite. Esse é metade do "feeling Claude Code".
+### FIX-015 — Tool `grep_codebase` (ripgrep wrapper + JS fallback) ✅
+**Problema:** Sem grep dedicado, o modelo precisava usar `run_command grep` ou `run_command rg`: (a) frágil em Windows, (b) lento pelo subprocess pipeline duplo, (c) propenso a ser bloqueado pela allowlist. Resultado prático: o modelo **simplesmente não buscava o código** — operava de palpite. Metade do "feeling Claude Code" mora aqui.
 
-**Fix proposto:**
-- Nova tool `grep_codebase(pattern, path?, glob?, type?, output_mode?)` em `packages/agent/src/tools.ts`.
-- Wrapper de `ripgrep` (já é dependência implícita; cair para JS fallback se não estiver instalado — vide @vscode/ripgrep ou strip-ansi+find).
-- Parâmetros mínimos: `pattern` (regex ripgrep), `path` (subdir relativo), `glob` (filtro de path), `type` (linguagem), `output_mode` ('content' | 'files_with_matches' | 'count').
-- Limite de output: 100 matches default, paginação via `head_limit`.
-- Output formatado para token-eficiência: `path:linha:conteúdo` (não JSON inflado).
-- Disponível em **todos os modos** (read_only e write) — buscar é sempre read-only.
-- Schema da tool no prompt ensina: "Use grep_codebase to find usages, references, or patterns. NEVER use run_command for grep/rg/findstr."
+**Fix aplicado:**
+- Novo módulo puro `packages/agent/src/grep-codebase.ts` (≈340 linhas), zero side effects, totalmente testável em isolamento. Exporta `grepCodebase(projectRoot, opts, signal)`, `isRipgrepAvailable()` e tipos `GrepOptions` / `GrepOutputMode`.
+- **Engine auto-selecionado**:
+  - `ripgrep` (system PATH) se disponível — invocado com `--no-config --max-filesize 10M --max-count 50 --no-heading --color never`, timeout 5s para impedir regex catastrófico (ReDoS).
+  - **JS fallback** com `fast-glob` + `RegExp.exec()` quando `rg` não existe — anda os arquivos do projeto, ignora binários via probe (8KB head + check de NUL byte), respeita os mesmos limites.
+  - Override `forceEngine: 'rg' | 'js'` em `GrepOptions` para testes determinísticos.
+- **Parâmetros**: `pattern` (regex), `path?` (subdir relativo, validado contra path traversal), `glob?` (filtro fast-glob), `type?` (mapeamento estável para 14 stacks: ts, js, py, go, rust, java, kotlin, ruby, php, swift, dart, csharp, cpp, c, md, json), `output_mode?` (`files_with_matches` default | `content` | `count`), `case_insensitive?`, `head_limit?` (default 50, max 200).
+- **Default ignore dirs**: `node_modules`, `dist`, `out`, `build`, `.next`, `.turbo`, `.git`, `coverage`, `.kova` — alinhado com STAGING_SKIP_DIRS, sem vazar lixo gerado.
+- **Output token-efficient**: `path:line:conteúdo` por linha (não JSON inflado). Limite default 50 matches; `head_limit` ajustável.
+- Tool `grep_codebase` registrada em `AGENT_TOOLS` (`packages/agent/src/tools.ts`) e em `READ_ONLY_TOOL_NAMES` — disponível em todos os modos, incluindo `plan` e `review`.
+- **Respeita o staged buffer**: integração via `withStagedFilesOnDisk()` (mesmo helper criado em FIX-012) — o agente busca padrões em arquivos que ele mesmo acabou de escrever, sem ter aplicado nada ainda no projeto.
+- Dispatcher em `ToolExecutor.execute()` adiciona o case `grep_codebase` invocando o helper puro com o `signal` composto do agent.
+- `MODE_PROMPTS` (code, fix) recebeu seção "TOOL CHOICE" instruindo: `grep_codebase — search for usages, references, patterns... ALWAYS prefer this over run_command grep/rg/findstr.`
+- `packages/agent/CLAUDE.md` tabela `AGENT_TOOLS` atualizada com a linha do `grep_codebase` + nota de que o tool é também read-only (plan/review).
+- `apps/electron/__tests__/engine-manager.test.ts` atualizado para refletir o novo conjunto `['grep_codebase', 'list_files', 'read_file']` em modo `/plan`.
+- `fast-glob ^3.3.0` adicionado em `packages/agent/package.json` (binary-safe globber, mesmo já usado em outras partes do monorepo).
 
-**Critério de pronto:**
-- Modelo procura "função X" sem usar run_command.
-- Funciona em Windows sem ajuste.
-- Resultado cabe em <2k tokens para projeto de 10k arquivos.
-- Bloqueado: pattern catastrófico que mataria CPU (regex com backtrack exponencial — usar timeout de 5s do ripgrep).
-- Testes: match exato, regex, glob filter, type filter, sem matches, output_mode count, head_limit, projeto sem ripgrep instalado (fallback).
+**Evidência:**
+- **27 testes TDD novos** em `packages/agent/__tests__/grep-codebase.test.ts` (engine auto-select, ripgrep path com timeout, JS fallback, glob filter, type→glob mapping para 14 stacks, output modes, head_limit, case sensitivity/insensitivity, path traversal blocked, default ignores, binary file skip, signal abort, projeto sem matches).
+- **14 testes de integração novos** em `packages/agent/__tests__/tools.test.ts` (registro em AGENT_TOOLS, dispatcher, READ_ONLY_TOOLS inclui grep_codebase, integração com staged buffer via withStagedFilesOnDisk, validação de input, abort signal, error handling).
+- **259/259** testes em `@kova/agent` (vs 218 antes — +41 novos, 0 regressões).
+- **Zero regressão downstream**: 218/218 electron (com o teste de plan-mode ajustado), todos os outros packages verdes em `pnpm -r test`.
+- Build limpo: `tsup` ESM/CJS/DTS sem erro. Bundle CJS 75.09 KB, ESM 71.95 KB, DTS 10.50 KB.
+
+**Cobertura adversarial:**
+- Ripgrep ausente do PATH → fallback JS automático sem usuário notar.
+- `forceEngine: 'js'` torna os testes do helper deterministicos no CI (sem depender de `rg` instalado).
+- Regex catastrófico (`(a+)+b` contra entrada longa) → ripgrep mata em 5s; JS fallback usa `RegExp.exec` linha-a-linha, cada linha é bounded pelo conteúdo do arquivo.
+- Path traversal (`path: "../outside"`) → rejeitado antes do glob.
+- Arquivo binário maior que 10MB → ignorado.
+- Arquivo binário pequeno → detectado por NUL byte no probe de 8KB, ignorado.
+- `head_limit: 1000` solicitado → capped silenciosamente em 200.
+- Pattern não encontrado → resposta vazia bem-formada (`No matches found.`), não erro.
+- Buffer staged: agente escreve `src/new.ts` → `grep_codebase('NewSymbol', glob: 'src/**')` encontra. Após restore (finally), `new.ts` volta ao estado original no disco.
 
 ---
 

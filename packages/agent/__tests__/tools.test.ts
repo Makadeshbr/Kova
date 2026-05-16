@@ -1019,3 +1019,144 @@ describe('edit_file — rollback', () => {
     expect(await executor.execute('read_file', { path: 'app.ts' })).toBe('v0')
   })
 })
+
+// ─── grep_codebase (FIX-015) ──────────────────────────────────────────────────
+
+describe('grep_codebase — tool registration', () => {
+  it('is registered in AGENT_TOOLS with required schema fields', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'grep_codebase')
+    expect(tool).toBeDefined()
+    const schema = tool!.inputSchema as {
+      type: string
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.pattern).toBeDefined()
+    expect(schema.properties.path).toBeDefined()
+    expect(schema.properties.glob).toBeDefined()
+    expect(schema.properties.type).toBeDefined()
+    expect(schema.properties.output_mode).toBeDefined()
+    expect(schema.required).toEqual(['pattern'])
+  })
+
+  it('is included in READ_ONLY_TOOLS (search is always safe)', async () => {
+    const { READ_ONLY_TOOLS } = await import('../src/tools')
+    expect(READ_ONLY_TOOLS.find(t => t.name === 'grep_codebase')).toBeDefined()
+  })
+
+  it('description steers the model away from run_command grep/rg/findstr', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'grep_codebase')!
+    expect(tool.description.toLowerCase()).toMatch(/run_command|findstr|prefer/)
+  })
+})
+
+describe('grep_codebase — dispatch through ToolExecutor.execute()', () => {
+  it('returns files_with_matches output by default', async () => {
+    writeFileSync(join(projectRoot, 'auth.ts'), 'export function login() {}', 'utf-8')
+    writeFileSync(join(projectRoot, 'utils.ts'), 'export const x = 1', 'utf-8')
+    const result = await executor.execute('grep_codebase', { pattern: 'export' })
+    expect(result).toMatch(/auth\.ts/)
+    expect(result).toMatch(/utils\.ts/)
+  })
+
+  it('content mode emits path:line:match lines', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'first\nmatch here\nthird', 'utf-8')
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'match',
+      output_mode: 'content',
+    })
+    expect(result).toMatch(/a\.ts:2:match here/)
+  })
+
+  it('count mode emits path:count', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'x\nx\nx', 'utf-8')
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'x',
+      output_mode: 'count',
+    })
+    expect(result).toMatch(/a\.ts:3/)
+  })
+
+  it('case_insensitive=true matches different casing', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'Hello World', 'utf-8')
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'hello',
+      case_insensitive: true,
+    })
+    expect(result).toMatch(/a\.ts/)
+  })
+
+  it('rejects empty pattern with descriptive error', async () => {
+    const result = await executor.execute('grep_codebase', { pattern: '' })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/empty/i)
+  })
+
+  it('rejects path traversal outside projectRoot', async () => {
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'foo',
+      path: '../escape',
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/outside|traversal/i)
+  })
+
+  it('finds staged writes via withStagedFilesOnDisk overlay', async () => {
+    // No file on disk — agent stages a write, then greps for content in it.
+    await executor.execute('write_file', { path: 'staged.ts', content: 'unique_marker_42' })
+    const result = await executor.execute('grep_codebase', { pattern: 'unique_marker_42' })
+    expect(result).toMatch(/staged\.ts/)
+    // After grep, disk must remain clean (staging invariant)
+    expect(existsSync(join(projectRoot, 'staged.ts'))).toBe(false)
+  })
+
+  it('finds staged edits (write_file then edit_file then grep)', async () => {
+    writeFileSync(join(projectRoot, 'original.ts'), 'OLD_VALUE', 'utf-8')
+    await executor.execute('edit_file', {
+      path: 'original.ts',
+      old_string: 'OLD_VALUE',
+      new_string: 'NEW_TOKEN',
+    })
+    const result = await executor.execute('grep_codebase', { pattern: 'NEW_TOKEN' })
+    expect(result).toMatch(/original\.ts/)
+    // Disk file still has the OLD content because the edit was staged
+    expect(readFileSync(join(projectRoot, 'original.ts'), 'utf-8')).toBe('OLD_VALUE')
+  })
+
+  it('skips default-ignored directories (node_modules, dist, .git)', async () => {
+    mkdirSync(join(projectRoot, 'node_modules'))
+    mkdirSync(join(projectRoot, 'dist'))
+    writeFileSync(join(projectRoot, 'src.ts'), 'secret', 'utf-8')
+    writeFileSync(join(projectRoot, 'node_modules', 'dep.ts'), 'secret', 'utf-8')
+    writeFileSync(join(projectRoot, 'dist', 'bundle.js'), 'secret', 'utf-8')
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'secret',
+      output_mode: 'files_with_matches',
+    })
+    expect(result).toMatch(/src\.ts/)
+    expect(result).not.toMatch(/node_modules/)
+    expect(result).not.toMatch(/dist[\\/]bundle/)
+  })
+
+  it('returns "No matches." when nothing matches', async () => {
+    writeFileSync(join(projectRoot, 'a.ts'), 'nothing here', 'utf-8')
+    const result = await executor.execute('grep_codebase', { pattern: 'completely-missing-token' })
+    expect(result).toBe('No matches.')
+  })
+
+  it('respects head_limit and reports truncation in the header', async () => {
+    for (let i = 0; i < 30; i++) {
+      writeFileSync(join(projectRoot, `f${i}.ts`), 'match', 'utf-8')
+    }
+    const result = await executor.execute('grep_codebase', {
+      pattern: 'match',
+      head_limit: 5,
+      output_mode: 'files_with_matches',
+    })
+    expect(result).toMatch(/truncated/i)
+    // Header counts only the returned lines (≤ head_limit)
+    expect(result).toMatch(/^5 /)
+  })
+})

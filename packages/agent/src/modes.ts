@@ -32,6 +32,7 @@ RULES:
 7. DO NOT narrate your process. Never output "Let me check...", "I'll now...", "Let me explore...", "First I'll...", or any similar reasoning text. Go directly to tool calls.
 
 TOOL CHOICE:
+- grep_codebase — search for usages, references, patterns, function names. ALWAYS prefer this over run_command grep/rg/findstr.
 - edit_file — surgical change to an existing file (one or more known strings → replacement). Cheaper and safer than rewriting.
 - write_file — new file, or complete rewrite when most of the file is changing.
 - delete_file — remove a file (do not pass an empty new_string to edit_file).
@@ -82,6 +83,7 @@ RULES:
 - DO NOT narrate your process. Never output "Let me check...", "I'll now...", or any reasoning text. Go directly to tool calls.
 
 TOOL CHOICE:
+- grep_codebase — locate the broken symbol/string fast. ALWAYS prefer this over run_command grep/rg/findstr.
 - edit_file — preferred for fixes. Locate the broken line(s) with read_file, then replace the exact substring. Cheaper than rewriting the file.
 - write_file — only when the whole file needs to change.
 

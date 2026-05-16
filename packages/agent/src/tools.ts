@@ -3,6 +3,7 @@ import { join, dirname, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { CommandOutputCallback, FileChange, ValidationCommandKind } from '@kova/shared'
 import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
+import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
 export type PermissionKey = 'read' | 'edit' | 'list' | 'bash'
@@ -170,6 +171,36 @@ Rules:
     },
   },
   {
+    name: 'grep_codebase',
+    description: `Search across project files. Prefer this over run_command grep/rg/findstr — it works on every OS, ignores node_modules/dist/.git by default, and respects the staged buffer (you can search files you wrote earlier in the same turn).
+
+Inputs:
+- pattern (required): regex (ripgrep dialect when ripgrep is on PATH; otherwise standard JS RegExp).
+- path: subdir scope, relative to the project root. Defaults to the whole project.
+- glob: file path filter, e.g. "**/*.test.ts".
+- type: language filter — ts, js, py, go, rust, java, kotlin, ruby, php, swift, dart, csharp, cpp, c, md, json.
+- output_mode: 'files_with_matches' (default), 'content' (path:line:match), or 'count' (path:count).
+- case_insensitive: boolean.
+- head_limit: max output lines, default 100.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Regex pattern to search for' },
+        path: { type: 'string', description: 'Optional subdirectory relative to project root' },
+        glob: { type: 'string', description: 'Optional file-path glob filter (e.g. "**/*.ts")' },
+        type: { type: 'string', description: 'Optional language type filter (ts, js, py, go, rust, etc.)' },
+        output_mode: {
+          type: 'string',
+          enum: ['files_with_matches', 'content', 'count'],
+          description: 'Output shape. Defaults to files_with_matches.',
+        },
+        case_insensitive: { type: 'boolean', description: 'Match case-insensitively' },
+        head_limit: { type: 'number', description: 'Max output lines (default 100)' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
     name: 'run_command',
     description: 'Run a single safe command in the project root or a structured cwd. Use for build, test, lint, typecheck, format, or read-only inspection. Do not use cd, pipes, redirects, &&, or ;.',
     inputSchema: {
@@ -205,10 +236,10 @@ The user will see an approval dialog before the terminal opens. Examples:
   },
 ]
 
-// Read-only subset for plan and review modes — no side effects
-export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(
-  t => t.name === 'read_file' || t.name === 'list_files',
-)
+// Read-only subset for plan and review modes — no side effects.
+// grep_codebase is read-only: it inspects file contents but never mutates anything.
+const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase'])
+export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(t => READ_ONLY_TOOL_NAMES.has(t.name))
 
 export type InteractiveRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
 
@@ -266,6 +297,7 @@ export class ToolExecutor {
       case 'read_file':   return this.readFile(String(input.path ?? ''), numberOrZero(input.offset))
       case 'delete_file': return this.deleteFile(String(input.path ?? ''))
       case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
+      case 'grep_codebase': return this.grepCodebase(input)
       case 'run_command': return this.runCommand(
         String(input.command ?? ''),
         stringOrUndefined(input.cwd),
@@ -526,6 +558,35 @@ export class ToolExecutor {
       .join('\n')
   }
 
+  /**
+   * FIX-015: grep_codebase dispatcher. Sanitises the input shape coming from
+   * the LLM (which may pass numbers as strings or invalid output_mode values),
+   * delegates to the pure helper, and materialises staged writes to disk for
+   * the duration of the search so the agent can grep its own work-in-progress.
+   */
+  private async grepCodebase(rawInput: Record<string, unknown>): Promise<string> {
+    const pattern = typeof rawInput.pattern === 'string' ? rawInput.pattern : ''
+    if (!pattern.trim()) return 'Error: grep_codebase requires a non-empty pattern.'
+
+    const options: GrepOptions = {
+      pattern,
+      path: stringOrUndefined(rawInput.path),
+      glob: stringOrUndefined(rawInput.glob),
+      type: stringOrUndefined(rawInput.type),
+      outputMode: normalizeOutputMode(rawInput.output_mode),
+      caseInsensitive: rawInput.case_insensitive === true,
+      headLimit: typeof rawInput.head_limit === 'number' ? rawInput.head_limit : undefined,
+    }
+
+    const result = await this.withStagedFilesOnDisk(() => grepCodebase(this.projectRoot, options, this.signal))
+
+    if (!result.ok) return `Error: ${result.error ?? 'grep_codebase failed'}`
+    if (result.lines.length === 0) return 'No matches.'
+
+    const header = `${result.lines.length} ${options.outputMode === 'content' ? 'matching line(s)' : 'result(s)'}${result.truncated ? ' (truncated)' : ''}:`
+    return `${header}\n${result.lines.join('\n')}`
+  }
+
   private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {
     if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
     const permission = this.requirePermission('bash', command)
@@ -647,6 +708,11 @@ function isGitDiffCommand(command: string): boolean {
 
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function normalizeOutputMode(value: unknown): GrepOutputMode | undefined {
+  if (value === 'content' || value === 'files_with_matches' || value === 'count') return value
+  return undefined
 }
 
 function numberOrZero(value: unknown): number {

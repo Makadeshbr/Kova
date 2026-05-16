@@ -161,6 +161,9 @@ importers:
       '@kova/shared':
         specifier: workspace:*
         version: link:../shared
+      fast-glob:
+        specifier: ^3.3.0
+        version: 3.3.3
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
@@ -230,13 +233,13 @@ importers:
       '@kova/shared':
         specifier: workspace:*
         version: link:../shared
+      typescript:
+        specifier: ^5.0.0
+        version: 5.9.3
     devDependencies:
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(jiti@1.21.7)(postcss@8.5.12)(typescript@5.9.3)
-      typescript:
-        specifier: ^5.0.0
-        version: 5.9.3
       vitest:
         specifier: ^1.0.0
         version: 1.6.1(@types/node@20.19.39)(terser@5.46.2)
