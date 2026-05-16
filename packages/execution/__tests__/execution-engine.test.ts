@@ -566,3 +566,105 @@ describe('ExecutionEngine — dynamic maxIterations (FIX-007)', () => {
     expect(state.maxIterations).toBeGreaterThanOrEqual(5)
   })
 })
+
+// ─── FIX-018: session-scoped todos across iterations ─────────────────────────
+
+describe('ExecutionEngine — todos persist across iterations (FIX-018)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('passes empty initialTodos to the agent on the first iteration', async () => {
+    const deps = makeDeps()
+    const engine = new ExecutionEngine(deps, makeOptions())
+    await engine.run(makeTask())
+    const firstCall = (deps.agent.execute as ReturnType<typeof vi.fn>).mock.calls[0]
+    const opts = firstCall[3]
+    // No prior list → undefined, not an empty array (preserves API)
+    expect(opts.initialTodos).toBeUndefined()
+  })
+
+  it('replays the latest todos to the next iteration as initialTodos', async () => {
+    const todosFromAgent = [
+      { content: 'Refactor auth', activeForm: 'Refactoring auth', status: 'completed' as const },
+      { content: 'Write tests',   activeForm: 'Writing tests',     status: 'in_progress' as const },
+    ]
+
+    let agentCallCount = 0
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string, opts: { onTodosUpdated?: (t: unknown[]) => void }) => {
+          agentCallCount++
+          // First call: agent emits a plan via the callback (todo_write).
+          if (agentCallCount === 1) {
+            opts.onTodosUpdated?.(todosFromAgent)
+          }
+          // plan mode returns no changes; code/fix produces a real change
+          return {
+            mode,
+            thought: `iter ${agentCallCount}`,
+            changes: mode === 'plan' ? [] : [{ path: 'src/app.ts', type: 'modify', diff: 'x' }],
+            tokensUsed: 100,
+            todos: todosFromAgent,
+          }
+        }),
+      },
+      // Force a repair loop: first iteration fails, second passes.
+      orchestrator: {
+        run: vi.fn()
+          .mockResolvedValueOnce({ harnessResult: makeSoftRejectResult(), scratchpadFallback: false, mode: 'standard' })
+          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 3 }))
+    await engine.run(makeTask())
+
+    const calls = (deps.agent.execute as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    // Last call (the 'fix' iteration) MUST receive the prior list as initialTodos.
+    const lastOpts = calls[calls.length - 1][3]
+    expect(lastOpts.initialTodos).toEqual(todosFromAgent)
+  })
+
+  it('emits a todos_updated ExecutionEvent when the agent calls todo_write', async () => {
+    const events: ExecutionEvent[] = []
+    const updatedList = [
+      { content: 'Step', activeForm: 'Stepping', status: 'pending' as const },
+    ]
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string, opts: { onTodosUpdated?: (t: unknown[]) => void }) => {
+          opts.onTodosUpdated?.(updatedList)
+          return {
+            mode, thought: 'done',
+            changes: mode === 'plan' ? [] : [{ path: 'src/app.ts', type: 'modify', diff: 'x' }],
+            tokensUsed: 50,
+          }
+        }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ onEvent: (e) => events.push(e) }))
+    await engine.run(makeTask())
+
+    const todosEvents = events.filter(e => e.type === 'todos_updated')
+    expect(todosEvents.length).toBeGreaterThanOrEqual(1)
+    expect(todosEvents[0].todos).toEqual(updatedList)
+  })
+
+  it('forwards onTodosUpdated option to consumers (direct stream)', async () => {
+    const captured: Array<Array<unknown>> = []
+    const list = [{ content: 'S', activeForm: 'Sing', status: 'pending' as const }]
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string, opts: { onTodosUpdated?: (t: unknown[]) => void }) => {
+          opts.onTodosUpdated?.(list)
+          return { mode, thought: '', changes: mode === 'plan' ? [] : [{ path: 'src/app.ts', type: 'modify', diff: 'x' }], tokensUsed: 0 }
+        }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ onTodosUpdated: (t) => captured.push(t) }))
+    await engine.run(makeTask())
+
+    expect(captured.length).toBeGreaterThanOrEqual(1)
+    expect(captured[0]).toEqual(list)
+  })
+})

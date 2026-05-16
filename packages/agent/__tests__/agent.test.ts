@@ -278,4 +278,95 @@ describe('Agent', () => {
     expect(toolNames).not.toContain('write_file')
     expect(toolNames).not.toContain('run_command')
   })
+
+  // ─── FIX-018: todo list flows through Agent.execute ─────────────────────────
+
+  it('expõe todo_write na lista de tools enviadas ao provider', async () => {
+    mockEndTurn('OK')
+    const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
+    await agent.execute(makeTask(), makeContext())
+    const tools: Array<{ name: string }> = mockCreate.mock.calls[0][0].tools ?? []
+    expect(tools.map(t => t.name)).toContain('todo_write')
+  })
+
+  it('todo_write disponível também em modo plan (read-only)', async () => {
+    mockEndTurn('Analysis only')
+    const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
+    await agent.execute(makeTask(), makeContext(), 'plan')
+    const tools: Array<{ name: string }> = mockCreate.mock.calls[0][0].tools ?? []
+    expect(tools.map(t => t.name)).toContain('todo_write')
+  })
+
+  it('forwards initialTodos para o ToolExecutor via opções', async () => {
+    // Custom provider that captures whether the executor was seeded by reading
+    // the system prompt + initial todos via runAgentLoop's executor arg. The
+    // easiest signal: the AgentOutput.todos field returned after a no-op turn.
+    const initial = [
+      { content: 'Seed', activeForm: 'Seeding', status: 'pending' as const },
+    ]
+    const mockProvider: AgentProvider = {
+      generate: vi.fn(),
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      runAgentLoop: vi.fn(async (_msgs, opts) => {
+        // The executor exists in opts.executor and exposes getTodos()
+        const t = opts.executor.getTodos()
+        return { thought: JSON.stringify(t), changes: [], tokensUsed: 10 } satisfies LLMResponse
+      }),
+    }
+    const agent = new Agent(mockProvider, projectRoot)
+    const output = await agent.execute(makeTask(), makeContext(), 'code', {
+      initialTodos: initial,
+    })
+    expect(JSON.parse(output.thought)).toEqual(initial)
+    expect(output.todos).toEqual(initial)
+  })
+
+  it('retorna lista atualizada em AgentOutput.todos quando o agente chama todo_write', async () => {
+    const mockProvider: AgentProvider = {
+      generate: vi.fn(),
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      runAgentLoop: vi.fn(async (_msgs, opts) => {
+        await opts.executor.execute('todo_write', {
+          todos: [
+            { content: 'Item A', activeForm: 'Doing A', status: 'completed' },
+            { content: 'Item B', activeForm: 'Doing B', status: 'in_progress' },
+          ],
+        })
+        return { thought: 'done', changes: [], tokensUsed: 50 } satisfies LLMResponse
+      }),
+    }
+    const agent = new Agent(mockProvider, projectRoot)
+    const output = await agent.execute(makeTask(), makeContext())
+    expect(output.todos).toEqual([
+      { content: 'Item A', activeForm: 'Doing A', status: 'completed' },
+      { content: 'Item B', activeForm: 'Doing B', status: 'in_progress' },
+    ])
+  })
+
+  it('propaga onTodosUpdated callback até a chamada do tool', async () => {
+    const captured: Array<Array<{ status: string }>> = []
+    const mockProvider: AgentProvider = {
+      generate: vi.fn(),
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      runAgentLoop: vi.fn(async (_msgs, opts) => {
+        await opts.executor.execute('todo_write', {
+          todos: [{ content: 'A', activeForm: 'Doing A', status: 'pending' }],
+        })
+        return { thought: 'done', changes: [], tokensUsed: 50 } satisfies LLMResponse
+      }),
+    }
+    const agent = new Agent(mockProvider, projectRoot)
+    await agent.execute(makeTask(), makeContext(), 'code', {
+      onTodosUpdated: (t) => captured.push(t),
+    })
+    expect(captured).toHaveLength(1)
+    expect(captured[0][0].status).toBe('pending')
+  })
+
+  it('AgentOutput.todos é undefined quando o agente nunca tocou na lista (e nada foi seeded)', async () => {
+    mockEndTurn('No plan needed')
+    const agent = new Agent(new AnthropicProvider({ apiKey: 'test-key' }), projectRoot)
+    const output = await agent.execute(makeTask(), makeContext())
+    expect(output.todos).toBeUndefined()
+  })
 })

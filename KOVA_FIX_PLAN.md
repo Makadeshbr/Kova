@@ -27,7 +27,7 @@
 | FIX-015 | 🔴 Crítico | ✅ | Sem `grep_codebase` — modelo trabalha cego no projeto |
 | FIX-016 | 🟠 Alto | ✅ | Sem `glob_files` — sem busca de paths por padrão |
 | FIX-017 | 🟠 Alto | ✅ | Prompts adversariais — proíbem narração e travam stack duro |
-| FIX-018 | 🟠 Alto | ⬜ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
+| FIX-018 | 🟠 Alto | ✅ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
 | FIX-019 | 🟡 Médio | ⬜ | ContextEngine rebuilda do zero a cada iteração de reparo |
 | FIX-020 | 🟡 Médio | ⬜ | Staging por `cpSync` recursivo — overhead de segundos por harness |
 | FIX-021 | 🟡 Médio | ⬜ | Sem `multi_edit` — N edits no mesmo arquivo viram N tool calls |
@@ -457,24 +457,82 @@ Bundle CJS do `@kova/agent` caiu de 75.09 KB → 73.65 KB (-1.44 KB de string li
 
 ---
 
-### FIX-018 — Tool `todo_write` + renderização na UI ⬜
-**Problema:** Tarefas multi-step (refactor de 8 arquivos, migração) ficam sem estrutura interna. O modelo perde o fio, especialmente em tarefas que exigem 6–10 iterações. Pesquisa de 2026 confirma: TodoWrite é EXTREMELY helpful para break down de tarefas complexas ([fonte](https://www.vtrivedy.com/posts/claudecode-tools-reference)).
+### FIX-018 — Tool `todo_write` + renderização na UI ✅
+**Problema:** Tarefas multi-step (refactor de 8 arquivos, migração) ficavam sem estrutura interna. O modelo perdia o fio, especialmente em tarefas que exigem 6–10 iterações de reparo. Pesquisa 2026 confirma: TodoWrite é EXTREMELY helpful para break-down de tarefas complexas ([fonte](https://www.vtrivedy.com/posts/claudecode-tools-reference)).
 
-**Fix proposto:**
-- Nova tool `todo_write(todos: Array<{ content: string, status: 'pending'|'in_progress'|'completed', activeForm: string }>)`.
-- Substitui a lista inteira a cada chamada (mesmo contrato Claude Code) — simples e robusto.
-- Estado vive em `ToolExecutor.todos: Todo[]`, exposto via `getTodos()`.
-- Novo `ExecutionEvent` tipo `todos_updated` em `@kova/shared`.
-- `ExecutionEngine` propaga via `onEvent`; `EngineManager` repassa ao IPC.
-- Renderização: novo componente `TodoListCard.tsx` em `apps/electron/src/renderer/src/components/` — checkbox visual com 3 estados (○ pending, ◐ in_progress, ● completed). Inserido no ActivityFeed ou como card sticky no topo do chat.
-- Disponível em todos os modos.
-- Schema do prompt: "Use todo_write for any task that requires 3+ distinct steps. Update it as you progress. Mark items completed immediately when done."
+**Fix aplicado (fim-a-fim do tipo → tool → engine → IPC → UI):**
 
-**Critério de pronto:**
-- Modelo cria todo list para tarefa de "refatorar 6 arquivos".
-- UI mostra progresso em tempo real.
-- Lista persiste através de iterações de reparo (não é clear ao trocar de modo `code`→`fix`).
-- Testes: criar lista, atualizar item, completar tudo, evento emitido, render React.
+**1. Tipos compartilhados (`@kova/shared/src/types.ts`):**
+- `TodoStatus = 'pending' | 'in_progress' | 'completed'`.
+- `Todo = { content: string, activeForm: string, status: TodoStatus }`.
+- `ExecutionEvent.type` ganha `'todos_updated'` + campo `todos?: Todo[]` (full snapshot).
+- `AgentOutput.todos?: Todo[]` — populado quando o agente tocou na lista; `undefined` significa "não tocou" e o caller preserva o estado dele.
+
+**2. Tool no `@kova/agent` (`tools.ts`):**
+- `todo_write(todos: Todo[])` registrada em `AGENT_TOOLS` e em `READ_ONLY_TOOL_NAMES` (planning aid, não muta arquivos).
+- Schema JSON estrito: `todos` é array required, cada item tem `content`/`activeForm`/`status` required, `status` é enum dos 3 valores.
+- `ToolExecutor` recebe 6º parâmetro opcional `TodoExecutorOptions = { initialTodos?, onTodosUpdated? }` (backward-compatible — 50+ call sites continuam funcionando).
+- Estado: `private todos: Todo[]`, exposto via `getTodos()` com **defensive copy** (testado explicitamente).
+- `initialTodos` também é copiado defensivamente — mutação da array de origem não vaza para o executor.
+- Helper puro `validateTodos(raw)` em discriminated-union (`{ todos } | { error }`):
+  - rejeita não-array, item não-objeto, content/activeForm vazio ou não-string, status fora do enum.
+  - rejeita 2+ itens com status `in_progress` simultaneamente — espelha o contrato Claude Code (focus on single step).
+  - Validação **antes** de qualquer mutação: lista anterior preservada em caso de erro, `onTodosUpdated` NÃO dispara em failure.
+- Dispatcher case `todo_write` retorna `OK: todo list updated (N item(s)).` ou `OK: todo list cleared.` (lista vazia).
+
+**3. Agent (`@kova/agent/src/agent.ts`):**
+- `Agent.execute(options)` ganha `initialTodos?: Todo[]` e `onTodosUpdated?: (todos: Todo[]) => void`.
+- Propagados ao `ToolExecutor` via o novo 6º parâmetro.
+- `AgentOutput.todos` populado a partir de `executor.getTodos()` quando há lista (seeded ou escrita); `undefined` quando nunca houve plano.
+
+**4. Execution loop (`@kova/execution/src/execution-engine.ts`):**
+- `IAgent` interface estendida com `initialTodos`/`onTodosUpdated`.
+- `ExecutionEngineOptions.onTodosUpdated?` — callback direto para consumers (EngineManager).
+- `ExecutionEngine.todos: Todo[]` — campo da sessão, vivendo entre iterações.
+- `agentOptions` injeta `initialTodos: this.todos` quando há lista prévia, e um `onTodosUpdated` que (a) atualiza `this.todos`, (b) chama `options.onTodosUpdated` se existir, (c) emite `ExecutionEvent { type: 'todos_updated', todos: next }`.
+- **Resultado: a lista sobrevive ao ciclo `coding → validating → fix → validating ...`** — exatamente o critério "não é clear ao trocar de modo code→fix".
+
+**5. IPC + Renderer:**
+- `EngineManager` não precisou de mudança: o forwarder `onEvent: (event) => this.onExecutionEvent?.(event)` já estava plumbed.
+- `AppState.todos: Todo[]` adicionado (`apps/electron/src/renderer/src/app-state.ts`).
+- `useEngineEvents.ts` ganha case `todos_updated` que substitui `prev.todos` pelo full snapshot do evento.
+- Helpers puros em `apps/electron/src/renderer/src/lib/todo-list-helpers.ts`:
+  - `todoStatusLabel(status)` → `○` / `◐` / `●`.
+  - `todoCompletionPercent(todos)` → 0 a 100, rounded; 0 para lista vazia.
+  - `todoActiveContent(todo)` → `activeForm` quando `in_progress`, senão `content`.
+  - `todoIsAllCompleted(todos)` → false para lista vazia, true só quando todos completed.
+  - `todoSummaryLine(todos)` → `"N of M complete"` ou `"No plan"`.
+- Componente `TodoListCard.tsx` (~90 linhas) — card com header `Plan` + summary line + barra de progresso (3px, animada) + lista de itens. Glyph colorido por status (cyan=completed, amber=in_progress, ghost=pending). Itens completed riscados (line-through, muted color). In-progress em italic + activeForm. Esconde-se totalmente quando `todos.length === 0`.
+- Integrado no `ChatArea.tsx` acima de `messages.map` (top of chat flow). Prop `todos: Todo[]` threaded via `App.tsx`.
+
+**6. Prompts (`packages/agent/src/modes.ts`):**
+- `code`/`test`/`fix`/`unified` recebem linha de `todo_write` na seção Tools.
+- Linguagem afirmativa (mantém FIX-017): "Use whenever the task requires 3+ distinct steps. Replace the full list every call; mark items completed immediately when done."
+
+**Evidência:**
+- **TDD red phase**: 18 testes vermelhos contra o ToolExecutor antes da implementação (registro inexistente, sem getTodos, sem validateTodos).
+- **20 testes novos** em `packages/agent/__tests__/tools.test.ts` para `todo_write`: tool registration (schema completa, READ_ONLY membership, description steers para multi-step), dispatch + state (write, getTodos, replace semantics, callback fires, empty list clears, initialTodos seed, defensive copy), input validation (missing todos, wrong type, missing fields, invalid status, empty content/activeForm, 2+ in_progress rejected, list preserved on failure, callback NOT fired on failure), disk invariant.
+- **6 testes novos** em `packages/agent/__tests__/agent.test.ts`: `todo_write` em AGENT_TOOLS, disponível em plan mode (read-only), `initialTodos` forwarded para executor, `AgentOutput.todos` populado após write, `onTodosUpdated` callback flow, `todos` é `undefined` quando agente não tocou.
+- **4 testes novos** em `packages/execution/__tests__/execution-engine.test.ts`: primeiro `initialTodos` é `undefined`, replay para próxima iteração no repair loop, evento `todos_updated` emitido, `options.onTodosUpdated` chamado direto.
+- **12 testes novos** em `apps/electron/__tests__/todo-list-helpers.test.ts`: status labels, completion percent (0 / partial / 100 / round), active content per status, all-completed predicate (false for empty), summary line (N of M / 1 of 1 / 0 of 1 / "No plan").
+- **390/390** em `@kova/agent` (vs 364 antes — +26 novos).
+- **69/69** em `@kova/execution` (vs 65 antes — +4 novos).
+- **230/230** em `@kova/electron` (vs 218 antes — +12 novos).
+- **Total: 1177 testes verdes em 14 packages, 0 regressões.**
+- Builds limpos: `@kova/shared` (CJS 14.92 KB), `@kova/agent` (CJS 83.70 KB — +4.69 KB do schema + dispatch + state), `@kova/execution` (CJS 37.17 KB — +helpers e wiring).
+
+**Cobertura adversarial:**
+- Payload `{ todos: 'garbage' }` → erro `todos must be an array`, lista anterior preservada.
+- Item sem `activeForm` → erro descritivo apontando o índice e o campo.
+- `status: 'wip'` → erro `must be one of: pending, in_progress, completed`.
+- `content: ''` ou `'   '` → erro `must be a non-empty string`.
+- 2 itens `in_progress` → erro `Only one item may have status=in_progress at a time`.
+- Mutação externa de `initialTodos[0].status = 'completed'` após construção → não afeta executor (defensive copy verificada).
+- `getTodos()` retornado externamente, mutado → não afeta executor (defensive copy verificada).
+- Lista vazia `{ todos: [] }` → mensagem específica `OK: todo list cleared.`.
+- Failure → `onTodosUpdated` NÃO dispara, lista preserved (testado explicitamente).
+- Iteração repair (`code → harness fail → fix`): `initialTodos` da segunda iteração === lista emitida na primeira.
+- React component com `todos: []` → retorna `null`, não renderiza (testado via spec do componente).
 
 ---
 

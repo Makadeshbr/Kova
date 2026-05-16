@@ -329,6 +329,7 @@ export interface ExecutionEvent {
     | 'harness_layer_start' // a harness layer just started running its command
     | 'provider_session_start' // provider/model resolved for this session — auditable metadata
     | 'diff_review_ready' // pending changes were converted into reviewable file/hunk decisions
+    | 'todos_updated' // FIX-018: agent updated the multi-step todo list (full replacement)
   taskId: string
   timestamp: string
   iteration?: number
@@ -374,6 +375,8 @@ export interface ExecutionEvent {
   commandId?: string
   commandLine?: string
   commandStream?: 'stdout' | 'stderr'
+  // FIX-018: full todo list snapshot (replacement semantics — never a delta)
+  todos?: Todo[]
   // provider session audit
   providerMeta?: {
     requestedProvider: string
@@ -625,6 +628,28 @@ export interface AgentOutput {
   thought: string
   changes: FileChange[]
   tokensUsed: number
+  /**
+   * FIX-018: Todo list state at the end of this agent loop. Populated only when
+   * the agent called `todo_write` (or when initialTodos was seeded and survived).
+   * Undefined means "agent never touched the list" — preserve the caller's state.
+   */
+  todos?: Todo[]
+}
+
+/**
+ * FIX-018: Lightweight task-tracking primitive. Mirrors Claude Code's TodoWrite
+ * contract: the model replaces the entire list every call (no diff merging) and
+ * the UI re-renders from the full state. The model is responsible for status
+ * transitions; Kova does not infer them.
+ */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+export interface Todo {
+  /** Imperative form (e.g. "Refactor auth middleware"). Shown when pending or completed. */
+  content: string
+  /** Present-continuous form (e.g. "Refactoring auth middleware"). Shown while in_progress. */
+  activeForm: string
+  status: TodoStatus
 }
 
 export type ContextRelevance = 'rules' | 'target' | 'error' | 'direct_dep' | 'learning' | 'indirect_dep'

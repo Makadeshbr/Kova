@@ -1,7 +1,7 @@
 import type {
   AgentContext, AgentMode, AgentOutput, CommandOutputCallback, DecisionResult, ExecutionContract,
   DiffReviewSelection, ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
-  IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation
+  IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation, Todo
 } from '@kova/shared'
 import { createOrchestratorConfig } from '@kova/orchestrator'
 import type { OrchestratorConfig, OrchestratorResult } from '@kova/orchestrator'
@@ -26,6 +26,9 @@ interface IAgent {
     onToolResult?: (name: string, result: string) => void
     interactiveRunner?: InteractiveCommandRunner
     onCommandOutput?: CommandOutputCallback
+    /** FIX-018: seed and listen to the multi-step todo list. */
+    initialTodos?: Todo[]
+    onTodosUpdated?: (todos: Todo[]) => void
   }): Promise<AgentOutput>
 }
 
@@ -72,6 +75,12 @@ export interface ExecutionEngineOptions extends StopOptions {
   interactiveRunner?: InteractiveCommandRunner
   /** FIX-003: forwarded to the agent so run_command can stream stdout/stderr live. */
   onCommandOutput?: CommandOutputCallback
+  /**
+   * FIX-018: fired whenever the agent calls todo_write. Carries the full new
+   * list. The engine also emits a 'todos_updated' ExecutionEvent on the same
+   * boundary; this callback is for consumers that want a direct stream.
+   */
+  onTodosUpdated?: (todos: Todo[]) => void
 }
 
 export class ExecutionEngine {
@@ -82,6 +91,12 @@ export class ExecutionEngine {
   private aborted = false
   private lastCheckpointId = ''
   private abortController: AbortController | null = null
+  /**
+   * FIX-018: multi-step todo list shared across iterations. The agent sees this
+   * via `initialTodos` and replaces it via `todo_write`. Survives the
+   * code → harness → fix cycle so the model can resume its plan after a repair.
+   */
+  private todos: Todo[] = []
 
   constructor(
     private readonly deps: ExecutionDependencies,
@@ -276,6 +291,15 @@ export class ExecutionEngine {
       signal: this.abortController.signal,
       interactiveRunner: this.options.interactiveRunner,
       onCommandOutput: this.options.onCommandOutput,
+      // FIX-018: pass the current session-scoped todo list to the agent so plans
+      // persist across the code → harness → fix repair cycle. Replacement after
+      // todo_write happens via the callback below + the AgentOutput.todos read.
+      initialTodos: this.todos.length > 0 ? this.todos : undefined,
+      onTodosUpdated: (next: Todo[]) => {
+        this.todos = next
+        this.options.onTodosUpdated?.(next)
+        this.event({ type: 'todos_updated', todos: next, message: `${next.length} todo(s)` })
+      },
       onToken: (token: string) => {
         reasoning.end()
         this.event({ type: 'token', token })

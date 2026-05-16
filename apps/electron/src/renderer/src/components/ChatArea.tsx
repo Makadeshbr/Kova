@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { ChatMessage, ChatMode, QueuedMessage, ReasoningState, SessionUsage } from '../App'
-import type { AgentResultMessage } from '@kova/shared'
+import type { AgentResultMessage, Todo } from '@kova/shared'
 import { FileCard } from './FileCard'
 import { ActivityFeed } from './ActivityFeed'
+import { TodoListCard } from './TodoListCard'
 import { getValidationConfidenceCopy } from '../lib/validation-confidence-copy'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -24,6 +25,8 @@ interface Props {
   activeMode: ChatMode
   sessionUsage: SessionUsage
   activeModel: string | null
+  /** FIX-018: multi-step todo list emitted by todo_write. [] hides the card. */
+  todos: Todo[]
   onModeChange: (mode: ChatMode) => void
   onClearQueue: () => void
 }
@@ -662,7 +665,7 @@ function extractAtRefs(text: string): string[] {
 export function ChatArea({
   messages, executionState, isThinking, isRunning,
   streamingText, reasoning, events, projectRoot, onSend, onOpenFolder,
-  queuedMessages, activeMode, sessionUsage, activeModel, onModeChange, onClearQueue,
+  queuedMessages, activeMode, sessionUsage, activeModel, todos, onModeChange, onClearQueue,
 }: Props): React.ReactElement {
   const [value, setValue]           = useState('')
   const [showSlash, setShowSlash]   = useState(false)
@@ -769,6 +772,9 @@ export function ChatArea({
             )}
           </div>
         )}
+
+        {/* FIX-018: multi-step plan card. Hidden when the agent has not used todo_write. */}
+        <TodoListCard todos={todos} />
 
         {messages.map(msg =>
           msg.role === 'user'

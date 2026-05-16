@@ -1,4 +1,4 @@
-import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage, CommandOutputCallback } from '@kova/shared'
+import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage, CommandOutputCallback, Todo } from '@kova/shared'
 import type { AgentProvider, LLMResponse } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
 import type { InteractiveRunner } from './tools'
@@ -39,6 +39,10 @@ export class Agent {
       interactiveRunner?: InteractiveRunner
       /** FIX-003: forwarded to ToolExecutor for live stdout/stderr streaming. */
       onCommandOutput?: CommandOutputCallback
+      /** FIX-018: seed the todo list with a prior iteration's plan. */
+      initialTodos?: Todo[]
+      /** FIX-018: fired after every successful todo_write. */
+      onTodosUpdated?: (todos: Todo[]) => void
     }
   ): Promise<AgentOutput> {
     const tools = WRITE_MODES.has(mode) ? AGENT_TOOLS : READ_ONLY_TOOLS
@@ -64,6 +68,11 @@ export class Agent {
       WRITE_MODES.has(mode) ? undefined : READ_ONLY_PERMISSION_POLICY,
       options?.interactiveRunner,
       options?.onCommandOutput,
+      // FIX-018: seed + listener for the multi-step todo list
+      (options?.initialTodos || options?.onTodosUpdated) ? {
+        initialTodos: options.initialTodos,
+        onTodosUpdated: options.onTodosUpdated,
+      } : undefined,
     )
 
     const timeoutId = setTimeout(
@@ -94,7 +103,13 @@ export class Agent {
       executor.rollbackWrites()
     }
 
-    return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed }
+    // FIX-018: surface the latest todo list IF the executor actually has one
+    // (either seeded or written during this run). Undefined means "agent didn't
+    // touch it" so the caller's existing session state is preserved.
+    const finalTodos = executor.getTodos()
+    const todos = finalTodos.length > 0 || options?.initialTodos ? finalTodos : undefined
+
+    return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed, todos }
   }
 }
 

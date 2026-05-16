@@ -168,6 +168,14 @@ export function useEngineEvents(setState: SetState): void {
             executionEvents: [...prev.executionEvents, event].slice(-200),
           }
         }
+        // FIX-018: agent updated the multi-step todo list. Full replacement.
+        if (event.type === 'todos_updated') {
+          return {
+            ...prev,
+            todos: event.todos ?? [],
+            executionEvents: [...prev.executionEvents, event].slice(-200),
+          }
+        }
         const isFileMutation = event.type === 'tool_call' && (event.toolName === 'write_file' || event.toolName === 'delete_file')
         const shouldRefresh = isFileMutation || event.type === 'file_mutation' || event.type === 'apply_completed'
         return {

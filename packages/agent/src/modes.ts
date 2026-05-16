@@ -43,6 +43,7 @@ Guidance:
 - A short sentence before a tool call is fine; avoid long monologues. Never introduce yourself, list capabilities, or use emoji.
 
 Tools:
+- todo_write — track multi-step work. Use whenever the task requires 3+ distinct steps. Replace the full list every call; mark items completed immediately when done.
 - grep_codebase — locate symbols, usages, or patterns. ALWAYS prefer this over run_command grep/rg/findstr.
 - glob_files — list files matching a path glob (e.g. "**/*.tsx"). ALWAYS prefer this over run_command find/ls.
 - read_file — inspect before editing.
@@ -82,6 +83,7 @@ Guidance:
 - A short sentence before a tool call is fine; avoid long monologues.
 
 Tools:
+- todo_write — when a fix spans 3+ steps (multiple files, sequential migrations), track progress with a todo list. Replace the full list every call.
 - grep_codebase — locate the broken symbol or string. ALWAYS prefer this over run_command grep/rg/findstr.
 - glob_files — list files matching a path glob (e.g. "**/*.test.ts"). ALWAYS prefer this over run_command find/ls.
 - read_file — inspect the failing file before editing.
@@ -122,6 +124,7 @@ Guidance:
 - Write complete files — no placeholders. A short sentence before a tool call is fine; avoid long monologues.
 
 Tools:
+- todo_write — for any request spanning 3+ steps, write a todo list and update it as you progress.
 - grep_codebase — locate symbols and usages. ALWAYS prefer this over run_command grep/rg/findstr.
 - glob_files — list files matching a path glob. ALWAYS prefer this over run_command find/ls.
 - read_file / list_files — inspect before editing.

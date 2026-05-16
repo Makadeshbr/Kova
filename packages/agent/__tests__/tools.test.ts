@@ -1300,3 +1300,206 @@ describe('glob_files — dispatch through ToolExecutor.execute()', () => {
     expect(result).toMatch(/a\.ts/)
   })
 })
+
+// ─── todo_write (FIX-018) ────────────────────────────────────────────────────
+
+describe('todo_write — tool registration', () => {
+  it('is registered in AGENT_TOOLS with the documented schema', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'todo_write')
+    expect(tool).toBeDefined()
+    const schema = tool!.inputSchema as {
+      type: string
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.todos).toBeDefined()
+    expect(schema.required).toEqual(['todos'])
+  })
+
+  it('is in READ_ONLY_TOOLS (planning aid; does not mutate the project)', async () => {
+    const { READ_ONLY_TOOLS } = await import('../src/tools')
+    expect(READ_ONLY_TOOLS.find(t => t.name === 'todo_write')).toBeDefined()
+  })
+
+  it('description steers the model toward multi-step usage', async () => {
+    const { AGENT_TOOLS } = await import('../src/tools')
+    const tool = AGENT_TOOLS.find(t => t.name === 'todo_write')!
+    expect(tool.description.toLowerCase()).toMatch(/3\+|multi[- ]step|complex/i)
+    expect(tool.description.toLowerCase()).toMatch(/replace|full list/i)
+  })
+})
+
+describe('todo_write — dispatch and state', () => {
+  it('writes a new todo list and confirms success', async () => {
+    const result = await executor.execute('todo_write', {
+      todos: [
+        { content: 'Create auth module', activeForm: 'Creating auth module', status: 'pending' },
+        { content: 'Add tests',          activeForm: 'Adding tests',          status: 'pending' },
+      ],
+    })
+    expect(result).toMatch(/^OK: todo list updated/)
+    expect(result).toMatch(/2 item/)
+  })
+
+  it('exposes the current list via getTodos()', async () => {
+    await executor.execute('todo_write', {
+      todos: [
+        { content: 'A', activeForm: 'Doing A', status: 'pending' },
+      ],
+    })
+    expect(executor.getTodos()).toEqual([
+      { content: 'A', activeForm: 'Doing A', status: 'pending' },
+    ])
+  })
+
+  it('replaces the full list on every call (no merging)', async () => {
+    await executor.execute('todo_write', {
+      todos: [
+        { content: 'A', activeForm: 'Doing A', status: 'pending' },
+        { content: 'B', activeForm: 'Doing B', status: 'pending' },
+      ],
+    })
+    await executor.execute('todo_write', {
+      todos: [
+        { content: 'B', activeForm: 'Doing B', status: 'completed' },
+      ],
+    })
+    expect(executor.getTodos()).toEqual([
+      { content: 'B', activeForm: 'Doing B', status: 'completed' },
+    ])
+  })
+
+  it('fires onTodosUpdated callback with the full new list', async () => {
+    const captured: Array<Array<{ content: string; activeForm: string; status: string }>> = []
+    const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+      onTodosUpdated: (todos) => captured.push(todos),
+    })
+    await exec.execute('todo_write', {
+      todos: [
+        { content: 'X', activeForm: 'Doing X', status: 'in_progress' },
+      ],
+    })
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toEqual([
+      { content: 'X', activeForm: 'Doing X', status: 'in_progress' },
+    ])
+  })
+
+  it('accepts an empty list (model clears the plan)', async () => {
+    await executor.execute('todo_write', {
+      todos: [{ content: 'A', activeForm: 'Doing A', status: 'pending' }],
+    })
+    const result = await executor.execute('todo_write', { todos: [] })
+    expect(result).toMatch(/OK: todo list cleared/i)
+    expect(executor.getTodos()).toEqual([])
+  })
+
+  it('seeds from initialTodos when provided', async () => {
+    const seeded = [
+      { content: 'Seed', activeForm: 'Seeding', status: 'pending' as const },
+    ]
+    const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+      initialTodos: seeded,
+    })
+    expect(exec.getTodos()).toEqual(seeded)
+  })
+
+  it('initialTodos is copied (mutation of source does not affect executor state)', async () => {
+    const seeded = [
+      { content: 'Seed', activeForm: 'Seeding', status: 'pending' as const },
+    ]
+    const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+      initialTodos: seeded,
+    })
+    seeded[0].status = 'completed'
+    expect(exec.getTodos()[0].status).toBe('pending')
+  })
+})
+
+describe('todo_write — input validation', () => {
+  it('rejects missing todos array', async () => {
+    const result = await executor.execute('todo_write', {})
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/todos.*array/i)
+  })
+
+  it('rejects todos that is not an array', async () => {
+    const result = await executor.execute('todo_write', { todos: 'not an array' })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/todos.*array/i)
+  })
+
+  it('rejects todos with missing required fields', async () => {
+    const result = await executor.execute('todo_write', {
+      todos: [{ content: 'A', status: 'pending' }],
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/activeForm/i)
+  })
+
+  it('rejects invalid status value', async () => {
+    const result = await executor.execute('todo_write', {
+      todos: [{ content: 'A', activeForm: 'Doing A', status: 'wip' }],
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/status/i)
+  })
+
+  it('rejects empty content string', async () => {
+    const result = await executor.execute('todo_write', {
+      todos: [{ content: '', activeForm: 'Doing A', status: 'pending' }],
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/content/i)
+  })
+
+  it('rejects empty activeForm string', async () => {
+    const result = await executor.execute('todo_write', {
+      todos: [{ content: 'A', activeForm: '', status: 'pending' }],
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/activeForm/i)
+  })
+
+  it('rejects more than one in_progress item simultaneously', async () => {
+    // Matches Claude Code's TodoWrite contract: only one item may be in_progress
+    // at a time to enforce focused work.
+    const result = await executor.execute('todo_write', {
+      todos: [
+        { content: 'A', activeForm: 'Doing A', status: 'in_progress' },
+        { content: 'B', activeForm: 'Doing B', status: 'in_progress' },
+      ],
+    })
+    expect(result).toMatch(/Error/)
+    expect(result).toMatch(/one.*in_progress|only.*one/i)
+  })
+
+  it('keeps the list unchanged when validation fails', async () => {
+    await executor.execute('todo_write', {
+      todos: [{ content: 'Original', activeForm: 'Originaling', status: 'pending' }],
+    })
+    const before = executor.getTodos()
+    await executor.execute('todo_write', { todos: 'garbage' })
+    expect(executor.getTodos()).toEqual(before)
+  })
+
+  it('does NOT fire onTodosUpdated on validation failure', async () => {
+    const captured: Array<unknown> = []
+    const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+      onTodosUpdated: (todos) => captured.push(todos),
+    })
+    await exec.execute('todo_write', { todos: 'garbage' })
+    expect(captured).toHaveLength(0)
+  })
+})
+
+describe('todo_write — disk invariant', () => {
+  it('does not touch disk regardless of payload', async () => {
+    await executor.execute('todo_write', {
+      todos: [{ content: 'A', activeForm: 'Doing A', status: 'pending' }],
+    })
+    // No new files appear, no files are modified.
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+})

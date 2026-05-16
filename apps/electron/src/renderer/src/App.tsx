@@ -63,6 +63,7 @@ export function App(): React.ReactElement {
     activeMode: 'patch',
     terminalSessions: [],
     pendingApproval: null,
+    todos: [],
   })
 
   useEngineEvents(setState)
@@ -294,6 +295,7 @@ export function App(): React.ReactElement {
               activeMode={state.activeMode}
               sessionUsage={state.sessionUsage}
               activeModel={state.activeModel}
+              todos={state.todos}
               onModeChange={(activeMode) => setState(prev => ({ ...prev, activeMode }))}
               onClearQueue={() => setState(prev => ({ ...prev, queuedMessages: [] }))}
             />

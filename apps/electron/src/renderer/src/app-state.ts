@@ -5,7 +5,7 @@
  * circular dependencies with App.tsx.
  */
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from './types'
-import type { StructuredAgentMessage, ContextPackFile, ContextBlockedFile, ContextRejectedFile } from '@kova/shared'
+import type { StructuredAgentMessage, ContextPackFile, ContextBlockedFile, ContextRejectedFile, Todo } from '@kova/shared'
 import type { KovaSettings } from '../../main/ipc-handlers'
 
 // Terminal session types defined here (not imported from TerminalPanel)
@@ -84,4 +84,9 @@ export interface AppState {
   activeMode: ChatMode
   terminalSessions: TerminalSessionInfo[]
   pendingApproval: PendingApproval | null
+  /**
+   * FIX-018: multi-step todo list emitted by the agent via the todo_write tool.
+   * Empty array means "no plan yet"; the renderer hides the card in that case.
+   */
+  todos: Todo[]
 }

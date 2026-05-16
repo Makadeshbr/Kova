@@ -243,7 +243,7 @@ describe('EngineManager - plan mode', () => {
 
     const calls = vi.mocked(provider.runAgentLoop).mock.calls
     expect(calls).toHaveLength(1)
-    expect(calls[0][1].tools.map(t => t.name).sort()).toEqual(['glob_files', 'grep_codebase', 'list_files', 'read_file'])
+    expect(calls[0][1].tools.map(t => t.name).sort()).toEqual(['glob_files', 'grep_codebase', 'list_files', 'read_file', 'todo_write'])
     expect(events.some(e => e.type === 'validation_started')).toBe(false)
     expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
   })

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { CommandOutputCallback, FileChange, ValidationCommandKind } from '@kova/shared'
+import type { CommandOutputCallback, FileChange, Todo, TodoStatus, ValidationCommandKind } from '@kova/shared'
 import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
 import { globFiles, type GlobOptions } from './glob-files'
@@ -202,6 +202,34 @@ Inputs:
     },
   },
   {
+    name: 'todo_write',
+    description: `Track multi-step work as a todo list. Use this whenever a task requires 3+ distinct steps, a refactor that spans several files, or anything that benefits from an explicit plan. Replace the full list every call — there is no merging. Mark items completed immediately when finished. Only ONE item may be in_progress at a time.
+
+Inputs:
+- todos: full replacement list. Each item: { content (imperative, e.g. "Refactor auth"), activeForm (present-continuous, e.g. "Refactoring auth"), status (pending | in_progress | completed) }.
+
+Returns "OK: todo list updated (N item(s))". Calling with [] clears the plan. Empty content or activeForm is rejected.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'Full replacement list of todos. The previous list is discarded.',
+          items: {
+            type: 'object',
+            properties: {
+              content: { type: 'string', description: 'Imperative description (e.g. "Refactor auth module")' },
+              activeForm: { type: 'string', description: 'Present-continuous form shown while in_progress (e.g. "Refactoring auth module")' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+            },
+            required: ['content', 'activeForm', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
+    },
+  },
+  {
     name: 'glob_files',
     description: `List project files matching a glob pattern, sorted most-recently-modified first. Prefer this over run_command find/ls — it works on every OS, ignores node_modules/dist/.git/.turbo/out by default, and respects the staged buffer (files you wrote earlier in the same turn are visible).
 
@@ -258,11 +286,22 @@ The user will see an approval dialog before the terminal opens. Examples:
 ]
 
 // Read-only subset for plan and review modes — no side effects.
-// grep_codebase and glob_files are read-only: they inspect files but never mutate anything.
-const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase', 'glob_files'])
+// grep_codebase, glob_files, and todo_write never mutate the project.
+const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase', 'glob_files', 'todo_write'])
 export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(t => READ_ONLY_TOOL_NAMES.has(t.name))
 
 export type InteractiveRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
+
+/**
+ * FIX-018: optional knobs for the multi-step todo list. Passed as the 6th
+ * positional argument to keep existing 5-arg call sites backward compatible.
+ */
+export interface TodoExecutorOptions {
+  /** Seed the executor with a prior session's todos so plans persist across iterations. */
+  initialTodos?: Todo[]
+  /** Fired after every successful todo_write with the full new list. */
+  onTodosUpdated?: (todos: Todo[]) => void
+}
 
 /**
  * Executes agent tools with in-memory staging for file writes.
@@ -295,6 +334,10 @@ export class ToolExecutor {
    * A fresh commandId is generated per command so the UI can group lines.
    */
   private readonly onCommandOutput?: CommandOutputCallback
+  /** FIX-018: current todo list (replaced wholesale by every todo_write call). */
+  private todos: Todo[] = []
+  /** FIX-018: fired after every successful todo_write with the full new list. */
+  private readonly onTodosUpdated?: (todos: Todo[]) => void
 
   constructor(
     private readonly projectRoot: string,
@@ -302,8 +345,19 @@ export class ToolExecutor {
     private readonly permissionPolicy: PermissionPolicy = DEFAULT_PERMISSION_POLICY,
     private readonly interactiveRunner?: InteractiveRunner,
     onCommandOutput?: CommandOutputCallback,
+    todoOptions?: TodoExecutorOptions,
   ) {
     this.onCommandOutput = onCommandOutput
+    if (todoOptions?.initialTodos) {
+      // Defensive copy: mutating the source array must not leak into executor state.
+      this.todos = todoOptions.initialTodos.map(t => ({ ...t }))
+    }
+    this.onTodosUpdated = todoOptions?.onTodosUpdated
+  }
+
+  /** FIX-018: read-only snapshot of the current todo list. Defensive copy. */
+  getTodos(): Todo[] {
+    return this.todos.map(t => ({ ...t }))
   }
 
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
@@ -320,6 +374,7 @@ export class ToolExecutor {
       case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
       case 'grep_codebase': return this.grepCodebase(input)
       case 'glob_files':    return this.globFiles(input)
+      case 'todo_write':    return this.todoWrite(input)
       case 'run_command': return this.runCommand(
         String(input.command ?? ''),
         stringOrUndefined(input.cwd),
@@ -633,6 +688,22 @@ export class ToolExecutor {
     return `${header}\n${result.paths.join('\n')}`
   }
 
+  /**
+   * FIX-018: todo_write dispatcher. Replaces the full list on every successful
+   * call (no merging). On any validation failure, the existing list is preserved
+   * and onTodosUpdated is NOT fired — the agent sees an error and can correct.
+   */
+  private async todoWrite(rawInput: Record<string, unknown>): Promise<string> {
+    const validation = validateTodos(rawInput.todos)
+    if ('error' in validation) return `Error: ${validation.error}`
+
+    this.todos = validation.todos
+    this.onTodosUpdated?.(this.getTodos())
+
+    if (validation.todos.length === 0) return 'OK: todo list cleared.'
+    return `OK: todo list updated (${validation.todos.length} item${validation.todos.length === 1 ? '' : 's'}).`
+  }
+
   private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {
     if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
     const permission = this.requirePermission('bash', command)
@@ -759,6 +830,58 @@ function stringOrUndefined(value: unknown): string | undefined {
 function normalizeOutputMode(value: unknown): GrepOutputMode | undefined {
   if (value === 'content' || value === 'files_with_matches' || value === 'count') return value
   return undefined
+}
+
+/**
+ * FIX-018: validate the `todos` payload from a todo_write tool call.
+ *
+ * Returns either the parsed list (which has been defensive-copied so the caller
+ * cannot mutate the executor's state after the fact) or a single descriptive
+ * error string suitable for the model to read and correct.
+ *
+ * Contract:
+ * - todos must be an array (including [], which means "clear the plan")
+ * - each item must have non-empty content + activeForm and a valid status
+ * - at most one item may have status='in_progress' simultaneously
+ */
+export function validateTodos(raw: unknown): { todos: Todo[] } | { error: string } {
+  if (!Array.isArray(raw)) {
+    return { error: 'todos must be an array of { content, activeForm, status } objects.' }
+  }
+
+  const out: Todo[] = []
+  let inProgressCount = 0
+
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i]
+    if (!item || typeof item !== 'object') {
+      return { error: `todos[${i}] must be an object with content, activeForm, and status.` }
+    }
+    const obj = item as Record<string, unknown>
+
+    if (typeof obj.content !== 'string' || !obj.content.trim()) {
+      return { error: `todos[${i}].content must be a non-empty string.` }
+    }
+    if (typeof obj.activeForm !== 'string' || !obj.activeForm.trim()) {
+      return { error: `todos[${i}].activeForm must be a non-empty string.` }
+    }
+    if (obj.status !== 'pending' && obj.status !== 'in_progress' && obj.status !== 'completed') {
+      return { error: `todos[${i}].status must be one of: pending, in_progress, completed.` }
+    }
+    if (obj.status === 'in_progress') inProgressCount++
+
+    out.push({
+      content: obj.content,
+      activeForm: obj.activeForm,
+      status: obj.status as TodoStatus,
+    })
+  }
+
+  if (inProgressCount > 1) {
+    return { error: 'Only one item may have status=in_progress at a time — focus on a single step.' }
+  }
+
+  return { todos: out }
 }
 
 function numberOrZero(value: unknown): number {
