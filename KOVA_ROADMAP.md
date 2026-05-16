@@ -215,31 +215,25 @@ Uma versão do Kova está pronta para produção quando:
 
 ---
 
-## Limpeza necessária (remanescentes do fork Void)
+## Limpeza necessária (remanescentes do fork Void) ✅
 
-Os arquivos abaixo são remanescentes do fork Void e devem ser removidos:
+**Executada em 2026-05-15.** O diretório `.vscode/` inteiro foi removido (todos os arquivos abaixo + as duas extensões `vscode-selfhost-import-aid` e `vscode-selfhost-test-provider`):
 
 ```
-.tmp/                          — dados de sessão VSCode do Void (gitignored, lixo em disco)
-.vscode/cglicenses.schema.json — schema do sistema de licença do build do Void
-.vscode/launch.json            — configs de debug do Void (Gulp, Attach to Extension Host)
-.vscode/tasks.json             — tasks do Void (hygiene, smoke test, etc.)
-.vscode/extensions.json        — recomendações de extensões VSCode para dev de extensão
-Rules.md                       — duplicata parcial do CLAUDE.md, causa conflito para IA
+.tmp/                            ✅ removido (gitignored)
+.vscode/cglicenses.schema.json   ✅ removido
+.vscode/launch.json              ✅ removido
+.vscode/tasks.json               ✅ removido
+.vscode/extensions.json          ✅ removido
+.vscode/extensions/              ✅ removido (Void self-host providers, 47 arquivos)
+.vscode/notebooks/               ✅ removido (github-issues do time VSCode)
+.vscode/searches/                ✅ removido
+.vscode/shared.code-snippets     ✅ removido (snippet MSFT copyright)
+.vscode/settings.json            ✅ removido (paths `.profile-oss`, `cli/target`, `out-build` — todos Void)
+Rules.md                         ✅ já removido em sessão anterior
 ```
 
-E no `.gitignore`, remover padrões do Void que não existem no projeto:
-```
-src/vs/workbench/contrib/void/browser/react/out/**
-src/vs/workbench/contrib/void/browser/react/src2/**
-/cli/target
-/cli/openssl
-/.profile-oss
-vscode.lsif
-vscode.db
-/extensions/**/out/
-extensions/**/dist/
-```
+`.gitignore` atualizado: adicionados `.turbo/`, `.kova/sessions/`, `.kova/traces/`, `packages/*/dist/`, `apps/cli/dist/`. 985 artefatos de build (turbo cache, package dists, session JSON) removidos do index do git no commit `cec6f441`.
 
 `KOVA.md` na raiz pode ser mantido como entrada para ferramentas AI (é útil), mas deve ser revisado para remover referências desatualizadas.
 

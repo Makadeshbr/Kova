@@ -138,7 +138,7 @@ describe('apply', () => {
       { path: '\x00/invalid', type: 'create', diff: 'content' },
     ]
 
-    await expect(engine.apply(changes, 'task-1')).rejects.toThrow('Apply falhou')
+    await expect(engine.apply(changes, 'task-1')).rejects.toThrow('Apply failed')
     expect(readFileSync(join(root, 'src', 'app.ts'), 'utf-8')).toBe('original')
   })
 })

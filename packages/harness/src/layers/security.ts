@@ -106,7 +106,7 @@ async function runSemgrep(projectRoot: string, signal?: AbortSignal): Promise<La
     }))
     return { ...secResult(errors, [], Date.now() - start), command: execResult.command, cwd: execResult.cwd, kind: execResult.kind, stdout: execResult.stdout, stderr: execResult.stderr, exitCode: execResult.exitCode, startedAt: execResult.startedAt }
   } catch (error) {
-    throw new Error(`Semgrep falhou: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`Semgrep failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 

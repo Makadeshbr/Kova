@@ -68,7 +68,7 @@ describe('runTestsLayer', () => {
     mockFailure('Tests  2 failed | 1 passed (3)')
     const result = await runTestsLayer({ command: 'vitest run', projectRoot: '/tmp' })
     expect(result.passed).toBe(false)
-    expect(result.errors[0].message).toContain('2 test(s) falharam')
+    expect(result.errors[0].message).toContain('2 test(s) failed')
   })
 
   it('deve retornar erro critico quando timeout', async () => {

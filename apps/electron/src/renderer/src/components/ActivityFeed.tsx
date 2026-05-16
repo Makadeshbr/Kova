@@ -56,7 +56,7 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         list.push({ id: `tool_${i}`, type, status: 'pending', label, detail: rawPath })
       } 
       else if (e.type === 'tool_result') {
-        // Encontra a última atividade pendente e marca como sucesso
+        // Find the last pending activity and mark it as success
         const lastPending = [...list].reverse().find(a => a.status === 'pending' && a.type !== 'validate')
         if (lastPending) {
           lastPending.status = e.message?.startsWith('Error:') || e.message?.startsWith('Blocked:') ? 'error' : 'success'

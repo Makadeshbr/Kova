@@ -356,7 +356,7 @@ function ProofPackCard({ executionState }: { executionState: ExecutionState | nu
           <div className="kova-mini-title danger">Falhas reais</div>
           {failed.slice(0, 3).map(validation => (
             <p key={`${validation.kind}:${validation.command ?? validation.note}`}>
-              {(validation.command ?? validation.kind)} - {validation.note ?? 'falhou'}
+              {(validation.command ?? validation.kind)} - {validation.note ?? 'failed'}
             </p>
           ))}
         </div>

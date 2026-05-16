@@ -65,7 +65,7 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `${change.path} esta fora do escopo do contrato`,
+        message: `${change.path} is outside the contract scope`,
       })
     }
 

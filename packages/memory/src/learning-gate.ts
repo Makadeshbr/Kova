@@ -7,11 +7,11 @@ export function classifyLearning(
   candidate: LearningCandidate,
   harnessResult: HarnessResult
 ): LearningGateResult {
-  // Regra 1: Rejeitar sem evidências ou se harness falhou
+  // Rule 1: Reject if there are no evidences or if the harness failed
   if (!harnessResult.passed) {
     return {
       classification: 'rejected_learning',
-      reason: 'Validação do harness falhou. Não é possível registrar aprendizados não validados.',
+      reason: 'Harness validation failed. Cannot record unvalidated learnings.',
       approved: false,
     }
   }
@@ -19,7 +19,7 @@ export function classifyLearning(
   if (candidate.evidence.length === 0) {
     return {
       classification: 'rejected_learning',
-      reason: 'Candidato não possui evidências vinculadas da execução atual.',
+      reason: 'Candidate has no linked evidences from the current execution.',
       approved: false,
     }
   }

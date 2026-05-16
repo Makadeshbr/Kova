@@ -98,15 +98,15 @@ describe('updateMetrics', () => {
 
   it('deve agregar topRejectionReasons por frequência', () => {
     const root = setup()
-    updateMetrics(makeRejectedTrace('Build falhou'), root)
-    updateMetrics(makeRejectedTrace('Build falhou'), root)
-    updateMetrics(makeRejectedTrace('Build falhou'), root)
-    updateMetrics(makeRejectedTrace('Score baixo'), root)
+    updateMetrics(makeRejectedTrace('Build failed'), root)
+    updateMetrics(makeRejectedTrace('Build failed'), root)
+    updateMetrics(makeRejectedTrace('Build failed'), root)
+    updateMetrics(makeRejectedTrace('Low score'), root)
 
     const m = getMetrics(root)
-    expect(m.topRejectionReasons[0].reason).toBe('Build falhou')
+    expect(m.topRejectionReasons[0].reason).toBe('Build failed')
     expect(m.topRejectionReasons[0].count).toBe(3)
-    expect(m.topRejectionReasons[1].reason).toBe('Score baixo')
+    expect(m.topRejectionReasons[1].reason).toBe('Low score')
     expect(m.topRejectionReasons[1].count).toBe(1)
   })
 

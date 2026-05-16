@@ -76,8 +76,8 @@ function buildErrors(parsed: TestParseResult): HarnessError[] {
       type: 'logic' as const,
       severity: 'high' as const,
       fixable: false,
-      message: `Test falhou: ${name}`,
-      humanMessage: `Test falhou: ${name}`,
+      message: `Test failed: ${name}`,
+      humanMessage: `Test failed: ${name}`,
       file: '',
     }))
   }
@@ -87,8 +87,8 @@ function buildErrors(parsed: TestParseResult): HarnessError[] {
     type: 'logic',
     severity: 'high',
     fixable: false,
-    message: parsed.failed > 0 ? `${parsed.failed} test(s) falharam` : 'Test runner falhou',
-    humanMessage: parsed.failed > 0 ? `${parsed.failed} test(s) falharam` : 'Test runner falhou',
+    message: parsed.failed > 0 ? `${parsed.failed} test(s) failed` : 'Test runner failed',
+    humanMessage: parsed.failed > 0 ? `${parsed.failed} test(s) failed` : 'Test runner failed',
     file: '',
   }]
 }

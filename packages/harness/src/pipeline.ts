@@ -66,7 +66,7 @@ export async function runPipeline(
       errors: [],
       warnings: [{
         layer: 'rules',
-        message: 'Nenhum build, test ou lint configurado; Evidence Score nao reflete qualidade real do codigo. Configure comandos no projeto para validacao efetiva.',
+        message: 'No build, test or lint configured; Evidence Score does not reflect real code quality. Configure commands in the project for effective validation.',
         file: '',
       }],
       duration: 0,

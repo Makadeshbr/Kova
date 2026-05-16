@@ -54,16 +54,16 @@ export class CodeApplicationEngine {
     try {
       const patches = writeChanges(reviewedChanges, this.projectRoot, taskId)
       
-      // Tenta fazer o commit no git
+      // Try to make the commit in git
       const git = new GitHelper(this.projectRoot)
       const gitHash = git.commit(reviewedChanges.map(c => c.path), taskId, harnessScore)
 
-      // Retorna o hash do git com prefixo se tiver sucesso, senao fallback pro checkpoint kova
+      // Return the git hash with prefix on success, otherwise fallback to the kova checkpoint
       const checkpointId = gitHash ? `git:${gitHash}` : `kova:${meta.id}`
       return { applied: true, patches, checkpointId }
     } catch (error) {
       restoreCheckpoint(meta.id, this.projectRoot)
-      throw new Error(`Apply falhou e foi revertido: ${error instanceof Error ? error.message : String(error)}`)
+      throw new Error(`Apply failed and was rolled back: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

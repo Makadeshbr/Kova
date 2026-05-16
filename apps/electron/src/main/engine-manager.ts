@@ -701,7 +701,7 @@ export class EngineManager {
       try { await this.engine.forceApply(selection) } catch (err) { this.onChatResponse?.(formatProviderError(err)) }
       return
     }
-    this.onChatResponse?.('Nenhuma mudanca pendente para aplicar.')
+    this.onChatResponse?.('No pending changes to apply.')
   }
 }
 

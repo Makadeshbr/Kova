@@ -72,4 +72,31 @@ describe('diff review', () => {
     expect(decision.rejectedPaths).toEqual(['src/a.ts'])
     expect(decision.hunks.length).toBeGreaterThan(0)
   })
+
+  /**
+   * LCS backtracking invariant: at substitution points (mismatched lines with
+   * tied LCS scores), the diff sequence must be [add, remove] in forward order,
+   * NOT [remove, add]. This ensures the visible hunk order matches what users
+   * expect during partial review (the new line appears at its intended position;
+   * a preserved-old line shifts below it).
+   *
+   * Regression guard for the `>` vs `>=` tie-breaker in diffLines(). Reverting
+   * to `>=` would re-introduce the bug fixed in the diff-review hunk merge.
+   */
+  it('LCS tie-breaker invariant: add hunk precedes remove hunk at substitutions', () => {
+    const change: FileChange = {
+      path: 'src/sub.ts',
+      type: 'modify',
+      before: 'a\nold\nb',
+      diff: 'a\nNEW\nb',
+    }
+    const hunks = buildReviewHunks(change)
+    const addRemove = hunks.filter(h => h.type === 'add' || h.type === 'remove')
+    expect(addRemove).toHaveLength(2)
+    // First operation in the hunk sequence at the substitution point must be the ADD.
+    expect(addRemove[0].type).toBe('add')
+    expect(addRemove[0].afterLines).toEqual(['NEW'])
+    expect(addRemove[1].type).toBe('remove')
+    expect(addRemove[1].beforeLines).toEqual(['old'])
+  })
 })

@@ -82,13 +82,13 @@ function hasCriticalError(layer: LayerResult): boolean {
 export function getHardFailReason(result: HarnessResult): string {
   for (const layer of result.layers) {
     if (layer.passed) continue
-    if (layer.name === 'build') return 'Build falhou — código não compila'
+    if (layer.name === 'build') return 'Build failed — code does not compile'
     if (layer.name === 'security' && hasCriticalError(layer)) {
       const n = layer.errors.filter(e => e.severity === 'critical').length
-      return `${n} secret(s) exposta(s) detectada(s)`
+      return `${n} secret(s) exposed`
     }
     if (layer.name === 'rules' && hasCriticalError(layer)) {
-      return 'Violação crítica de arquitetura detectada'
+      return 'Critical architecture violation detected'
     }
   }
   return 'Hard fail detectado'
