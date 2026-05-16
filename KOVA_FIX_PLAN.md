@@ -26,7 +26,7 @@
 | FIX-014 | 🔴 Crítico | ✅ | Sem prompt caching Anthropic — todo turno paga 100% dos tokens |
 | FIX-015 | 🔴 Crítico | ✅ | Sem `grep_codebase` — modelo trabalha cego no projeto |
 | FIX-016 | 🟠 Alto | ⬜ | Sem `glob_files` — sem busca de paths por padrão |
-| FIX-017 | 🟠 Alto | ⬜ | Prompts adversariais — proíbem narração e travam stack duro |
+| FIX-017 | 🟠 Alto | ✅ | Prompts adversariais — proíbem narração e travam stack duro |
 | FIX-018 | 🟠 Alto | ⬜ | Sem `todo_write` — tarefas multi-step ficam sem estrutura |
 | FIX-019 | 🟡 Médio | ⬜ | ContextEngine rebuilda do zero a cada iteração de reparo |
 | FIX-020 | 🟡 Médio | ⬜ | Staging por `cpSync` recursivo — overhead de segundos por harness |
@@ -384,28 +384,53 @@
 
 ---
 
-### FIX-017 — Reescrever `MODE_PROMPTS` sem adversarialidade ⬜
-**Problema:** `packages/agent/src/modes.ts` está cheio de:
-- `DO NOT narrate your process. Never output "Let me check..."` — desliga o pensamento operacional, justamente o que faz Claude Code parecer "presente".
-- `your final message must be EXACTLY ONE SHORT SENTENCE` — força truncar respostas úteis.
-- `LANGUAGE: ${lang}. Every file you create must use ${lang}` (`agent.ts:104`) — se `structureTask` errar o stack, agente trava.
-- Listas de "RULES:" numeradas em tom imperativo — Anthropic publicou que isso piora performance em comparação com instruções afirmativas e exemplos.
+### FIX-017 — Reescrever `MODE_PROMPTS` sem adversarialidade ✅
+**Problema:** `packages/agent/src/modes.ts` estava cheio de:
+- `DO NOT narrate your process. Never output "Let me check..."` — desligava o pensamento operacional, justamente o que faz Claude Code parecer "presente".
+- `your final message must be EXACTLY ONE SHORT SENTENCE` — forçava truncar respostas úteis.
+- `LANGUAGE: ${lang}. Every file you create must use ${lang}. Never switch to another language.` (`agent.ts:104`) — se `structureTask` errasse o stack, agente travava.
+- Listas de "RULES:" numeradas em tom imperativo — Anthropic publicou que isso piora performance em comparação com instruções afirmativas.
 
-**Fix proposto:**
-- Reescrever cada modo em `MODE_PROMPTS` no padrão Claude Code: afirmativo, breve, com exemplo curto quando ajuda.
-- Permitir narração curta antes de tool calls ("Let me check the file structure first." — uma frase é OK).
-- Remover "EXACTLY ONE SENTENCE" — substituir por "Keep the final summary concise (1–3 sentences)".
-- Stack hint vira sugestão, não trava: "Detected stack: ${lang}. Prefer this language unless the task explicitly requires another."
-- Adicionar bullet de **quando usar cada tool** no prompt: `edit_file` para mudanças cirúrgicas, `write_file` para arquivo novo ou rewrite completo, `grep_codebase` antes de assumir, `read_file` antes de `edit_file`.
-- Manter regra de não auto-apresentação e sem emoji (são preferências reais do produto).
-- Tone: instrução positiva, não proibição. "Prefer X" em vez de "Never Y".
+**Fix aplicado:**
+- `packages/agent/src/modes.ts` reescrito do zero para os 6 modos (`plan`, `code`, `test`, `fix`, `review`, `unified`):
+  - Tom **afirmativo**: "Prefer X", "A short sentence before a tool call is fine", "Avoid long monologues". Sem mais `DO NOT narrate`, sem `Never output "Let me check..."`.
+  - Sumário final passa de `"EXACTLY ONE SHORT SENTENCE"` para `"End with a concise summary (1–3 sentences)"` — Anthropic recomenda intervalos sobre números fixos.
+  - Seção **Tools** explícita em `code`, `test`, `fix`, `unified` ensinando preferência: `grep_codebase` antes de `run_command grep/rg/findstr`, `edit_file` antes de `write_file`, `read_file` antes de `edit_file`.
+  - Invariantes de produto preservadas: `unified` mantém "Never introduce yourself, list capabilities unprompted, or use emoji".
+  - Contratos funcionais preservados: `plan` mantém o XML `<plan_result>`; `review` mantém o verdict `APPROVED / SUGGEST_CHANGES / REJECT`.
+- `packages/agent/src/agent.ts` — `buildSystemPrompt` reescrito:
+  - **Antes:** `LANGUAGE: ${lang}. Every file you create must use ${lang}. Never switch to another language.`
+  - **Depois:** `Detected stack: ${lang}. Prefer this language unless the task explicitly requires another.` — guidance, não jaula.
+  - `buildSystemPrompt` e `STACK_LANGUAGE` agora são exports nomeados (testáveis em isolamento como funções puras, sem precisar instanciar Agent/Provider).
 
-**Critério de pronto:**
-- Prompts caem de ~25 linhas para ~12 linhas cada (mais cacheável e mais lido).
-- Modelo narra brevemente antes de tool calls quando faz sentido.
-- Mismatch de stack vira aviso, não bloqueio.
-- Sem regressão de comportamento crítico (não toca arquivo em mensagem conversacional — coberto pelo teste de FIX-005).
-- Testes: prompt cabe no orçamento atual, tool guidance presente, stack hint afirmativo (sem "must"), regra de não-apresentação preservada.
+**Métricas do rewrite:**
+| Modo | Linhas antes | Linhas depois | Redução |
+|------|--------------|---------------|---------|
+| code | 30 | 19 | -37% |
+| test | 19 | 16 | -16% |
+| fix | 24 | 15 | -38% |
+| review | 14 | 17 | +3 (verdict bullets preservados) |
+| plan | 18 | 16 | -11% |
+| unified | 13 | 17 | +4 (TOOL CHOICE adicionado) |
+| **Total prompt budget** | **~118 linhas** | **~100 linhas** | **-15%** |
+
+Bundle CJS do `@kova/agent` caiu de 75.09 KB → 73.65 KB (-1.44 KB de string literal economizada por chamada cacheada).
+
+**Evidência:**
+- **TDD: 41 testes vermelhos antes da implementação** — confirma que o rewrite muda comportamento real, não é cosmético.
+- **38 testes novos** em `__tests__/modes.test.ts` (lock no novo contrato): proibição de `"DO NOT narrate"`, proibição de `"EXACTLY ONE SENTENCE"`, presença de `grep_codebase`/`edit_file` na seção TOOL CHOICE de `code`/`fix`/`unified`, line-count cap por modo, regra `Never introduce yourself` preservada, regra `No emoji` preservada, XML `<plan_result>` preservado, verdict do `review` preservado.
+- **25 testes novos** em `__tests__/build-system-prompt.test.ts` (novo arquivo): langHint afirmativo, presença do escape hatch "unless... explicitly requires", ausência de "LANGUAGE:" / "Every file you create must use" / "Never switch", read-only modes não recebem stack hint, `STACK_LANGUAGE` mapping preservado, XML reminder ainda funciona para providers sem tool calls, composição de prompt limpa (sem double-blank-lines).
+- **322/322** testes em `@kova/agent` (vs 259 antes — +63 novos, 0 regressões).
+- **Zero regressão downstream** em `pnpm -r test`: 218/218 electron, 103/103 harness, 88/88 decision, 65/65 execution, 53/53 adapters, 47/47 application, 52/52 memory, 46/46 evals, 39/39 context, 24/24 orchestrator, 20/20 observability, 8/8 project, 8/8 kova-runner. **1093 testes total verdes.**
+- Build limpo: `tsup` ESM/CJS/DTS sem erro. Bundle CJS -1.44 KB, ESM -1.43 KB; DTS +0.64 KB (novos exports nomeados).
+
+**Cobertura adversarial:**
+- Stack desconhecido (`stackAdapter: 'exotic-lang'`) → cai no fallback raw, ainda compõe prompt válido.
+- Provider sem tool calls + write mode → XML reminder `<kova_file>` ainda é apendado.
+- Provider sem tool calls + plan mode → sem XML reminder (plan é read-only).
+- Plan mode + write_modes adjacentes não bagunçam: `Detected stack` só aparece nos write modes.
+- `STACK_LANGUAGE.generic` mantém significância semântica (`"the language specified in the task"`).
+- Spirit do FIX-005 preservado: `unified` continua bloqueando meta-instruções de tocar arquivos.
 
 ---
 

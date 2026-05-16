@@ -9,7 +9,7 @@ const AGENT_TIMEOUT_MS = 8 * 60 * 1000 // 8 min — generous for slow local mode
 
 const WRITE_MODES = new Set<AgentMode>(['code', 'test', 'fix', 'unified'])
 
-const STACK_LANGUAGE: Record<string, string> = {
+export const STACK_LANGUAGE: Record<string, string> = {
   go: 'Go', python: 'Python', typescript: 'TypeScript',
   javascript: 'JavaScript', rust: 'Rust', java: 'Java',
   kotlin: 'Kotlin', ruby: 'Ruby', php: 'PHP',
@@ -98,10 +98,13 @@ export class Agent {
   }
 }
 
-function buildSystemPrompt(mode: AgentMode, task: TaskDefinition, supportsToolCalls: boolean): string {
+export function buildSystemPrompt(mode: AgentMode, task: TaskDefinition, supportsToolCalls: boolean): string {
   const lang = STACK_LANGUAGE[task.stackAdapter] ?? task.stackAdapter
+  // FIX-017: affirmative stack hint. The old "LANGUAGE: X. Every file must use
+  // X. Never switch." trapped the agent when structureTask mis-detected the
+  // stack. New phrasing is guidance with an explicit escape hatch.
   const langHint = mode !== 'plan' && mode !== 'review'
-    ? `LANGUAGE: ${lang}. Every file you create must use ${lang}. Never switch to another language.`
+    ? `Detected stack: ${lang}. Prefer this language unless the task explicitly requires another.`
     : ''
 
   // For models that don't reliably use tool calls, reinforce the XML fallback format
