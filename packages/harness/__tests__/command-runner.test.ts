@@ -94,6 +94,119 @@ describe('safe command normalization', () => {
   })
 })
 
+// ─── manifest validation: bootstrap subcommands + staged buffer awareness ───
+
+describe('manifest validation — bootstrap subcommands (init/new) bypass the check', () => {
+  it('allows "npm init -y" in an empty folder (creates the manifest itself)', () => {
+    const result = normalizeCommandInvocation({ command: 'npm init -y', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "pnpm init" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'pnpm init', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "yarn init -y" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'yarn init -y', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "bun init -y" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'bun init -y', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "cargo init" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'cargo init', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "cargo new my-app" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'cargo new my-app', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "go mod init example.com/app" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'go mod init example.com/app', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('allows "dotnet new console" in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'dotnet new console', workspaceRoot: root, kind: 'run' })
+    expect(result.ok).toBe(true)
+  })
+
+  it('still blocks "npm test" without a manifest', () => {
+    const result = normalizeCommandInvocation({ command: 'npm test', workspaceRoot: root, kind: 'test' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('manifest/build file')
+  })
+
+  it('still blocks "go test ./..." without a manifest', () => {
+    const result = normalizeCommandInvocation({ command: 'go test ./...', workspaceRoot: root, kind: 'test' })
+    expect(result.ok).toBe(false)
+  })
+})
+
+describe('manifest validation — additionalManifests (staged buffer aware)', () => {
+  it('passes when the agent staged package.json in the same iteration (additionalManifests)', () => {
+    const result = normalizeCommandInvocation({
+      command: 'npm install',
+      workspaceRoot: root,
+      kind: 'run',
+      additionalManifests: ['package.json'],
+    })
+    expect(result.ok).toBe(true)
+  })
+
+  it('passes when staged manifest is in the resolved cwd subfolder', () => {
+    mkdirSync(join(root, 'app'))
+    const result = normalizeCommandInvocation({
+      command: 'cd app && pnpm test',
+      workspaceRoot: root,
+      kind: 'test',
+      additionalManifests: ['app/package.json'],
+    })
+    expect(result.ok).toBe(true)
+  })
+
+  it('also accepts go.mod / Cargo.toml / pyproject.toml from staged buffer', () => {
+    expect(normalizeCommandInvocation({
+      command: 'go test ./...', workspaceRoot: root, kind: 'test',
+      additionalManifests: ['go.mod'],
+    }).ok).toBe(true)
+    expect(normalizeCommandInvocation({
+      command: 'cargo test', workspaceRoot: root, kind: 'test',
+      additionalManifests: ['Cargo.toml'],
+    }).ok).toBe(true)
+    expect(normalizeCommandInvocation({
+      command: 'poetry install', workspaceRoot: root, kind: 'run',
+      additionalManifests: ['pyproject.toml'],
+    }).ok).toBe(true)
+  })
+
+  it('still blocks when additionalManifests is empty and disk has no manifest', () => {
+    const result = normalizeCommandInvocation({
+      command: 'npm test',
+      workspaceRoot: root,
+      kind: 'test',
+      additionalManifests: [],
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  it('still blocks when additionalManifests lists irrelevant files', () => {
+    const result = normalizeCommandInvocation({
+      command: 'npm test',
+      workspaceRoot: root,
+      kind: 'test',
+      additionalManifests: ['src/index.ts', 'README.md'],
+    })
+    expect(result.ok).toBe(false)
+  })
+})
+
 describe('structured command execution', () => {
   it('captures stdout and stderr separately', async () => {
     const result = await runCommandInvocation({

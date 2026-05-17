@@ -42,6 +42,8 @@ function localServerUrl(s: KovaSettings): string | null {
 const EMPTY_USAGE: SessionUsage = {
   contextTokens: 0,
   completionTokens: 0,
+  cacheReadInputTokens: 0,
+  cacheCreationInputTokens: 0,
   contextFiles: [],
   selectedFiles: [],
   blockedFiles: [],
@@ -49,6 +51,10 @@ const EMPTY_USAGE: SessionUsage = {
   contextWarnings: [],
   learningsCount: 0,
   maxContextTokens: null,
+}
+
+function normalizeSessionUsage(usage: Partial<SessionUsage> | null | undefined): SessionUsage {
+  return { ...EMPTY_USAGE, ...(usage ?? {}) }
 }
 
 export function App(): React.ReactElement {
@@ -215,7 +221,7 @@ export function App(): React.ReactElement {
       executionState: session.executionState || null,
       executionEvents: session.events || [],
       isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false, openFilePath: null,
-      sessionUsage: session.sessionUsage || EMPTY_USAGE,
+      sessionUsage: normalizeSessionUsage(session.sessionUsage),
     }))
   }, [])
 
@@ -329,7 +335,6 @@ export function App(): React.ReactElement {
       <React.Suspense fallback={null}>
         <TerminalPanel
           sessions={state.terminalSessions}
-          commandEvents={state.executionEvents}
           pendingApproval={state.pendingApproval}
           onClose={(id) => setState(prev => ({ ...prev, terminalSessions: prev.terminalSessions.filter(s => s.id !== id) }))}
           onApprove={(id, approved) => {

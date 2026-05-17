@@ -430,6 +430,40 @@ describe('run_command', () => {
       expect(readFileSync(join(projectRoot, 'existing.js'), 'utf-8')).toBe('console.log("original")')
     })
   })
+
+  describe('manifest validation honours staged buffer (FIX-CMD)', () => {
+    it('allows pnpm/npm/go commands after the agent staged the manifest in the same iteration', async () => {
+      // No package.json on disk. Agent stages it, then runs `pnpm install`
+      // (or any manifest-required command) — must pass validation.
+      await executor.execute('write_file', { path: 'package.json', content: '{"name":"x","version":"1.0.0"}' })
+      // We don't actually want to run pnpm here (would hit network), so use
+      // `npm --version` which goes through the same validator. The manifest
+      // check should NOT block it now that staged package.json is visible.
+      const result = await executor.execute('run_command', { command: 'npm --version' })
+      expect(result).not.toMatch(/^Blocked:/)
+      // Disk remains clean per the staging invariant.
+      expect(existsSync(join(projectRoot, 'package.json'))).toBe(false)
+    })
+
+    it('still blocks manifest-required commands when nothing is staged and disk is empty', async () => {
+      const result = await executor.execute('run_command', { command: 'pnpm test', kind: 'test' })
+      expect(result).toMatch(/^Blocked:/)
+      expect(result).toMatch(/manifest\/build file/)
+    })
+
+    it('allows bootstrap subcommands (npm init, cargo new, go mod init) without any manifest', async () => {
+      // We only assert the validator does NOT block — we never execute these
+      // for real here (would scaffold a project on disk).
+      const npmInit = await executor.execute('run_command', { command: 'npm init -y' })
+      const cargoNew = await executor.execute('run_command', { command: 'cargo new myapp' })
+      const goModInit = await executor.execute('run_command', { command: 'go mod init example.com/app' })
+      // None of these should match the manifest-block message — they may fail
+      // for other reasons (binary missing) but not for manifest validation.
+      expect(npmInit).not.toMatch(/manifest\/build file/)
+      expect(cargoNew).not.toMatch(/manifest\/build file/)
+      expect(goModInit).not.toMatch(/manifest\/build file/)
+    })
+  })
 })
 
 // ─── run_command streaming output (FIX-003) ───────────────────────────────────

@@ -708,7 +708,17 @@ export class ToolExecutor {
     if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
     const permission = this.requirePermission('bash', command)
     if (permission) return permission
-    const normalized = normalizeCommandInvocation({ command, workspaceRoot: this.projectRoot, cwd, kind })
+    // FIX-CMD: the staged buffer holds writes that will be on disk by the time
+    // runCommandInvocation actually executes (withStagedFilesOnDisk runs first).
+    // Pass them to the validator so `pnpm install` after `write_file package.json`
+    // in the same iteration passes the manifest check.
+    const stagedManifests = [...this.buffer.entries()]
+      .filter(([, content]) => content !== null)
+      .map(([path]) => path)
+    const normalized = normalizeCommandInvocation({
+      command, workspaceRoot: this.projectRoot, cwd, kind,
+      additionalManifests: stagedManifests,
+    })
     if (!normalized.ok) {
       return `Blocked: ${normalized.reason}${normalized.hint ? ` ${normalized.hint}` : ''}`
     }

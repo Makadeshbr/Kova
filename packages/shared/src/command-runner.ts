@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { basename, resolve, relative } from 'node:path'
+import { basename, resolve, relative, sep } from 'node:path'
 
 export type ValidationCommandKind = 'test' | 'build' | 'lint' | 'typecheck' | 'format' | 'security' | 'run'
 
@@ -20,6 +20,14 @@ export interface CommandInvocationInput {
   signal?: AbortSignal
   /** Called for each output line in real-time (requires spawn mode). */
   onLine?: (line: string, stream: 'stdout' | 'stderr') => void
+  /**
+   * Workspace-relative paths the caller knows will exist by the time the
+   * command runs (e.g. files staged in @kova/agent's ToolExecutor buffer that
+   * will be materialised by `withStagedFilesOnDisk` before exec). Used by the
+   * manifest validator so the agent can write `package.json` and run
+   * `pnpm install` in the same iteration.
+   */
+  additionalManifests?: string[]
 }
 
 export interface NormalizedCommandInvocation {
@@ -149,7 +157,9 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
     return block('chmod blocked. Only chmod +x is allowed.')
   }
 
-  const manifestError = validateManifestRequirement(executable, parsed.tokens, cwd)
+  const manifestError = validateManifestRequirement(
+    executable, parsed.tokens, cwd, workspaceRoot, input.additionalManifests,
+  )
   if (manifestError) return block(manifestError)
 
   return {
@@ -474,10 +484,66 @@ function isAllowedGitCommand(tokens: string[]): boolean {
   return ['diff', 'status', 'log', 'branch', 'show'].includes((tokens[1] ?? '').toLowerCase())
 }
 
-function validateManifestRequirement(executable: string, tokens: string[], cwd: string): string | null {
+/**
+ * Subcommands that BOOTSTRAP a project — they CREATE the manifest, so
+ * requiring it upfront makes no sense. Mapped per executable so we don't
+ * accidentally allow e.g. `pnpm install` (which legitimately needs a manifest).
+ */
+const BOOTSTRAP_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  npm:     new Set(['init', 'create']),
+  npx:     new Set(['create-react-app', 'create-next-app', 'create-vite']),
+  pnpm:    new Set(['init', 'create']),
+  yarn:    new Set(['init', 'create']),
+  bun:     new Set(['init', 'create']),
+  cargo:   new Set(['init', 'new']),
+  go:      new Set(['mod']),       // `go mod init <name>`
+  dotnet:  new Set(['new']),
+  composer:new Set(['init', 'create-project']),
+  bundle:  new Set(['init', 'gem']),
+  poetry:  new Set(['init', 'new']),
+  uv:      new Set(['init']),
+  flutter: new Set(['create']),
+  mvn:     new Set(['archetype:generate']),
+  gradle:  new Set(['init']),
+}
+
+function isBootstrapInvocation(executable: string, tokens: string[]): boolean {
+  const subs = BOOTSTRAP_SUBCOMMANDS[executable]
+  if (!subs) return false
+  const sub = (tokens[1] ?? '').toLowerCase()
+  if (!subs.has(sub)) return false
+  // `go mod init` requires a second-level subcommand check — `go mod tidy`
+  // operates on an EXISTING manifest, so don't bypass for that case.
+  if (executable === 'go' && sub === 'mod') {
+    return (tokens[2] ?? '').toLowerCase() === 'init'
+  }
+  return true
+}
+
+function validateManifestRequirement(
+  executable: string,
+  tokens: string[],
+  cwd: string,
+  workspaceRoot: string,
+  additionalManifests: string[] | undefined,
+): string | null {
   if (!MANIFEST_REQUIRED.has(executable)) return null
+  if (isBootstrapInvocation(executable, tokens)) return null
   if (executable === 'dotnet' && tokens.some(token => token.endsWith('.csproj') || token.endsWith('.sln'))) return null
   if (PROJECT_MANIFESTS.some(file => existsSync(resolve(cwd, file)))) return null
+  // Honour staged manifests: ToolExecutor passes paths it's about to
+  // materialise via withStagedFilesOnDisk. A path qualifies when its basename
+  // is a known manifest AND it lives at, or below, the resolved cwd.
+  if (additionalManifests && additionalManifests.length > 0) {
+    const cwdResolved = resolve(cwd)
+    for (const rel of additionalManifests) {
+      if (!PROJECT_MANIFESTS.includes(basename(rel))) continue
+      const abs = resolve(workspaceRoot, rel)
+      if (abs === cwdResolved + sep + basename(rel) || abs.startsWith(cwdResolved + sep)) {
+        return null
+      }
+    }
+  }
   return `Validation blocked: no recognized manifest/build file was found in ${cwd}. Run from the correct project/module root or create the required manifest before validation.`
 }
 
