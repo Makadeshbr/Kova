@@ -292,6 +292,9 @@ importers:
       '@kova/decision':
         specifier: workspace:*
         version: link:../decision
+      '@kova/harness':
+        specifier: workspace:*
+        version: link:../harness
       '@kova/observability':
         specifier: workspace:*
         version: link:../observability

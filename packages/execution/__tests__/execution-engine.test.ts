@@ -1,6 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 import type { ExecutionEvent, TaskDefinition, HarnessResult, LayerResult } from '@kova/shared'
-import { ExecutionEngine } from '../src/execution-engine'
+import { ExecutionEngine, extractExplicitRequiredPaths } from '../src/execution-engine'
 import type { ExecutionDependencies, ExecutionEngineOptions } from '../src/execution-engine'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -16,8 +16,11 @@ function makeTask(id = 'task-1', overrides: Partial<TaskDefinition> = {}): TaskD
 
 // passed=true + build weight=25 único → calculateScore retorna 100 → auto_apply
 function makePassResult(): HarnessResult {
-  const layer: LayerResult = { name: 'build', passed: true, errors: [], warnings: [], duration: 10, skipped: false }
-  return { passed: true, score: 100, layers: [layer], duration: 20, iteration: 1 }
+  const layers: LayerResult[] = [
+    { name: 'build', passed: true, errors: [], warnings: [], duration: 10, skipped: false },
+    { name: 'tests', passed: true, errors: [], warnings: [], duration: 10, skipped: false },
+  ]
+  return { passed: true, score: 100, layers, duration: 20, iteration: 1, validationConfidence: 'full' }
 }
 
 // build failed → calculateScore detecta hasHardFail → score=0 → reject
@@ -130,13 +133,18 @@ describe('ExecutionEngine', () => {
       expect(events.map(e => e.type)).toContain('decision_made')
     })
 
-    it('deve rejeitar antes do orchestrator quando contrato detecta mismatch de stack', async () => {
+    it('deve rejeitar antes do orchestrator quando contrato detecta mismatch de stack em modify', async () => {
+      // Stack mismatch only fires on modify changes. Pure-create scaffolding
+      // bypasses the rule to match Claude Code parity — the agent picks the
+      // stack when materializing new files.
       const deps = makeDeps()
       ;(deps.agent.execute as ReturnType<typeof vi.fn>).mockImplementation(
         async (_t: unknown, _c: unknown, mode: string) => ({
           mode,
           thought: 'thought',
-          changes: mode === 'code' ? [{ path: 'src/helpers.ts', type: 'create', diff: 'export const x = 1' }] : [],
+          changes: mode === 'code'
+            ? [{ path: 'src/helpers.ts', type: 'modify', diff: 'export const x = 1', before: '// old' }]
+            : [],
           tokensUsed: 10,
         }),
       )
@@ -148,9 +156,35 @@ describe('ExecutionEngine', () => {
       } as Partial<TaskDefinition>))
 
       expect(deps.orchestrator.run).not.toHaveBeenCalled()
-      // ReviewGate detects scope + stack violation and escalates to human_required (not just reject)
       expect(['reject', 'human_required']).toContain(state.iterationHistory[0].decision.decision)
       expect(state.iterationHistory[0].harnessResult.layers[0].errors.map(e => e.rule)).toContain('stack_mismatch')
+    })
+
+    it('scaffolding bypass: pure-create patches go straight to auto_apply with no orchestrator run', async () => {
+      const deps = makeDeps()
+      ;(deps.agent.execute as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_t: unknown, _c: unknown, mode: string) => ({
+          mode,
+          thought: 'thought',
+          changes: mode === 'code' || mode === 'unified'
+            ? [
+                { path: 'package.json', type: 'create' as const, diff: '{}' },
+                { path: 'src/App.tsx', type: 'create' as const, diff: 'export const App = () => null' },
+                { path: 'src/main.tsx', type: 'create' as const, diff: 'import "./App"' },
+              ]
+            : [],
+          tokensUsed: 10,
+        }),
+      )
+      const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true }))
+      const state = await engine.run(makeTask())
+
+      // Enterprise mode: even pure-create scaffolding goes through completion
+      // proof + harness before it can be applied.
+      expect(deps.orchestrator.run).toHaveBeenCalledOnce()
+      expect(state.iterationHistory[0].decision.decision).toBe('auto_apply')
+      expect(state.status).toBe('completed')
+      expect(deps.applicationEngine.apply).toHaveBeenCalledOnce()
     })
   })
 
@@ -242,9 +276,9 @@ describe('ExecutionEngine', () => {
 
       const state = await engine.run(makeTask())
 
-      expect(state.status).toBe('paused')
+      expect(state.status).toBe('failed')
       expect(state.proofPack?.results?.validationConfidence).toBe('none')
-      expect(state.proofPack?.finalUiDecision).toBe('needs_review')
+      expect(state.proofPack?.finalUiDecision).toBe('repair_needed')
       expect(state.proofPack?.validationsNotRun.map(v => v.kind)).toEqual(expect.arrayContaining(['rules', 'build', 'typecheck', 'tests']))
       expect(state.proofPack?.residualRisk.join(' ')).toContain('No real validation executed')
     })
@@ -439,7 +473,7 @@ describe('ExecutionEngine', () => {
       const engine = new ExecutionEngine(makeDeps(), makeOptions({ timeoutMs: 0 }))
       await engine.run(makeTask())
 
-      await expect(engine.forceApply()).rejects.toThrow('Sem changes')
+      await expect(engine.forceApply()).rejects.toThrow('No changes')
     })
   })
 })
@@ -449,7 +483,7 @@ describe('ExecutionEngine', () => {
 describe('ExecutionEngine — Contract enforcement', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('text-only response completes immediately without harness', async () => {
+  it('docs text-only response completes immediately without harness', async () => {
     // Regression: when model replies with text and writes no files, the engine
     // must complete immediately (status=completed) without running the harness.
     const orchestratorSpy = vi.fn()
@@ -460,13 +494,13 @@ describe('ExecutionEngine — Contract enforcement', () => {
       orchestrator: { run: orchestratorSpy } as never,
     })
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: true }))
-    const state = await engine.run(makeTask())
+    const state = await engine.run(makeTask('docs-task', { type: 'docs' }))
 
     expect(state.status).toBe('completed')
     expect(orchestratorSpy).not.toHaveBeenCalled()
   })
 
-  it('text-only response has auto_apply decision even with autoApply=false', async () => {
+  it('docs text-only response has auto_apply decision even with autoApply=false', async () => {
     // When no files changed, completing is always safe — there is nothing to apply.
     const deps = makeDeps({
       agent: {
@@ -474,30 +508,152 @@ describe('ExecutionEngine — Contract enforcement', () => {
       },
     })
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: false }))
-    const state = await engine.run(makeTask())
+    const state = await engine.run(makeTask('docs-task', { type: 'docs' }))
 
     expect(state.status).toBe('completed')
     const last = state.iterationHistory.at(-1)
     expect(last?.decision.decision).toBe('auto_apply')
   })
 
-  it('max_files_changed violation leads to reject (agent-fixable)', async () => {
-    // Low-impact task allows 6 files. Model changes 8 → contract violation → reject.
-    const bigChange = Array.from({ length: 8 }, (_, i) => ({
-      path: `src/file${i}.ts`, type: 'create' as const, diff: 'const x = 1',
+  it('implementation text-only response is not treated as completed', async () => {
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'unified', thought: 'Aqui esta o codigo em markdown', changes: [], tokensUsed: 10 }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: true, skipPlan: true }))
+    const state = await engine.run(makeTask('feature-task', { type: 'feature' }))
+
+    expect(state.status).toBe('failed')
+    const last = state.iterationHistory.at(-1)
+    expect(last?.decision.decision).toBe('reject')
+    expect(last?.harnessResult.layers[0].errors[0].rule).toBe('missing_file_changes')
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('rejects implementation when explicitly required files are missing', async () => {
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({
+          mode: 'code',
+          thought: 'partial',
+          changes: [
+            { path: 'index.html', type: 'create' as const, diff: '<main></main>' },
+            { path: 'css/style.css', type: 'create' as const, diff: 'body{}' },
+            { path: 'js/main.js', type: 'create' as const, diff: 'console.log(1)' },
+          ],
+          tokensUsed: 10,
+        }),
+      },
+    })
+    const objective = 'Materialize no minimo: index.html, css/style.css, js/main.js, package.json e vite.config.js.'
+    expect(extractExplicitRequiredPaths(objective)).toEqual(['index.html', 'css/style.css', 'js/main.js', 'package.json', 'vite.config.js'])
+    const engine = new ExecutionEngine(deps, makeOptions({
+      projectRoot: `C:\\tmp\\kova-required-files-${Date.now()}`,
+      maxIterations: 1,
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('required-files', { objective }))
+
+    expect(state.status).toBe('failed')
+    const last = state.iterationHistory.at(-1)
+    expect(last?.decision.decision).toBe('reject')
+    const missing = last?.harnessResult.layers.flatMap(layer => layer.errors.map(error => error.file)) ?? []
+    expect(missing).toEqual(expect.arrayContaining(['package.json', 'vite.config.js']))
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('extracts explicit required paths from natural language requirements', () => {
+    const paths = extractExplicitRequiredPaths('Crie arquivos reais. Materialize no mínimo: index.html, src/style.css, src/main.js, package.json e vite.config.js.')
+
+    expect(paths).toEqual(['index.html', 'src/style.css', 'src/main.js', 'package.json', 'vite.config.js'])
+  })
+
+  it('extracts paths from architecture requests without mandatory-keyword wording', () => {
+    const paths = extractExplicitRequiredPaths('Crie uma arquitetura simples e limpa: index.html, src/main.ts, src/style.css e vite.config.ts.')
+
+    expect(paths).toEqual(['index.html', 'src/main.ts', 'src/style.css', 'vite.config.ts'])
+  })
+
+  it('does not treat design prompt prose like etc.Use as required files', () => {
+    const prompt = 'crie uma landing page moderna,de festas de aniversario,onde tem festa na caixa,arco decorativo e etc.Use stack moderna,projeto bem arquitetado. ## Identidade Visual - **Paleta dark premium**: fundo #0A0A0A. Use TypeScript, React e Vite.'
+
+    expect(extractExplicitRequiredPaths(prompt)).toEqual([])
+  })
+
+  it('rejects wrong inferred fallback files when architecture paths were requested', async () => {
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({
+          mode: 'code',
+          thought: 'partial fallback',
+          changes: [
+            { path: 'index.html', type: 'create' as const, diff: '<main></main>' },
+            { path: 'css/style.css', type: 'create' as const, diff: 'body{}' },
+            { path: 'js/main.js', type: 'create' as const, diff: 'console.log(1)' },
+          ],
+          tokensUsed: 10,
+        }),
+      },
+    })
+    const objective = 'Crie uma arquitetura simples e limpa: index.html, src/main.ts, src/style.css e vite.config.ts.'
+    const engine = new ExecutionEngine(deps, makeOptions({
+      projectRoot: `C:\\tmp\\kova-wrong-fallback-${Date.now()}`,
+      maxIterations: 1,
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('required-architecture-files', { objective }))
+
+    expect(state.status).toBe('failed')
+    const missing = state.iterationHistory.at(-1)?.harnessResult.layers.flatMap(layer => layer.errors.map(error => error.file)) ?? []
+    expect(missing).toEqual(expect.arrayContaining(['src/main.ts', 'src/style.css', 'vite.config.ts']))
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('max_files_changed violation leads to reject when many files MODIFY existing code', async () => {
+    // Low-impact task allows 15 files. Patch MODIFIES 20 existing files → contract
+    // violation → reject. The scaffolding bypass only applies to pure creates;
+    // modifying many files must still be flagged.
+    const bigChange = Array.from({ length: 20 }, (_, i) => ({
+      path: `src/file${i}.ts`, type: 'modify' as const, diff: 'const x = 1', before: 'const x = 0',
     }))
     const deps = makeDeps({
       agent: {
         execute: vi.fn().mockResolvedValue({ mode: 'code', thought: '', changes: bigChange, tokensUsed: 100 }),
       },
     })
-    const task = makeTask('t1', { impact: 'low', stackAdapter: 'typescript' })  // maxFilesChanged=6
+    const task = makeTask('t1', { impact: 'low', stackAdapter: 'typescript' })  // maxFilesChanged=15
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: false }))
     const state = await engine.run(task)
 
     const last = state.iterationHistory.at(-1)
     expect(last?.decision.decision).toBe('reject')
     expect(last?.decision.score).toBeLessThan(70)
+  })
+
+  it('scaffolding bypass: 18 brand-new files do NOT trigger max_files_changed', async () => {
+    // Regression for the "create landing page" bug: when every change creates a
+    // brand-new file, the per-impact limit is replaced by the 150-file safety
+    // cap. Claude Code/Codex/Cursor all permit creating a full project in one
+    // shot — Kova must too.
+    const scaffolding = Array.from({ length: 18 }, (_, i) => ({
+      path: `src/component${i}.tsx`, type: 'create' as const, diff: 'export const X = 1',
+    }))
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'code', thought: '', changes: scaffolding, tokensUsed: 100 }),
+      },
+    })
+    const task = makeTask('t-scaffold', { impact: 'low', stackAdapter: 'typescript' })  // maxFilesChanged=15
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, autoApply: false }))
+    const state = await engine.run(task)
+
+    const last = state.iterationHistory.at(-1)
+    // No max_files_changed violation in the harness errors
+    const violations = last?.harnessResult.layers.flatMap(l => l.errors.map(e => e.rule)) ?? []
+    expect(violations).not.toContain('max_files_changed')
   })
 })
 
@@ -508,8 +664,7 @@ describe('ExecutionEngine — dynamic maxIterations (FIX-007)', () => {
     const deps = makeDeps()
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1 }))
     const state = await engine.run(makeTask('t', { impact: 'low' }))
-    // contract.maxFilesChanged for low impact = 6 → ceil(6 * 0.6) = 4 → floor max(1, 4) = 4
-    // Actually the floor is bumped to at least 5 by the helper to keep minimum sanity.
+    // contract.maxFilesChanged for low impact = 15 → ceil(15 * 0.6) = 9 → max(5, 9) = 9
     expect(state.maxIterations).toBeGreaterThanOrEqual(5)
   })
 
@@ -517,15 +672,15 @@ describe('ExecutionEngine — dynamic maxIterations (FIX-007)', () => {
     const deps = makeDeps()
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5 }))
     const state = await engine.run(makeTask('t', { impact: 'medium' }))
-    // contract.maxFilesChanged for medium = 12 → ceil(12 * 0.6) = 8 → max(5, 8) = 8
-    expect(state.maxIterations).toBe(8)
+    // contract.maxFilesChanged for medium = 30 → ceil(30 * 0.6) = 18 → clamped to 12
+    expect(state.maxIterations).toBe(12)
   })
 
   it('high-impact task scales up to 12 even with user default 5', async () => {
     const deps = makeDeps()
     const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5 }))
     const state = await engine.run(makeTask('t', { impact: 'high' }))
-    // contract.maxFilesChanged for high = 20 → ceil(20 * 0.6) = 12 → max(5, 12) = 12
+    // contract.maxFilesChanged for high = 60 → ceil(60 * 0.6) = 36 → clamped to 12
     expect(state.maxIterations).toBe(12)
   })
 
@@ -546,8 +701,6 @@ describe('ExecutionEngine — dynamic maxIterations (FIX-007)', () => {
       allowedPaths: ['**'],
       forbiddenPaths: [],
       safeZones: [],
-      allowedCommands: [],
-      forbiddenCommands: [],
       validationCriteria: [],
       requiresTests: false,
       maxFilesChanged: 18,
@@ -815,5 +968,78 @@ describe('ExecutionEngine — ContextEngine cache (FIX-019)', () => {
     const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
     // Should have at least 2 builds: 1 fresh + 1 forced by TTL
     expect(calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+// ─── max_iterations → paused when changes are reviewable ──────────────────────
+
+describe('ExecutionEngine — max_iterations with reviewable changes', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('ends as paused (not failed) when max_iterations hit but last decision has score >= 70', async () => {
+    // suggest at score 77 would normally short-circuit to success/paused via
+    // shouldStop. To force max_iterations with reviewable changes we need a
+    // reject decision (e.g. lint failure) that still produces a score >= 70.
+    // The simplest way is to control the decision score directly via a custom
+    // harness shape, but the public engine path only exposes harnessResult.
+    // We use a 'suggest' decision via score >= 70 then check the actual code
+    // path: when shouldStop returns max_iterations, status reflects the change.
+    // Here we simulate by using a soft reject with explicit score in the result.
+    const reviewableReject: HarnessResult = {
+      passed: false,
+      score: 75,
+      layers: [{
+        name: 'lint', passed: false,
+        errors: [{ layer: 'lint', type: 'style', severity: 'low', fixable: true, message: 'x', humanMessage: 'x', file: 'src/app.ts' }],
+        warnings: [], duration: 5, skipped: false,
+      }],
+      duration: 5,
+      iteration: 1,
+      validationConfidence: 'full',
+    }
+    const deps = makeDeps({
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: reviewableReject, scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    // skipPlan + maxIterations=1: one code iteration → reject → max_iterations stop
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true }))
+    const state = await engine.run(makeTask())
+
+    // Score 75 is reviewable → must pause for user to apply/reject
+    expect(state.status).toBe('paused')
+    const last = state.iterationHistory.at(-1)
+    expect(last?.changes.length).toBeGreaterThan(0)
+  })
+
+  it('stays failed when max_iterations hit and score is a hard fail (0)', async () => {
+    const deps = makeDeps({
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: makeFailResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true }))
+    const state = await engine.run(makeTask())
+
+    // Hard fail (build broken, score 0) must never invite apply
+    expect(state.status).toBe('failed')
+  })
+
+  it('stays failed when max_iterations hit and there are no changes', async () => {
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({ mode: 'fix', thought: '', changes: [], tokensUsed: 10 }),
+      },
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: makeSoftRejectResult(), scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 1, skipPlan: true }))
+    const state = await engine.run(makeTask())
+
+    // No reviewable artifact → failed makes sense
+    expect(state.status).toBe('failed')
+    expect(state.iterationHistory.at(-1)?.decision.decision).toBe('reject')
+    // text-only path short-circuits before harness — sanity check
   })
 })

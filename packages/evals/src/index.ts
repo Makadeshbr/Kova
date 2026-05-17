@@ -8,6 +8,8 @@ export { MockAgentProvider } from './mock-provider'
 export type { MockTurn } from './mock-provider'
 export { ALL_LIVE_CASES, buildDeps, setupProjectForCase, mocksForCase } from './live-cases'
 export { DOGFOOD_CASES, setupDogfoodProject } from './dogfood-cases'
+export { GOLDEN_SCENARIOS } from './golden-scenarios'
+export type { GoldenScenario, GoldenScenarioExpectation } from './golden-scenarios'
 export { readDogfoodProviderConfig, runRealDogfood } from './real-dogfood'
 export { validateDogfoodOutput } from './dogfood-validator'
 export type { DogfoodExpectations, DogfoodViolation, DogfoodViolationRule, FileChangeRef } from './dogfood-validator'
@@ -59,13 +61,16 @@ export function runStaticEval(testCase: EvalCase): EvalResult {
 // ─── Eval cases ───────────────────────────────────────────────────────────────
 
 export const BASE_EVALS: EvalCase[] = [
-  // STACK — agent must not create files in wrong language
+  // STACK — agent must not MODIFY existing files in the wrong language.
+  // Scaffolding (pure-create) bypasses stack_mismatch by design: the agent
+  // materializes a new project and picks the stack as it goes. See live-cases
+  // EVAL_NO_VALIDATION_SUGGESTS for the Claude Code parity expectation.
   {
     id: 'go-api-does-not-create-typescript',
-    description: 'Go API task — creating helpers.ts is a critical violation.',
+    description: 'Go API task — modifying helpers.ts in an existing Go project is a violation.',
     category: 'stack',
-    task: task({ objective: 'create a REST API in Go', affectedFiles: ['main.go'], stackAdapter: 'go' }),
-    changes: [{ path: 'helpers.ts', type: 'create', diff: 'export const helper = 1' }],
+    task: task({ objective: 'extend a REST API in Go', affectedFiles: ['main.go'], stackAdapter: 'go' }),
+    changes: [{ path: 'helpers.ts', type: 'modify', diff: 'export const helper = 1', before: '// old' }],
     mustPass: false,
     expectedRules: ['stack_mismatch'],
   },
@@ -83,21 +88,22 @@ export const BASE_EVALS: EvalCase[] = [
   },
   {
     id: 'typescript-project-no-python',
-    description: 'TypeScript project — creating .py files is a violation.',
+    description: 'TypeScript project — modifying a .py file is a violation.',
     category: 'stack',
-    task: task({ objective: 'add a feature', affectedFiles: [], stackAdapter: 'typescript' }),
-    changes: [{ path: 'scripts/migrate.py', type: 'create', diff: 'print("hello")' }],
+    task: task({ objective: 'extend the existing project', affectedFiles: ['src/index.ts'], stackAdapter: 'typescript' }),
+    changes: [{ path: 'scripts/migrate.py', type: 'modify', diff: 'print("hello")', before: '# old' }],
     mustPass: false,
     expectedRules: ['stack_mismatch'],
   },
 
-  // SCOPE — agent must not touch files outside the contract scope
+  // SCOPE — agent must not touch files outside the contract scope.
+  // Pure-create scaffolding bypasses allowed_paths (no existing scope to respect).
   {
     id: 'react-component-stays-in-frontend',
-    description: 'Frontend task — creating backend server files is a scope violation.',
+    description: 'Frontend task — modifying backend server files is a scope violation.',
     category: 'scope',
-    task: task({ objective: 'create a login component', affectedFiles: ['src/components/Login.tsx'], stackAdapter: 'typescript' }),
-    changes: [{ path: 'server/index.ts', type: 'create', diff: 'export const api = 1' }],
+    task: task({ objective: 'change a login component', affectedFiles: ['src/components/Login.tsx'], stackAdapter: 'typescript' }),
+    changes: [{ path: 'server/index.ts', type: 'modify', diff: 'export const api = 1', before: '// old' }],
     mustPass: false,
     expectedRules: ['allowed_paths'],
   },

@@ -1,32 +1,42 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import type { ExecutionEvent } from '../types'
+import { serverActivityLabel } from '../lib/task-activity'
 
-// ─── Ícones Premium ───────────────────────────────────────────────────────────
-const Spinner = () => (
+// ─── Status icons (kept minimal — colour conveys the kind) ───────────────────
+const Spinner = (): React.ReactElement => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin" style={{ opacity: 0.8 }}>
     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
   </svg>
 )
-const IconCheck = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-const IconError = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-const IconRead = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-const IconFolder = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-const IconWrite = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-const IconTerminal = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-const IconShield = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+const IconCheck = (): React.ReactElement => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+const IconError = (): React.ReactElement => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
 
-interface Activity {
+export interface Activity {
   id: string
-  type: 'read' | 'write' | 'command' | 'validate' | 'list'
+  type: 'read' | 'write' | 'command' | 'validate' | 'list' | 'server'
   status: 'pending' | 'success' | 'error'
   label: string
   detail?: string
   commandId?: string
+  /** Workspace-relative path or directory associated with this activity (for tooltips). */
+  fullPath?: string
+  /** Line count for write activities, surfaced inline (CC-style). */
+  lineCount?: number
   /** FIX-003: run_command output streamed live, capped to last N lines. */
   lines?: string[]
 }
 
 const MAX_STREAMED_LINES = 40
+// Cap shown activities at a generous number so even long sessions stay
+// fully visible (CC shows every tool call inline). Older entries collapse
+// behind a "show all" toggle if the count blows past this floor.
+const VISIBLE_ACTIVITY_COUNT = 20
+
+function shortCommand(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length <= 96) return trimmed
+  return `${trimmed.slice(0, 93)}...`
+}
 
 export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
   const activities = useMemo(() => {
@@ -39,22 +49,44 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
       if (e.type === 'tool_call') {
         const rawPath = String(e.toolInput?.path ?? e.toolInput?.command ?? e.message ?? '')
         const shortPath = rawPath.split(/[/\\]/).pop() || rawPath
-        
+
         let type: Activity['type'] = 'read'
         let label = ''
-        
-        if (e.toolName === 'write_file' || e.toolName === 'delete_file') {
-          type = 'write'; label = e.toolName === 'write_file' ? `Writing ${shortPath}` : `Deleting ${shortPath}`
+        let lineCount: number | undefined
+
+        if (e.toolName === 'write_file') {
+          type = 'write'
+          // Count lines of the content being written so we can echo "(N lines)"
+          // like CC does — surfaces patch size at a glance.
+          const content = String(e.toolInput?.content ?? '')
+          lineCount = content ? content.split('\n').length : undefined
+          label = `Writing ${shortPath}`
+        } else if (e.toolName === 'edit_file') {
+          type = 'write'; label = `Editing ${shortPath}`
+        } else if (e.toolName === 'delete_file') {
+          type = 'write'; label = `Deleting ${shortPath}`
         } else if (e.toolName === 'run_command') {
-          type = 'command'; label = `Running command`
+          type = 'command'; label = `$ ${shortCommand(rawPath)}`
+        } else if (e.toolName === 'run_interactive_command') {
+          type = 'command'; label = `↗ ${shortCommand(rawPath)} (terminal)`
         } else if (e.toolName === 'list_files') {
-          type = 'list'; label = `Reading directory`
-        } else {
+          type = 'list'; label = `Listing ${shortPath || '.'}`
+        } else if (e.toolName === 'grep_codebase') {
+          const pattern = String(e.toolInput?.pattern ?? '')
+          type = 'read'; label = `Searching: ${pattern.slice(0, 60)}`
+        } else if (e.toolName === 'glob_files') {
+          const pattern = String(e.toolInput?.pattern ?? '')
+          type = 'list'; label = `Globbing ${pattern}`
+        } else if (e.toolName === 'read_file') {
           type = 'read'; label = `Reading ${shortPath}`
+        } else if (e.toolName === 'todo_write') {
+          type = 'list'; label = 'Updating todo list'
+        } else {
+          type = 'read'; label = `${e.toolName ?? 'tool'} ${shortPath}`.trim()
         }
-        
-        list.push({ id: `tool_${i}`, type, status: 'pending', label, detail: rawPath })
-      } 
+
+        list.push({ id: `tool_${i}`, type, status: 'pending', label, detail: rawPath, fullPath: rawPath, lineCount })
+      }
       else if (e.type === 'tool_result') {
         // Find the last pending activity and mark it as success
         const lastPending = [...list].reverse().find(a => a.status === 'pending' && a.type !== 'validate')
@@ -69,6 +101,17 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
           ? `${m.resolvedProvider}/${m.resolvedModel ?? '?'} (fallback)`
           : `${m.resolvedProvider}/${m.resolvedModel ?? 'auto'}`
         list.push({ id: `pss_${i}`, type: 'read', status: m.fallback ? 'error' : 'success', label, detail: m.fallbackReason })
+      }
+      else if (e.type === 'server_starting' || e.type === 'server_ready' || e.type === 'server_failed') {
+        const label = serverActivityLabel(e) ?? e.message ?? 'Server session'
+        list.push({
+          id: `srv_${i}`,
+          type: 'server',
+          status: e.type === 'server_starting' ? 'pending' : e.type === 'server_ready' ? 'success' : 'error',
+          label,
+          detail: e.serverSession?.diagnostics?.join(', ') || e.message,
+          fullPath: e.serverSession?.cwd,
+        })
       }
       else if (e.type === 'validation_started') {
         list.push({ id: `val_${i}`, type: 'validate', status: 'pending', label: 'Running harness validation' })
@@ -120,102 +163,148 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
     return list
   }, [events])
 
+  return <ActivityFeedView activities={activities} />
+}
+
+function ActivityFeedView({ activities }: { activities: Activity[] }): React.ReactElement | null {
+  const [expanded, setExpanded] = useState(false)
+
   if (!activities.length) return null
 
-  // Mostramos os 5 últimos para não poluir a tela
-  const visible = activities.slice(-5)
+  const totalCount = activities.length
+  const overflow = Math.max(0, totalCount - VISIBLE_ACTIVITY_COUNT)
+  const visible = expanded || overflow === 0 ? activities : activities.slice(-VISIBLE_ACTIVITY_COUNT)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, marginBottom: 12 }}>
-      {activities.length > 5 && (
-        <div style={{ fontSize: 11, color: 'var(--text-3)', paddingLeft: 8, marginBottom: 2 }}>
-          ... {activities.length - 5} previous steps
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8, marginBottom: 12 }}>
+      {overflow > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded(prev => !prev)}
+          style={{
+            alignSelf: 'flex-start',
+            fontSize: 11,
+            color: 'var(--text-3)',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            padding: '2px 10px',
+            borderRadius: 12,
+            cursor: 'pointer',
+            marginBottom: 4,
+          }}
+        >
+          {expanded ? `Hide ${overflow} earlier step${overflow === 1 ? '' : 's'}` : `Show ${overflow} earlier step${overflow === 1 ? '' : 's'}`}
+        </button>
       )}
-      
-      {visible.map((act, i) => {
-        const isPending = act.status === 'pending'
-        const isLast = i === visible.length - 1
-        
-        let icon = <IconRead />
-        let color = 'var(--text-2)'
-        let bg = 'transparent'
 
-        if (act.status === 'error') { icon = <IconError />; color = 'var(--red)' }
-        else if (act.type === 'write') { icon = <IconWrite />; color = 'var(--teal)' }
-        else if (act.type === 'command') { icon = <IconTerminal />; color = 'var(--yellow)' }
-        else if (act.type === 'validate') { icon = <IconShield />; color = 'var(--amber)' }
-        else if (act.type === 'list') { icon = <IconFolder />; color = 'var(--text-2)' }
-        else { icon = <IconRead />; color = 'var(--purple)' }
+      {visible.map((act) => <ActivityRow key={act.id} activity={act} />)}
+    </div>
+  )
+}
 
-        return (
-          <div key={act.id} className="animate-fade-in" style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '6px 10px',
-            borderRadius: '6px',
-            background: isPending ? 'var(--bg-active, rgba(255,255,255,0.04))' : 'transparent',
-            border: isPending ? `1px solid rgba(255,255,255,0.05)` : '1px solid transparent',
-            transition: 'all 0.2s ease',
-            opacity: isPending ? 1 : 0.7
+function ActivityRow({ activity: act }: { activity: Activity }): React.ReactElement {
+  const isPending = act.status === 'pending'
+  const isError = act.status === 'error'
+
+  let color = 'var(--text-2)'
+  if (isError) color = 'var(--red)'
+  else if (act.type === 'write') color = 'var(--teal)'
+  else if (act.type === 'command') color = 'var(--yellow)'
+  else if (act.type === 'validate') color = 'var(--amber)'
+  else if (act.type === 'server') color = 'var(--cyan)'
+  else if (act.type === 'list') color = 'var(--text-2)'
+  else color = 'var(--purple)'
+
+  return (
+    <div className="animate-fade-in" style={{
+      display: 'flex', alignItems: 'flex-start', gap: 10,
+      padding: '5px 10px',
+      borderRadius: 6,
+      background: isPending ? 'var(--bg-active, rgba(255,255,255,0.04))' : 'transparent',
+      border: isPending ? '1px solid rgba(255,255,255,0.06)' : '1px solid transparent',
+      transition: 'all 0.2s ease',
+      opacity: isPending ? 1 : isError ? 0.95 : 0.78,
+    }}>
+      <div style={{
+        width: 16, marginTop: 2,
+        display: 'flex', justifyContent: 'center',
+        color: isPending ? color : isError ? 'var(--red)' : 'var(--teal)',
+        flexShrink: 0,
+      }}>
+        {isPending ? <Spinner /> : isError ? <IconError /> : <IconCheck />}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+        <div
+          title={act.fullPath ?? undefined}
+          style={{
+            color: isPending ? 'var(--text-1)' : isError ? 'var(--red)' : 'var(--text-2)',
+            fontSize: 12.5, fontWeight: isPending ? 600 : 500,
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            fontFamily: act.type === 'command' ? 'var(--font-mono)' : 'inherit',
+          }}
+        >
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
+            {act.label}
+          </span>
+          {act.lineCount !== undefined && act.lineCount > 0 && (
+            <span style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>
+              · {act.lineCount} line{act.lineCount === 1 ? '' : 's'}
+            </span>
+          )}
+          {!isPending && act.type === 'validate' && act.detail && (
+            <span style={{
+              fontSize: 10,
+              padding: '1px 6px',
+              background: isError ? 'var(--red-dim)' : 'var(--teal-dim)',
+              color: isError ? 'var(--red)' : 'var(--teal)',
+              borderRadius: 4,
+            }}>
+              {act.detail}
+            </span>
+          )}
+        </div>
+
+        {!isPending && act.detail && act.type === 'command' && !act.lines && (
+          <pre style={{
+            margin: '4px 0 0',
+            maxHeight: 90,
+            overflow: 'hidden',
+            color: isError ? 'var(--red)' : 'var(--text-3)',
+            fontSize: 10,
+            whiteSpace: 'pre-wrap',
+            fontFamily: 'var(--font-mono)',
           }}>
-            <div style={{ width: 16, display: 'flex', justifyContent: 'center', color: isPending || act.status === 'error' ? color : 'var(--teal)' }}>
-              {isPending ? <Spinner /> : act.status === 'error' ? <IconError /> : <IconCheck />}
-            </div>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-              <div style={{ 
-                color: isPending ? 'var(--text-1)' : 'var(--text-2)', 
-                fontSize: 12, fontWeight: isPending ? 600 : 500,
-                display: 'flex', alignItems: 'center', gap: 8
-              }}>
-                {act.label}
-                {!isPending && act.detail && act.type === 'validate' && (
-                  <span style={{
-                    fontSize: 10,
-                    padding: '1px 6px',
-                    background: act.status === 'error' ? 'var(--red-dim)' : 'var(--teal-dim)',
-                    color: act.status === 'error' ? 'var(--red)' : 'var(--teal)',
-                    borderRadius: 4
-                  }}>
-                    {act.detail}
-                  </span>
-                )}
-              </div>
-              {!isPending && act.detail && act.type === 'command' && !act.lines && (
-                <pre style={{
-                  margin: '4px 0 0',
-                  maxHeight: 90,
-                  overflow: 'hidden',
-                  color: act.status === 'error' ? 'var(--red)' : 'var(--text-3)',
-                  fontSize: 10,
-                  whiteSpace: 'pre-wrap',
-                  fontFamily: 'var(--font-mono)'
-                }}>
-                  {act.detail.slice(0, 700)}
-                </pre>
-              )}
-              {act.lines && act.lines.length > 0 && act.type === 'command' && (
-                <pre style={{
-                  margin: '4px 0 0',
-                  maxHeight: isPending ? 180 : 140,
-                  overflow: 'auto',
-                  color: act.status === 'error' ? 'var(--red)' : 'var(--text-3)',
-                  fontSize: 10,
-                  lineHeight: 1.45,
-                  whiteSpace: 'pre-wrap',
-                  fontFamily: 'var(--font-mono)',
-                  background: 'rgba(0,0,0,0.25)',
-                  padding: '6px 8px',
-                  borderRadius: 4,
-                  border: '1px solid rgba(255,255,255,0.04)',
-                }}>
-                  {act.lines.join('\n')}
-                </pre>
-              )}
-            </div>
-          </div>
-        )
-      })}
+            {act.detail.slice(0, 700)}
+          </pre>
+        )}
+
+        {act.lines && act.lines.length > 0 && act.type === 'command' && (
+          <pre style={{
+            margin: '4px 0 0',
+            maxHeight: isPending ? 220 : 160,
+            overflow: 'auto',
+            color: isError ? 'var(--red)' : 'var(--text-2)',
+            fontSize: 10.5,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            fontFamily: 'var(--font-mono)',
+            background: 'rgba(0,0,0,0.32)',
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: '1px solid var(--border)',
+          }}>
+            {act.lines.join('\n')}
+            {isPending && (
+              <span style={{
+                display: 'inline-block', width: 6, height: '1em', marginLeft: 2,
+                background: 'var(--yellow)', verticalAlign: 'text-bottom',
+                animation: 'pulse-amber 0.9s infinite',
+              }} />
+            )}
+          </pre>
+        )}
+      </div>
     </div>
   )
 }

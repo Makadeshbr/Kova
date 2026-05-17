@@ -17,12 +17,19 @@ afterEach(() => {
   rmSync(projectRoot, { recursive: true, force: true })
 })
 
-// ─── INVARIANT: disk never touched ───────────────────────────────────────────
+// ─── INVARIANT: existing files stay buffered, brand-new files stream ─────────
+//
+// Claude Code parity: brand-new files are written to disk immediately so the
+// user sees them appearing live. Existing files stay buffered — their on-disk
+// content is only changed by ApplicationEngine.apply at the end of the
+// iteration. This protects the user's working state during modify-heavy tasks
+// while giving the responsive UX of streaming creates for scaffolding.
 
-describe('staging invariant — disk is never written during agent loop', () => {
-  it('write_file does not create file on disk', async () => {
+describe('streaming creates / buffered modifies', () => {
+  it('write_file streams brand-new files to disk immediately (CC parity)', async () => {
     await executor.execute('write_file', { path: 'main.go', content: 'package main\n' })
-    expect(existsSync(join(projectRoot, 'main.go'))).toBe(false)
+    expect(existsSync(join(projectRoot, 'main.go'))).toBe(true)
+    expect(readFileSync(join(projectRoot, 'main.go'), 'utf-8')).toBe('package main\n')
   })
 
   it('write_file does not modify existing file on disk', async () => {
@@ -31,13 +38,21 @@ describe('staging invariant — disk is never written during agent loop', () => 
     expect(readFileSync(join(projectRoot, 'main.go'), 'utf-8')).toBe('original')
   })
 
-  it('delete_file does not remove file from disk', async () => {
+  it('delete_file does not remove pre-existing file from disk', async () => {
     writeFileSync(join(projectRoot, 'old.go'), 'content', 'utf-8')
     await executor.execute('delete_file', { path: 'old.go' })
     expect(existsSync(join(projectRoot, 'old.go'))).toBe(true)
   })
 
-  it('multiple writes leave disk completely untouched', async () => {
+  it('delete_file removes a streamed-create file (transient lifecycle)', async () => {
+    await executor.execute('write_file', { path: 'tmp.ts', content: 'export {}' })
+    expect(existsSync(join(projectRoot, 'tmp.ts'))).toBe(true)
+    await executor.execute('delete_file', { path: 'tmp.ts' })
+    expect(existsSync(join(projectRoot, 'tmp.ts'))).toBe(false)
+    expect(executor.getChanges()).toHaveLength(0)
+  })
+
+  it('mixed batch: existing files stay buffered, new files stream', async () => {
     writeFileSync(join(projectRoot, 'a.ts'), 'original a', 'utf-8')
     writeFileSync(join(projectRoot, 'b.ts'), 'original b', 'utf-8')
 
@@ -47,7 +62,7 @@ describe('staging invariant — disk is never written during agent loop', () => 
 
     expect(readFileSync(join(projectRoot, 'a.ts'), 'utf-8')).toBe('original a')
     expect(readFileSync(join(projectRoot, 'b.ts'), 'utf-8')).toBe('original b')
-    expect(existsSync(join(projectRoot, 'c.ts'))).toBe(false)
+    expect(readFileSync(join(projectRoot, 'c.ts'), 'utf-8')).toBe('brand new')
   })
 })
 
@@ -131,16 +146,18 @@ describe('write_file', () => {
 // ─── rollbackWrites ───────────────────────────────────────────────────────────
 
 describe('rollbackWrites', () => {
-  it('limpa buffer e changes — disk jamais foi alterado então já está correto', async () => {
+  it('limpa buffer e changes — existing files were never touched on disk', async () => {
     writeFileSync(join(projectRoot, 'main.go'), 'before', 'utf-8')
     await executor.execute('write_file', { path: 'main.go', content: 'after' })
     await executor.execute('write_file', { path: 'new.go', content: 'package main\n' })
 
     executor.rollbackWrites()
 
-    // Disk state is the original (never changed), without any restoration needed
+    // Modify target stays at its original content
     expect(readFileSync(join(projectRoot, 'main.go'), 'utf-8')).toBe('before')
-    expect(existsSync(join(projectRoot, 'new.go'))).toBe(false)
+    // Streamed creates are intentionally LEFT on disk so the user can inspect
+    // what was produced before the rollback (Claude Code parity).
+    expect(existsSync(join(projectRoot, 'new.go'))).toBe(true)
     expect(executor.getChanges()).toHaveLength(0)
   })
 
@@ -157,16 +174,20 @@ describe('rollbackWrites', () => {
     }).not.toThrow()
   })
 
-  it('após rollback, nova sessão começa limpa', async () => {
+  it('após rollback, nova sessão vê arquivo streamed como modify', async () => {
+    // Streamed creates survive rollback (CC parity), so on a fresh executor
+    // the same path is now a pre-existing file → second write is a modify.
     await executor.execute('write_file', { path: 'a.ts', content: 'v1' })
     executor.rollbackWrites()
-    await executor.execute('write_file', { path: 'a.ts', content: 'v2' })
 
-    const changes = executor.getChanges()
+    const fresh = new ToolExecutor(projectRoot)
+    await fresh.execute('write_file', { path: 'a.ts', content: 'v2' })
+
+    const changes = fresh.getChanges()
     expect(changes).toHaveLength(1)
     expect(changes[0].diff).toBe('v2')
-    // type should be 'create' because disk never had a.ts (we never wrote to disk)
-    expect(changes[0].type).toBe('create')
+    expect(changes[0].type).toBe('modify')
+    expect(changes[0].before).toBe('v1')
   })
 })
 
@@ -586,6 +607,58 @@ describe('permission policy', () => {
     expect(result).toContain('Interactive command completed successfully')
     expect(result).toContain('node --version')
     expect(result).toContain('Kova wants to run this command')
+  })
+
+  it('routes long-running run_command through a persistent interactive session', async () => {
+    let capturedCommand = ''
+    const guarded = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      async (command) => {
+        capturedCommand = command
+        return { exitCode: 0, output: 'Local: http://localhost:5173', sessionId: 'term-1', persistent: true }
+      },
+    )
+
+    const result = await guarded.execute('run_command', { command: 'npm run dev' })
+
+    expect(capturedCommand).toBe('npm run dev')
+    expect(result).toContain('Persistent command started')
+    expect(result).toContain('term-1')
+  })
+
+  it('starts persistent server with buffered modifies as preview changes', async () => {
+    writeFileSync(join(projectRoot, 'src.ts'), 'old', 'utf-8')
+    let capturedOptions: { previewChanges?: unknown[] } | undefined
+    const guarded = new ToolExecutor(
+      projectRoot,
+      undefined,
+      undefined,
+      async (_command, _cwd, _reason, options) => {
+        capturedOptions = options
+        return {
+          exitCode: 0,
+          output: 'Local: http://localhost:5173',
+          sessionId: 'term-preview',
+          persistent: true,
+          ready: true,
+          url: 'http://localhost:5173',
+          port: 5173,
+        }
+      },
+    )
+
+    await guarded.execute('write_file', { path: 'src.ts', content: 'new' })
+    const result = await guarded.execute('run_command', { command: 'npm run dev' })
+
+    expect(result).toContain('Persistent command started')
+    expect(result).toContain('term-preview')
+    expect(result).toContain('ready=true')
+    expect(result).toContain('http://localhost:5173')
+    expect(capturedOptions?.previewChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src.ts', type: 'modify', diff: 'new' }),
+    ]))
   })
 })
 

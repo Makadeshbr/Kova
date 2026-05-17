@@ -48,22 +48,23 @@ export function createExecutionContract(task: TaskDefinition): ExecutionContract
     allowedPaths: inferAllowedPaths(task),
     forbiddenPaths: DEFAULT_FORBIDDEN_PATHS,
     safeZones: DEFAULT_SAFE_ZONES,
-    allowedCommands: [],
-    forbiddenCommands: [
-      // Destructive / irreversible
-      'rm -rf', 'git reset --hard', 'git clean -f', 'git push', 'sudo ',
-      'curl |', 'wget |', 'powershell iex',
-      // Dependency installation — requires explicit user approval; agent must not add deps silently
-      'npm install', 'npm i ', 'pnpm add', 'pnpm install', 'yarn add',
-      'pip install', 'pip3 install', 'poetry add', 'cargo add',
-      'go get', 'gem install', 'composer require', 'apt-get install', 'brew install',
-    ],
     validationCriteria: task.validationCriteria,
     requiresTests: task.type === 'feature' || task.type === 'bugfix' || task.type === 'refactor',
-    maxFilesChanged: task.impact === 'high' ? 20 : task.impact === 'medium' ? 12 : 6,
+    // Raised from 6/12/20 → 15/30/60. The previous limits were too tight for
+    // modern refactors (often 10+ files) and made it impossible to scaffold a
+    // new project in one shot. The pure-create exception in
+    // validateContractChanges() further lifts the limit for scaffolding tasks
+    // where the agent creates entirely new files.
+    maxFilesChanged: task.impact === 'high' ? 60 : task.impact === 'medium' ? 30 : 15,
     createdAt: new Date().toISOString(),
   }
 }
+
+// Hard cap on scaffolding tasks. Pure-create patches bypass the per-impact
+// maxFilesChanged limit, but we still protect against runaway agents emitting
+// hundreds of files. 150 fits "create a full SaaS skeleton" but flags clearly
+// broken behaviour.
+const SCAFFOLDING_HARD_CAP = 150
 
 export function validateContractChanges(
   changes: FileChange[],
@@ -71,9 +72,53 @@ export function validateContractChanges(
 ): ContractViolation[] {
   const violations: ContractViolation[] = []
 
+  // Scaffolding mode: when every change creates a brand-new file (no
+  // overwrite, no modify, no delete), this is a "new project from scratch"
+  // task. Claude Code, Codex and Cursor all permit creating an entire app in
+  // one shot with no contract gate — Kova matches that UX in scaffolding mode.
+  // We keep ONLY the non-negotiable safety checks:
+  //   - forbidden paths (node_modules, dist, .git): never write here
+  //   - credential paths (.env): never write secrets to disk
+  //   - hard cap of SCAFFOLDING_HARD_CAP files: protects against runaway agents
+  // Everything else (max_files_changed, safe_zones, stack_mismatch,
+  // allowed_paths) is dropped because the agent is materializing a project
+  // that doesn't exist yet — there is no "existing scope" to honour.
+  const isScaffolding = changes.length > 0 && changes.every(c => c.type === 'create' && !c.before)
+
+  if (isScaffolding) {
+    if (changes.length > SCAFFOLDING_HARD_CAP) {
+      violations.push({
+        severity: 'high',
+        message: `Scaffolding patch criaria ${changes.length} arquivos; limite de segurança é ${SCAFFOLDING_HARD_CAP}`,
+        file: '',
+        rule: 'max_files_changed',
+      })
+    }
+    for (const change of changes) {
+      if (matchesAny(change.path, contract.forbiddenPaths)) {
+        violations.push({
+          severity: 'critical',
+          message: `${change.path} is in a forbidden path`,
+          file: change.path,
+          rule: 'forbidden_path',
+        })
+        continue
+      }
+      if (matchesAny(change.path, CREDENTIAL_PATHS)) {
+        violations.push({
+          severity: 'high',
+          message: `${change.path} is a credentials file — creation and modification require human review`,
+          file: change.path,
+          rule: 'safe_zone',
+        })
+      }
+    }
+    return violations
+  }
+
   if (changes.length > contract.maxFilesChanged) {
     violations.push({
-      severity: 'high',  // 'medium' was too lenient — harness was passing with this violation
+      severity: 'high',
       message: `Patch altera ${changes.length} arquivos; contrato permite ${contract.maxFilesChanged}`,
       file: '',
       rule: 'max_files_changed',

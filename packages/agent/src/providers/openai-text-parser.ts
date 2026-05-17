@@ -42,7 +42,17 @@ export function extractChangesFromXml(text: string): FileChange[] {
   return changes
 }
 
-export function extractChangesFromText(text: string): FileChange[] {
+export interface TextChangeExtractionOptions {
+  /**
+   * Bare code blocks without filenames are useful for weak local models, but
+   * too risky after the model already used tools. In that case we only accept
+   * explicitly labelled file blocks.
+   */
+  includeBareBlocks?: boolean
+}
+
+export function extractChangesFromText(text: string, options: TextChangeExtractionOptions = {}): FileChange[] {
+  const includeBareBlocks = options.includeBareBlocks ?? true
   const byPath = new Map<string, string>()
 
   // Pattern 1: [FILE: path] or [FILE: path]\n...\n[/FILE]
@@ -68,6 +78,21 @@ export function extractChangesFromText(text: string): FileChange[] {
   }
   if (byPath.size > 0) return toFileChanges(byPath)
 
+  // Pattern 3b: plain filename line before a fenced block.
+  // Local models often answer:
+  //
+  // index.html
+  // ```html
+  // ...
+  // ```
+  //
+  // The previous parser missed this, so partial tool use could leave the most
+  // important files stranded as markdown in the final response.
+  for (const m of text.matchAll(/(?:^|\n)([\w./\\-]+\.\w+)\s*\n\s*```[\w#+.-]*\n([\s\S]*?)```/g)) {
+    const p = normalizePath(m[1].trim()); if (p && m[2].trim()) byPath.set(p, m[2].trim())
+  }
+  if (byPath.size > 0) return toFileChanges(byPath)
+
   // Pattern 4: ## heading before code block (common in local model output)
   for (const m of text.matchAll(/^#{1,3}\s+([\w./\\-]+\.\w+)\s*\n```[\w]*\n([\s\S]*?)```/gm)) {
     const p = normalizePath(m[1].trim()); if (p && m[2].trim()) byPath.set(p, m[2].trim())
@@ -82,7 +107,7 @@ export function extractChangesFromText(text: string): FileChange[] {
 
   // Pattern 6: Language inference — bare code blocks without names (last resort for local models)
   // Only applies when there are ≤4 code blocks to avoid false positives
-  const bareBlocks = [...text.matchAll(/```(\w+)\n([\s\S]{20,}?)```/g)]
+  const bareBlocks = includeBareBlocks ? [...text.matchAll(/```(\w+)\n([\s\S]{20,}?)```/g)] : []
   if (bareBlocks.length > 0 && bareBlocks.length <= 4) {
     const usedNames = new Set<string>()
     for (const m of bareBlocks) {

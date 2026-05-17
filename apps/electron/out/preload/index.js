@@ -2,7 +2,7 @@
 const electron = require("electron");
 const kovaAPI = {
   openFolder: () => electron.ipcRenderer.invoke("kova:open-folder"),
-  sendMessage: (message, history, params) => electron.ipcRenderer.invoke("kova:send-message", message, history, params),
+  sendMessage: (message, history, params, attachments) => electron.ipcRenderer.invoke("kova:send-message", message, history, params, attachments),
   detectModel: (url) => electron.ipcRenderer.invoke("kova:detect-model", url),
   pause: () => electron.ipcRenderer.invoke("kova:pause"),
   abort: () => electron.ipcRenderer.invoke("kova:abort"),

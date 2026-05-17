@@ -1,10 +1,11 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { TerminalManager } from '../src/main/terminal-manager'
+import { analyzePersistentOutput, TerminalManager } from '../src/main/terminal-manager'
 
 type DataHandler = (data: string) => void
 type ExitHandler = (event: { exitCode: number }) => void
 
 class FakePtyProcess {
+  pid = 1234
   dataHandler: DataHandler | null = null
   exitHandler: ExitHandler | null = null
   write = vi.fn()
@@ -58,6 +59,24 @@ describe('TerminalManager', () => {
     expect(wc.sent.some(item => item.channel === 'kova:interactive-request')).toBe(false)
   })
 
+  it('permite aliases .cmd do Windows para comandos interativos aprovados', async () => {
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never)
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm.cmd run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    expect(approval?.payload.command).toBe('npm.cmd run dev')
+
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+    processes[0].dataHandler?.('Local: http://localhost:5173/\n')
+
+    await expect(promise).resolves.toMatchObject({ exitCode: 0, persistent: true })
+  })
+
   it('pede aprovacao, abre PTY aprovado e retorna output ao sair', async () => {
     const { pty, processes } = makePty()
     const wc = makeWebContents()
@@ -94,6 +113,32 @@ describe('TerminalManager', () => {
 
     await expect(promise).resolves.toMatchObject({ exitCode: 1 })
     expect(pty.spawn).not.toHaveBeenCalled()
+  })
+
+  it('resolve servidor persistente quando fica pronto e mantem a sessao aberta', async () => {
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never)
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+
+    processes[0].dataHandler?.('VITE ready in 300 ms\nLocal: http://localhost:5173/\n')
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: 0,
+      persistent: true,
+      sessionId: approval!.payload.id,
+      ready: true,
+      url: 'http://localhost:5173/',
+      port: 5173,
+    })
+    expect(wc.sent.map(item => item.channel)).toContain('kova:terminal-started')
+    expect(wc.sent.map(item => item.channel)).not.toContain('kova:terminal-exit')
   })
 
   it('writeInput, resize e kill encaminham para a sessao correta', async () => {
@@ -212,6 +257,29 @@ describe('TerminalManager — workspace path containment', () => {
     const spawnCall = (pty.spawn as ReturnType<typeof vi.fn>).mock.calls[0]
     const opts = spawnCall[2] as { cwd: string }
     expect(opts.cwd).toBe(root)
+  })
+})
+
+describe('TerminalManager persistent server diagnostics', () => {
+  it('extracts URL, port and readiness from dev server output', () => {
+    expect(analyzePersistentOutput('VITE ready in 300 ms\nLocal: http://localhost:5173/\n')).toMatchObject({
+      ready: true,
+      url: 'http://localhost:5173/',
+      port: 5173,
+      diagnostics: [],
+    })
+  })
+
+  it('detects common blocked dev-server causes', () => {
+    expect(analyzePersistentOutput('Error: listen EADDRINUSE: address already in use :::5173')).toMatchObject({
+      diagnostics: expect.arrayContaining(['port_in_use']),
+    })
+    expect(analyzePersistentOutput('Vite requires Node.js version 20.19+ but current is 20.18.2')).toMatchObject({
+      diagnostics: expect.arrayContaining(['node_version_mismatch']),
+    })
+    expect(analyzePersistentOutput('npm ERR! missing script: dev')).toMatchObject({
+      diagnostics: expect.arrayContaining(['missing_script']),
+    })
   })
 })
 

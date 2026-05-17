@@ -1,15 +1,16 @@
 import {
   Agent, AnthropicProvider, OpenAICompatibleProvider,
-  READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor,
+  ASK_PERMISSION_POLICY, DEFAULT_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor,
   normalizeProviderError,
 } from '@kova/agent'
 import type { AgentProvider, InteractiveRunner } from '@kova/agent'
 import { terminalManager } from './terminal-manager'
+import { createPreviewWorkspace } from './preview-manager'
 import { CodeApplicationEngine, createDiffReviewDecision } from '@kova/application'
 import { ContextEngine } from '@kova/context'
 import { ExecutionEngine } from '@kova/execution'
 import { HarnessOrchestrator } from '@kova/orchestrator'
-import type { AgentContext, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage } from '@kova/shared'
+import type { AgentContext, Attachment, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage, Todo } from '@kova/shared'
 import { basename } from 'node:path'
 import { readdirSync } from 'node:fs'
 import { MemorySystem } from '@kova/memory'
@@ -23,6 +24,13 @@ import {
   buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
   createReasoningEmitter, estimateMessagesTokens, buildFallbackTask, toRelative,
 } from './session-utils'
+
+interface ProviderUsageReport {
+  cacheReadInputTokens: number
+  cacheCreationInputTokens: number
+  inputTokens: number
+  outputTokens: number
+}
 import { buildProvider, tryFallbackProvider } from './provider-resolver'
 import type { ProviderFactory, ProviderResolution } from './provider-resolver'
 import { buildPatchTask } from './task-structurer'
@@ -172,11 +180,11 @@ export class EngineManager {
     this.onExecutionEvent?.({ taskId: 'chat', timestamp: new Date().toISOString(), ...e })
   }
 
-  async sendMessage(message: string, history: AgentMessage[], params: StartTaskParams): Promise<void> {
-    return this.sendMessageWithMode(message, history, params)
+  async sendMessage(message: string, history: AgentMessage[], params: StartTaskParams, attachments?: Attachment[]): Promise<void> {
+    return this.sendMessageWithMode(message, history, params, attachments)
   }
 
-  private async sendMessageWithMode(message: string, history: AgentMessage[], params: StartTaskParams): Promise<void> {
+  private async sendMessageWithMode(message: string, history: AgentMessage[], params: StartTaskParams, attachments?: Attachment[]): Promise<void> {
     // Cancel any in-flight session or engine. The renderer queues user messages, so this
     // mainly protects direct IPC calls and stale work in the main process.
     this.sessionAbort?.abort()
@@ -250,15 +258,15 @@ export class EngineManager {
 
     const explicitFiles = resolution.refs.map(ref => ref.path)
     if (mode === 'plan') {
-      await this.runPlanSession(resolution.userContent || 'Create an implementation plan for this project.', history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal, explicitFiles, params.openedFiles ?? [])
+      await this.runPlanSession(resolution.userContent || 'Create an implementation plan for this project.', history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal, explicitFiles, params.openedFiles ?? [], attachments)
       return
     }
     if (mode === 'chat') {
-      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles)
+      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments)
       return
     }
     if (mode === 'review') {
-      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles)
+      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments)
       return
     }
     const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter)
@@ -278,6 +286,7 @@ export class EngineManager {
       true,
       this.sessionAbort.signal,
       explicitFiles,
+      attachments,
     )
   }
 
@@ -291,10 +300,19 @@ export class EngineManager {
     params: StartTaskParams,
     signal?: AbortSignal,
     explicitFiles: string[] = [],
+    attachments?: Attachment[],
   ): Promise<void> {
     let streamEndEmitted = false
     const reasoning = createReasoningEmitter((event) => this.emit(event))
     try {
+      const deterministicReply = buildTestingFollowupReply(userContent, history)
+      if (deterministicReply) {
+        const tokens = estimateMessagesTokens([{ role: 'assistant', content: deterministicReply }])
+        this.emit({ type: 'token', token: deterministicReply })
+        this.emit({ type: 'token_usage', message: `${tokens} tokens`, tokensUsed: tokens })
+        return
+      }
+
       let content = userContent
       if (params.includeProjectContext !== false && (history.length === 0 || !history.some(h => h.role === 'assistant'))) {
         const contextEngine = this.getContextEngine(projectRoot, adapter)
@@ -311,8 +329,9 @@ export class EngineManager {
         }
       }
 
-      const messages: AgentMessage[] = [...history, { role: 'user', content }]
+      const messages: AgentMessage[] = [...history, { role: 'user', content, ...(attachments ? { attachments } : {}) }]
       reasoning.start()
+      let usageReported = false
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
         tools: [],
@@ -323,9 +342,13 @@ export class EngineManager {
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: delta => reasoning.delta(delta),
         onReasoningEnd: () => reasoning.end(),
+        onUsageReport: report => {
+          usageReported = true
+          this.emit(usageEventFromReport(report))
+        },
       })
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
-      this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+      if (!usageReported) this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
     } catch (err) {
       if (!signal?.aborted) {
         this.emitProviderError(err)
@@ -349,6 +372,7 @@ export class EngineManager {
     params: StartTaskParams,
     signal?: AbortSignal,
     explicitFiles: string[] = [],
+    attachments?: Attachment[],
   ): Promise<void> {
     let streamEndEmitted = false
     const reasoning = createReasoningEmitter((event) => this.emit(event))
@@ -373,10 +397,11 @@ export class EngineManager {
         : '(no project context attached)'
       const messages: AgentMessage[] = [
         ...history,
-        { role: 'user', content: `${userContent}\n\n---\nProject root: ${projectRoot}\nProject context:\n${contextText}` },
+        { role: 'user', content: `${userContent}\n\n---\nProject root: ${projectRoot}\nProject context:\n${contextText}`, ...(attachments ? { attachments } : {}) },
       ]
-      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY)
+      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, todoEmitter(todos => this.emit(todosEvent(todos))))
       reasoning.start()
+      let usageReported = false
       const output = await provider.runAgentLoop(messages, {
         system: reviewOnlyPrompt(adapter.name),
         tools: READ_ONLY_TOOLS,
@@ -397,9 +422,13 @@ export class EngineManager {
           message: result.slice(0, 2_000),
           toolOutput: result.slice(0, 20_000),
         }),
+        onUsageReport: report => {
+          usageReported = true
+          this.emit(usageEventFromReport(report))
+        },
       })
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
-      this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+      if (!usageReported) this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
 
       // If onToken events were never fired (model finished with tool calls only, no final text),
       // emit output.thought directly so the user always sees a response.
@@ -430,6 +459,7 @@ export class EngineManager {
     signal?: AbortSignal,
     explicitFiles: string[] = [],
     openedFiles: string[] = [],
+    attachments?: Attachment[],
   ): Promise<void> {
     let streamEndEmitted = false
     const reasoning = createReasoningEmitter((event) => this.emit(event))
@@ -467,14 +497,16 @@ export class EngineManager {
             'Project context:',
             contextText,
           ].join('\n'),
+          ...(attachments ? { attachments } : {}),
         },
       ]
 
       const planTools = ctx.files.length > 0 || explicitFiles.length > 0 || openedFiles.length > 0 || !projectLooksBlank(projectRoot)
         ? READ_ONLY_TOOLS
         : []
-      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY)
+      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, todoEmitter(todos => this.emit(todosEvent(todos))))
       reasoning.start()
+      let usageReported = false
       // FIX-005: suppress raw <plan_result> XML from leaking into the chat as tokens.
       // We accumulate the buffer and only emit text that lives OUTSIDE the XML envelope.
       // Anything emitted up to now is replayed if the new visible text grows.
@@ -508,10 +540,14 @@ export class EngineManager {
           message: result.slice(0, 2_000),
           toolOutput: result.slice(0, 20_000),
         }),
+        onUsageReport: report => {
+          usageReported = true
+          this.emit(usageEventFromReport(report))
+        },
       })
 
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
-      this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+      if (!usageReported) this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
 
       // FIX-005: robust 3-tier parser (strict XML → markdown → minimal). Always produces
       // a card so /plan never fails silently when the model deviates from the XML format.
@@ -538,12 +574,19 @@ export class EngineManager {
     provider: AgentProvider, projectRoot: string, adapter: ReturnType<typeof detectStack>,
     task: TaskDefinition, skipPlan: boolean, signal?: AbortSignal,
     explicitFiles: string[] = [],
+    attachments?: Attachment[],
   ): Promise<void> {
     const appEngine = new CodeApplicationEngine(projectRoot)
 
     // FIX-002: Reuse cached ContextEngine + MemorySystem (single instance per project)
     // so learnings persist across patch turns and disk scans are not repeated.
     const memory = this.getMemorySystem(projectRoot)
+    // Append the current user turn (with attachments) so the ExecutionEngine's
+    // agent sees attachments on the very first iteration. The objective text
+    // stays in TaskDefinition; attachments only travel via the message stream.
+    const effectiveHistory: AgentMessage[] = attachments && attachments.length > 0
+      ? [...history, { role: 'user', content: objective, attachments }]
+      : history
     this.engine = new ExecutionEngine(
       {
         agent: new Agent(provider, projectRoot),
@@ -554,16 +597,22 @@ export class EngineManager {
       },
       {
         projectRoot,
-        history,
+        history: effectiveHistory,
         skipPlan,
         maxIterations: params.maxIterations ?? 5,
         autoApply: params.autoApply ?? false,
+        permissionPolicy: permissionPolicyFor(params.permissionMode),
         explicitFiles,
         openedFiles: params.openedFiles ?? [],
         onStateChange: (state) => this.onUpdate?.(state),
         onEvent: (event) => this.onExecutionEvent?.(event),
-        interactiveRunner: (command, cwd, reason) =>
-          terminalManager.runInteractive(command, cwd, reason),
+        interactiveRunner: (command, cwd, reason, options) => {
+          if (options?.previewChanges?.length) {
+            const preview = createPreviewWorkspace(projectRoot, options.previewChanges, task.id)
+            return terminalManager.runInteractive(command, preview.root, `${reason} (preview workspace)`)
+          }
+          return terminalManager.runInteractive(command, cwd, reason)
+        },
         // FIX-003: surface live stdout/stderr from run_command to the UI as
         // command_output events. The UI groups lines by commandId under the
         // originating tool_call activity entry.
@@ -706,6 +755,71 @@ export class EngineManager {
 }
 
 // ——— Error helpers ——————————————————————————————————————————————————————————
+function usageEventFromReport(report: ProviderUsageReport): Omit<ExecutionEvent, 'taskId' | 'timestamp'> {
+  return {
+    type: 'token_usage',
+    message: `${report.inputTokens + report.outputTokens} tokens`,
+    tokensUsed: report.inputTokens + report.outputTokens,
+    usage: report,
+    cacheReadInputTokens: report.cacheReadInputTokens,
+    cacheCreationInputTokens: report.cacheCreationInputTokens,
+    inputTokens: report.inputTokens,
+    outputTokens: report.outputTokens,
+  } as Omit<ExecutionEvent, 'taskId' | 'timestamp'>
+}
+
+function permissionPolicyFor(mode: KovaPermissionMode | undefined): typeof DEFAULT_PERMISSION_POLICY {
+  if (mode === 'ask') return ASK_PERMISSION_POLICY
+  return DEFAULT_PERMISSION_POLICY
+}
+
+function buildTestingFollowupReply(userContent: string, history: AgentMessage[]): string | null {
+  if (!isTestingFollowup(userContent)) return null
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const message = history[i]
+    if (message.role !== 'assistant') continue
+    if (!/Changes applied successfully|Task complete/i.test(message.content)) continue
+    const files = parseFilesChanged(message.content)
+    if (files.length === 0) continue
+
+    const fileList = files.slice(0, 8).join(', ')
+    const validationHint = files.some(file => /(^|\/)index\.html$/i.test(file))
+      ? 'Abra o index.html no navegador ou rode um servidor estatico como `npx serve -s . -l 3000` na pasta do projeto.'
+      : 'Rode a validacao indicada no cartao da tarefa, ou abra os arquivos alterados para revisar o resultado.'
+    return `Sim, agora e a hora certa de testar. Os arquivos ja foram aplicados: ${fileList}. ${validationHint}`
+  }
+
+  return null
+}
+
+function isTestingFollowup(content: string): boolean {
+  const text = content.trim().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+  return /\b(devo|posso|preciso|vamos|vou)\s+testar\b/.test(text)
+    || /\btestar agora\b/.test(text)
+    || /\bcomo\s+(eu\s+)?test(o|ar)\b/.test(text)
+    || /\bshould i test\b/.test(text)
+}
+
+function parseFilesChanged(content: string): string[] {
+  const line = content.split(/\r?\n/).find(item => /^Files changed:/i.test(item.trim()))
+  if (!line) return []
+  const raw = line.replace(/^Files changed:\s*/i, '').trim()
+  if (!raw || /^none$/i.test(raw)) return []
+  return raw
+    .split(',')
+    .map(item => item.replace(/\s*\([^)]*\)\s*$/, '').trim())
+    .filter(Boolean)
+}
+
+function todoEmitter(onTodosUpdated: (todos: Todo[]) => void): { onTodosUpdated: (todos: Todo[]) => void } {
+  return { onTodosUpdated }
+}
+
+function todosEvent(todos: Todo[]): Omit<ExecutionEvent, 'taskId' | 'timestamp'> {
+  return { type: 'todos_updated', todos, message: `${todos.length} todo(s)` }
+}
+
 function formatProviderError(err: unknown): string {
   const normalized = normalizeProviderError(err)
   if (normalized.name === 'KovaProviderError') return normalized.safeMessage

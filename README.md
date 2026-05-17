@@ -1,41 +1,45 @@
-# Welcome to Void.
+# Kova
 
-<div align="center">
-	<img
-		src="./src/vs/workbench/browser/parts/editor/media/slice_of_void.png"
-	 	alt="Void Welcome"
-		width="300"
-	 	height="300"
-	/>
-</div>
+> An AI coding agent compatible with Claude Code, with atomic git checkpoints, multi-provider support and vision attachments.
 
-Void is the open-source Cursor alternative.
+Kova is a desktop coding agent built on Electron + React + TypeScript. It speaks the same model as Claude Code, Codex and Cursor — but adds atomic per-iteration git commits, native multi-provider support (Anthropic, OpenAI, Gemini, Grok, DeepSeek, Kimi, OpenRouter, NVIDIA, Ollama, LM Studio), and automatic vision detection per model so you can attach images to any vision-capable model.
 
-Use AI agents on your codebase, checkpoint and visualize changes, and bring any model or host locally. Void sends messages directly to providers without retaining your data.
+## Documentation
 
-This repo contains the full sourcecode for Void. If you're new, welcome!
+- [`KOVA.md`](./KOVA.md) — Product north star. What Kova is and is not.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — How the system works.
+- [`CLAUDE.md`](./CLAUDE.md) — Operating rules for AI assistants working on Kova.
+- [`ROADMAP.md`](./ROADMAP.md) — Current state, pending work, decisions.
 
-- 🧭 [Website](https://voideditor.com)
+Per-package docs live in each `packages/*/CLAUDE.md` and `apps/electron/CLAUDE.md`.
 
-- 👋 [Discord](https://discord.gg/RSNjgaugJs)
+## Stack
 
-- 🚙 [Project Board](https://github.com/orgs/voideditor/projects/2)
+- Monorepo with `pnpm` + `turbo`
+- TypeScript libraries built with `tsup`
+- Electron app built with `electron-vite`
+- Vitest for tests
 
+## Quickstart
 
-## Note
+```bash
+pnpm install
+pnpm -r build
+pnpm --filter "@kova/electron" dev    # desktop app
+pnpm --filter "@kova/cli" dev         # CLI
+```
 
-We've paused work on the Void IDE (this repo) to explore a few novel coding ideas. We want to focus on innovation over feature-parity. Void will continue running, but without maintenance some existing features might stop working over time. Depending on the direction of our new work, we might not resume Void as an IDE.
+To run all tests:
+```bash
+pnpm -r test
+```
 
-We won't be actively reviewing Issues and PRs, but we will respond to all [email](mailto:hello@voideditor.com) inquiries on building and maintaining your own version of Void while we're paused. 
+## Providers supported
 
-## Reference
+Anthropic · OpenAI · Google Gemini · xAI Grok · DeepSeek · Moonshot Kimi · OpenRouter · NVIDIA · Ollama · LM Studio · any OpenAI-compatible endpoint.
 
-Void is a fork of the [vscode](https://github.com/microsoft/vscode) repository. For a guide to the codebase, see [VOID_CODEBASE_GUIDE](https://github.com/voideditor/void/blob/main/VOID_CODEBASE_GUIDE.md).
+Vision (image inputs) is detected per model via [`packages/shared/src/model-vision.ts`](./packages/shared/src/model-vision.ts).
 
-For a guide on how to develop your own version of Void, see [HOW_TO_CONTRIBUTE](https://github.com/voideditor/void/blob/main/HOW_TO_CONTRIBUTE.md) and [void-builder](https://github.com/voideditor/void-builder).
+## License
 
-
-
-
-## Support
-You can always reach us in our Discord server or contact us via email: hello@voideditor.com.
+See [`LICENSE.txt`](./LICENSE.txt).

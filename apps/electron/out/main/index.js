@@ -25,6 +25,8 @@ const electron = require("electron");
 const path = require("node:path");
 const node_fs = require("node:fs");
 const agent = require("@kova/agent");
+const node_child_process = require("node:child_process");
+const shared = require("@kova/shared");
 const application = require("@kova/application");
 const context = require("@kova/context");
 const execution = require("@kova/execution");
@@ -48,30 +50,88 @@ const INTERACTIVE_ALLOWLIST = /* @__PURE__ */ new Set([
   "pnpm",
   "yarn",
   "bun",
+  "npm.cmd",
+  "npx.cmd",
+  "pnpm.cmd",
+  "yarn.cmd",
+  "bun.cmd",
   "node",
   "python",
   "python3",
   "pip",
   "pip3",
   "uv",
+  "node.exe",
+  "python.exe",
+  "python3.exe",
+  "pip.exe",
+  "pip3.exe",
+  "uv.exe",
   "cargo",
   "rustup",
   "go",
   "mvn",
   "gradle",
+  "cargo.exe",
+  "rustup.exe",
+  "go.exe",
+  "mvn.cmd",
+  "gradle.bat",
   "dotnet",
   "docker",
   "kubectl",
   "aws",
   "gcloud",
   "az",
+  "dotnet.exe",
+  "docker.exe",
+  "kubectl.exe",
+  "aws.exe",
+  "gcloud.cmd",
+  "az.cmd",
   "heroku",
   "vercel",
   "fly",
   "railway",
   "ssh",
-  "sftp"
+  "sftp",
+  "vite",
+  "next",
+  "astro",
+  "remix",
+  "webpack",
+  "webpack-dev-server",
+  "vite.cmd",
+  "next.cmd",
+  "astro.cmd",
+  "remix.cmd",
+  "webpack.cmd",
+  "webpack-dev-server.cmd",
+  "serve",
+  "http-server",
+  "rails",
+  "flask",
+  "uvicorn",
+  "gunicorn",
+  "nodemon",
+  "serve.cmd",
+  "http-server.cmd",
+  "rails.bat",
+  "flask.exe",
+  "uvicorn.exe",
+  "nodemon.cmd"
 ]);
+const PERSISTENT_READY_PATTERNS = [
+  /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])[:/]/i,
+  /\blocal:\s*https?:\/\//i,
+  /\bready\b/i,
+  /\bcompiled\b/i,
+  /\bserver (?:running|started|listening)\b/i,
+  /\blistening on\b/i,
+  /\bwebpack compiled\b/i,
+  /\bvite\b.*\bready\b/i
+];
+const PERSISTENT_START_GRACE_MS = 2500;
 class TerminalManager {
   constructor(ptyImpl = pty) {
     this.ptyImpl = ptyImpl;
@@ -132,7 +192,7 @@ class TerminalManager {
     if (!approved) {
       return { exitCode: 1, output: "User denied interactive command execution." };
     }
-    return this.startSession(id, command, safeCwd);
+    return this.startSession(id, command, safeCwd, { persistent: shared.isLongRunningCommand(command) });
   }
   /** Open terminal directly from UI (no agent involvement) */
   openTerminal(id, command, cwd) {
@@ -163,10 +223,7 @@ class TerminalManager {
   kill(id) {
     const session = this.sessions.get(id);
     if (session) {
-      try {
-        session.pty.kill();
-      } catch {
-      }
+      this.killProcessTree(session);
       this.sessions.delete(id);
     }
   }
@@ -190,7 +247,7 @@ class TerminalManager {
       }, 6e4);
     });
   }
-  startSession(id, command, cwd) {
+  startSession(id, command, cwd, options = {}) {
     return new Promise((resolve2) => {
       if (!this.ptyImpl) {
         resolve2({ exitCode: 1, output: "node-pty not available" });
@@ -199,6 +256,15 @@ class TerminalManager {
       const shell = process.platform === "win32" ? "cmd.exe" : process.env.SHELL ?? "/bin/bash";
       const args = process.platform === "win32" ? ["/c", command] : ["-c", command];
       let outputBuf = "";
+      let settled = false;
+      let readyTimer = null;
+      const persistent = options.persistent === true;
+      const settle = (result) => {
+        if (settled) return;
+        settled = true;
+        if (readyTimer) clearTimeout(readyTimer);
+        resolve2(result);
+      };
       const ptyProcess = this.ptyImpl.spawn(shell, args, {
         name: "xterm-color",
         cols: 120,
@@ -218,21 +284,149 @@ class TerminalManager {
       };
       this.sessions.set(id, session);
       this.webContents?.send("kova:terminal-started", { id, command, cwd });
+      if (persistent) {
+        readyTimer = setTimeout(() => {
+          const meta = analyzePersistentOutput(outputBuf);
+          settle({
+            exitCode: 0,
+            output: outputBuf || `Persistent command started in Kova terminal: ${command}`,
+            sessionId: id,
+            persistent: true,
+            ready: meta.ready,
+            url: meta.url,
+            port: meta.port,
+            cwd,
+            diagnostics: meta.diagnostics
+          });
+        }, PERSISTENT_START_GRACE_MS);
+        if (typeof readyTimer.unref === "function") readyTimer.unref();
+      }
       ptyProcess.onData((data) => {
         outputBuf += data;
+        if (outputBuf.length > 1e5) outputBuf = outputBuf.slice(-1e5);
         session.outputBuf = outputBuf;
         this.webContents?.send("kova:terminal-data", { id, data });
+        if (persistent && PERSISTENT_READY_PATTERNS.some((pattern) => pattern.test(outputBuf))) {
+          const meta = analyzePersistentOutput(outputBuf);
+          settle({
+            exitCode: 0,
+            output: outputBuf,
+            sessionId: id,
+            persistent: true,
+            ready: true,
+            url: meta.url,
+            port: meta.port,
+            cwd,
+            diagnostics: meta.diagnostics
+          });
+        }
       });
       ptyProcess.onExit(({ exitCode }) => {
         session.exitCode = exitCode;
         this.webContents?.send("kova:terminal-exit", { id, exitCode });
         this.sessions.delete(id);
-        resolve2({ exitCode, output: outputBuf });
+        const meta = analyzePersistentOutput(outputBuf);
+        settle(persistent ? { exitCode, output: outputBuf, sessionId: id, persistent: true, ready: false, url: meta.url, port: meta.port, cwd, diagnostics: meta.diagnostics } : { exitCode, output: outputBuf });
       });
     });
   }
+  killProcessTree(session) {
+    const pid = typeof session.pty.pid === "number" ? session.pty.pid : null;
+    if (process.platform === "win32" && pid) {
+      try {
+        node_child_process.execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, () => {
+        });
+        try {
+          session.pty.kill();
+        } catch {
+        }
+      } catch {
+        try {
+          session.pty.kill();
+        } catch {
+        }
+      }
+      return;
+    }
+    try {
+      session.pty.kill();
+    } catch {
+    }
+  }
 }
 const terminalManager = new TerminalManager();
+function analyzePersistentOutput(output) {
+  const url = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0];
+  const portMatch = url?.match(/:(\d+)/) ?? output.match(/\b(?:port|porta)\s+(\d{2,5})\b/i);
+  const diagnostics = [];
+  if (/EADDRINUSE|address already in use|port .* already in use|porta .* em uso/i.test(output)) {
+    diagnostics.push("port_in_use");
+  }
+  if (/requires Node\.js version|unsupported engine|EBADENGINE|node version/i.test(output)) {
+    diagnostics.push("node_version_mismatch");
+  }
+  if (/missing script|script .* not found/i.test(output)) {
+    diagnostics.push("missing_script");
+  }
+  if (/command not found|is not recognized as an internal or external command|ENOENT/i.test(output)) {
+    diagnostics.push("command_not_found");
+  }
+  const ready = !!url || PERSISTENT_READY_PATTERNS.some((pattern) => pattern.test(output));
+  return {
+    sessionId: void 0,
+    ready,
+    url,
+    port: portMatch?.[1] ? Number(portMatch[1]) : void 0,
+    diagnostics
+  };
+}
+const PREVIEW_ROOT = ".kova/preview";
+const SKIP_DIRS$1 = /* @__PURE__ */ new Set([".git", "node_modules", "dist", "out", "build", ".next", ".turbo", "coverage"]);
+const SKIP_KOVA = [".kova/sessions", ".kova/traces"];
+function createPreviewWorkspace(projectRoot, changes, taskId = "task") {
+  const previewId = `${sanitizeId(taskId)}-${Date.now()}`;
+  const relativeRoot = `${PREVIEW_ROOT}/${previewId}`;
+  const root = path.join(projectRoot, relativeRoot);
+  node_fs.rmSync(root, { recursive: true, force: true });
+  node_fs.mkdirSync(root, { recursive: true });
+  if (node_fs.existsSync(projectRoot)) {
+    for (const entry of node_fs.readdirSync(projectRoot)) {
+      const source = path.join(projectRoot, entry);
+      if (!shouldCopy(projectRoot, source)) continue;
+      node_fs.cpSync(source, path.join(root, entry), {
+        recursive: true,
+        dereference: false,
+        errorOnExist: false,
+        filter: (src) => shouldCopy(projectRoot, src)
+      });
+    }
+  }
+  for (const change of changes) {
+    const target = path.join(root, change.path);
+    if (change.type === "delete") {
+      try {
+        node_fs.unlinkSync(target);
+      } catch {
+      }
+      continue;
+    }
+    node_fs.mkdirSync(path.dirname(target), { recursive: true });
+    node_fs.writeFileSync(target, change.diff, "utf-8");
+  }
+  return { root, relativeRoot };
+}
+function shouldCopy(projectRoot, src) {
+  const rel = path.relative(projectRoot, src).replace(/\\/g, "/");
+  if (!rel) return true;
+  if (rel === PREVIEW_ROOT || rel.startsWith(`${PREVIEW_ROOT}/`)) return false;
+  if (SKIP_KOVA.some((prefix) => rel === prefix || rel.startsWith(`${prefix}/`))) return false;
+  const first = rel.split("/")[0];
+  if (first === ".kova") return false;
+  return !SKIP_DIRS$1.has(first);
+}
+function sanitizeId(value) {
+  return value.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "task";
+}
 const SKIP_DIRS = /* @__PURE__ */ new Set([
   "node_modules",
   ".git",
@@ -336,6 +530,7 @@ Rules:
 - If the user says "oi", "hi", or similar — just reply naturally in one short sentence, like a colleague would.
 - If asked what you can do, answer briefly and concretely based on the project context.
 - Use provided file context when present. If a file reference was denied, say why briefly.
+- You are running inside the Kova desktop app with project workspace access during implementation tasks. If conversation history says files were changed or applied, treat that as real workspace state. Never claim you cannot create or modify files after Kova already applied a task.
 - Do not resume older tasks unless the user explicitly asks.
 - Respond in the same language the user writes in.`;
 }
@@ -622,13 +817,13 @@ function createReasoningEmitter(emit) {
     start: () => {
       if (active) return;
       active = true;
-      emit({ type: "reasoning_start", message: "Raciocinando..." });
+      emit({ type: "reasoning_start", message: "Reasoning..." });
     },
     delta: (delta) => {
       if (!delta) return;
       if (!active) {
         active = true;
-        emit({ type: "reasoning_start", message: "Raciocinando..." });
+        emit({ type: "reasoning_start", message: "Reasoning..." });
       }
       emit({ type: "reasoning_delta", reasoning: delta });
     },
@@ -674,23 +869,25 @@ function toRelative(root, filePath) {
   return normalized;
 }
 const PRESET_URLS = {
-  openai: "https://api.openai.com/v1",
-  deepseek: "https://api.deepseek.com",
-  openrouter: "https://openrouter.ai/api/v1",
-  kimi: "https://api.moonshot.ai/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
-  nvidia: process.env.NVIDIA_BASE_URL ?? "https://integrate.api.nvidia.com/v1",
-  ollama: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
-  lmstudio: "http://localhost:1234/v1"
+  openai: agent.PROVIDER_DEFAULTS.openai.baseUrl,
+  deepseek: agent.PROVIDER_DEFAULTS.deepseek.baseUrl,
+  openrouter: agent.PROVIDER_DEFAULTS.openrouter.baseUrl,
+  kimi: agent.PROVIDER_DEFAULTS.kimi.baseUrl,
+  gemini: agent.PROVIDER_DEFAULTS.gemini.baseUrl,
+  xai: agent.PROVIDER_DEFAULTS.xai.baseUrl,
+  nvidia: process.env.NVIDIA_BASE_URL ?? agent.PROVIDER_DEFAULTS.nvidia.baseUrl,
+  ollama: process.env.OLLAMA_BASE_URL ?? agent.PROVIDER_DEFAULTS.ollama.baseUrl,
+  lmstudio: agent.PROVIDER_DEFAULTS.lmstudio.baseUrl
 };
 const LOCAL_PROVIDERS = /* @__PURE__ */ new Set(["ollama", "lmstudio", "openai-compatible"]);
 const PRESET_MODELS = {
-  openai: "gpt-4.1",
-  deepseek: "deepseek-v4-flash",
-  kimi: "kimi-k2.5",
-  gemini: "gemini-2.5-flash",
-  openrouter: "anthropic/claude-sonnet-4.5",
-  nvidia: "moonshotai/kimi-k2.6"
+  openai: agent.PROVIDER_DEFAULTS.openai.defaultModel,
+  deepseek: agent.PROVIDER_DEFAULTS.deepseek.defaultModel,
+  kimi: agent.PROVIDER_DEFAULTS.kimi.defaultModel,
+  gemini: agent.PROVIDER_DEFAULTS.gemini.defaultModel,
+  xai: agent.PROVIDER_DEFAULTS.xai.defaultModel,
+  openrouter: agent.PROVIDER_DEFAULTS.openrouter.defaultModel,
+  nvidia: agent.PROVIDER_DEFAULTS.nvidia.defaultModel
 };
 const INVALID_MODEL_VALUES = /* @__PURE__ */ new Set([
   "deepseek",
@@ -707,6 +904,10 @@ const INVALID_MODEL_VALUES = /* @__PURE__ */ new Set([
   "Ollama",
   "openrouter",
   "OpenRouter",
+  "xai",
+  "XAI",
+  "grok",
+  "Grok",
   "default",
   "modelo",
   "model",
@@ -797,7 +998,7 @@ async function tryFallbackProvider(ctx) {
   }
 }
 function resolveFallbackApiKey(fallbackProvider, settings) {
-  return fallbackProvider === "anthropic" ? settings.anthropicKey : fallbackProvider === "openai" ? settings.openaiKey : fallbackProvider === "deepseek" ? settings.deepseekKey : fallbackProvider === "openrouter" ? settings.openrouterKey : fallbackProvider === "kimi" ? settings.kimiKey : fallbackProvider === "gemini" ? settings.geminiKey : fallbackProvider === "openai-compatible" ? settings.openaiCompatibleKey : "";
+  return fallbackProvider === "anthropic" ? settings.anthropicKey : fallbackProvider === "openai" ? settings.openaiKey : fallbackProvider === "deepseek" ? settings.deepseekKey : fallbackProvider === "openrouter" ? settings.openrouterKey : fallbackProvider === "kimi" ? settings.kimiKey : fallbackProvider === "gemini" ? settings.geminiKey : fallbackProvider === "xai" ? settings.xaiKey : fallbackProvider === "openai-compatible" ? settings.openaiCompatibleKey : "";
 }
 async function buildPatchTask(objective, provider, projectRoot, adapter) {
   try {
@@ -957,10 +1158,10 @@ class EngineManager {
   emit(e) {
     this.onExecutionEvent?.({ taskId: "chat", timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...e });
   }
-  async sendMessage(message, history, params) {
-    return this.sendMessageWithMode(message, history, params);
+  async sendMessage(message, history, params, attachments) {
+    return this.sendMessageWithMode(message, history, params, attachments);
   }
-  async sendMessageWithMode(message, history, params) {
+  async sendMessageWithMode(message, history, params, attachments) {
     this.sessionAbort?.abort();
     this.sessionAbort = new AbortController();
     if (this.engine) {
@@ -1022,15 +1223,15 @@ class EngineManager {
     });
     const explicitFiles = resolution.refs.map((ref) => ref.path);
     if (mode === "plan") {
-      await this.runPlanSession(resolution.userContent || "Create an implementation plan for this project.", history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal, explicitFiles, params.openedFiles ?? []);
+      await this.runPlanSession(resolution.userContent || "Create an implementation plan for this project.", history, provider, projectRoot, adapter, params.includeProjectContext !== false, this.sessionAbort.signal, explicitFiles, params.openedFiles ?? [], attachments);
       return;
     }
     if (mode === "chat") {
-      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles);
+      await this.runChatSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments);
       return;
     }
     if (mode === "review") {
-      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles);
+      await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments);
       return;
     }
     const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter);
@@ -1045,13 +1246,21 @@ class EngineManager {
       task,
       true,
       this.sessionAbort.signal,
-      explicitFiles
+      explicitFiles,
+      attachments
     );
   }
-  async runChatSession(userContent, history, provider, projectRoot, adapter, params, signal, explicitFiles = []) {
+  async runChatSession(userContent, history, provider, projectRoot, adapter, params, signal, explicitFiles = [], attachments) {
     let streamEndEmitted = false;
     const reasoning = createReasoningEmitter((event) => this.emit(event));
     try {
+      const deterministicReply = buildTestingFollowupReply(userContent, history);
+      if (deterministicReply) {
+        const tokens = estimateMessagesTokens([{ role: "assistant", content: deterministicReply }]);
+        this.emit({ type: "token", token: deterministicReply });
+        this.emit({ type: "token_usage", message: `${tokens} tokens`, tokensUsed: tokens });
+        return;
+      }
       let content = userContent;
       if (params.includeProjectContext !== false && (history.length === 0 || !history.some((h) => h.role === "assistant"))) {
         const contextEngine = this.getContextEngine(projectRoot, adapter);
@@ -1071,8 +1280,9 @@ ${f.content}
 \`\`\``).join("\n");
         }
       }
-      const messages = [...history, { role: "user", content }];
+      const messages = [...history, { role: "user", content, ...attachments ? { attachments } : {} }];
       reasoning.start();
+      let usageReported = false;
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
         tools: [],
@@ -1085,10 +1295,14 @@ ${f.content}
         },
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: (delta) => reasoning.delta(delta),
-        onReasoningEnd: () => reasoning.end()
+        onReasoningEnd: () => reasoning.end(),
+        onUsageReport: (report) => {
+          usageReported = true;
+          this.emit(usageEventFromReport(report));
+        }
       });
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: "assistant", content: output.thought }]);
-      this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
+      if (!usageReported) this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
     } catch (err) {
       if (!signal?.aborted) {
         this.emitProviderError(err);
@@ -1102,7 +1316,7 @@ ${f.content}
       }
     }
   }
-  async runReviewSession(userContent, history, provider, projectRoot, adapter, params, signal, explicitFiles = []) {
+  async runReviewSession(userContent, history, provider, projectRoot, adapter, params, signal, explicitFiles = [], attachments) {
     let streamEndEmitted = false;
     const reasoning = createReasoningEmitter((event) => this.emit(event));
     try {
@@ -1129,10 +1343,11 @@ ${f.content}
 ---
 Project root: ${projectRoot}
 Project context:
-${contextText}` }
+${contextText}`, ...attachments ? { attachments } : {} }
       ];
-      const executor = new agent.ToolExecutor(projectRoot, signal, agent.READ_ONLY_PERMISSION_POLICY);
+      const executor = new agent.ToolExecutor(projectRoot, signal, agent.READ_ONLY_PERMISSION_POLICY, void 0, void 0, todoEmitter((todos) => this.emit(todosEvent(todos))));
       reasoning.start();
+      let usageReported = false;
       const output = await provider.runAgentLoop(messages, {
         system: reviewOnlyPrompt(adapter.name),
         tools: agent.READ_ONLY_TOOLS,
@@ -1156,10 +1371,14 @@ ${contextText}` }
           toolName: name,
           message: result.slice(0, 2e3),
           toolOutput: result.slice(0, 2e4)
-        })
+        }),
+        onUsageReport: (report) => {
+          usageReported = true;
+          this.emit(usageEventFromReport(report));
+        }
       });
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: "assistant", content: output.thought }]);
-      this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
+      if (!usageReported) this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
       if (output.thought.trim()) {
         this.emit({ type: "token", token: output.thought });
       }
@@ -1176,7 +1395,7 @@ ${contextText}` }
       }
     }
   }
-  async runPlanSession(userContent, history, provider, projectRoot, adapter, includeProjectContext = true, signal, explicitFiles = [], openedFiles = []) {
+  async runPlanSession(userContent, history, provider, projectRoot, adapter, includeProjectContext = true, signal, explicitFiles = [], openedFiles = [], attachments) {
     let streamEndEmitted = false;
     const reasoning = createReasoningEmitter((event) => this.emit(event));
     try {
@@ -1209,12 +1428,14 @@ ${f.content}
             "",
             "Project context:",
             contextText
-          ].join("\n")
+          ].join("\n"),
+          ...attachments ? { attachments } : {}
         }
       ];
       const planTools = ctx.files.length > 0 || explicitFiles.length > 0 || openedFiles.length > 0 || !projectLooksBlank(projectRoot) ? agent.READ_ONLY_TOOLS : [];
-      const executor = new agent.ToolExecutor(projectRoot, signal, agent.READ_ONLY_PERMISSION_POLICY);
+      const executor = new agent.ToolExecutor(projectRoot, signal, agent.READ_ONLY_PERMISSION_POLICY, void 0, void 0, todoEmitter((todos) => this.emit(todosEvent(todos))));
       reasoning.start();
+      let usageReported = false;
       let streamBuffer = "";
       let lastVisibleLen = 0;
       const output = await provider.runAgentLoop(messages, {
@@ -1244,10 +1465,14 @@ ${f.content}
           toolName: name,
           message: result.slice(0, 2e3),
           toolOutput: result.slice(0, 2e4)
-        })
+        }),
+        onUsageReport: (report) => {
+          usageReported = true;
+          this.emit(usageEventFromReport(report));
+        }
       });
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: "assistant", content: output.thought }]);
-      this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
+      if (!usageReported) this.emit({ type: "token_usage", message: `${turnTokens} tokens`, tokensUsed: turnTokens });
       const planMsg = parsePlanResultRobust(output.thought, userContent);
       this.emit({ type: "stream_end", structuredMessage: planMsg });
       streamEndEmitted = true;
@@ -1265,9 +1490,10 @@ ${f.content}
     }
   }
   // Unified Session â€” One loop to rule them all
-  async runUnifiedSession(objective, history, params, provider, projectRoot, adapter, task, skipPlan, signal, explicitFiles = []) {
+  async runUnifiedSession(objective, history, params, provider, projectRoot, adapter, task, skipPlan, signal, explicitFiles = [], attachments) {
     const appEngine = new application.CodeApplicationEngine(projectRoot);
     const memory2 = this.getMemorySystem(projectRoot);
+    const effectiveHistory = attachments && attachments.length > 0 ? [...history, { role: "user", content: objective, attachments }] : history;
     this.engine = new execution.ExecutionEngine(
       {
         agent: new agent.Agent(provider, projectRoot),
@@ -1278,15 +1504,22 @@ ${f.content}
       },
       {
         projectRoot,
-        history,
+        history: effectiveHistory,
         skipPlan,
         maxIterations: params.maxIterations ?? 5,
         autoApply: params.autoApply ?? false,
+        permissionPolicy: permissionPolicyFor(params.permissionMode),
         explicitFiles,
         openedFiles: params.openedFiles ?? [],
         onStateChange: (state) => this.onUpdate?.(state),
         onEvent: (event) => this.onExecutionEvent?.(event),
-        interactiveRunner: (command, cwd, reason) => terminalManager.runInteractive(command, cwd, reason),
+        interactiveRunner: (command, cwd, reason, options) => {
+          if (options?.previewChanges?.length) {
+            const preview = createPreviewWorkspace(projectRoot, options.previewChanges, task.id);
+            return terminalManager.runInteractive(command, preview.root, `${reason} (preview workspace)`);
+          }
+          return terminalManager.runInteractive(command, cwd, reason);
+        },
         // FIX-003: surface live stdout/stderr from run_command to the UI as
         // command_output events. The UI groups lines by commandId under the
         // originating tool_call activity entry.
@@ -1406,8 +1639,55 @@ ${f.content}
       }
       return;
     }
-    this.onChatResponse?.("Nenhuma mudanca pendente para aplicar.");
+    this.onChatResponse?.("No pending changes to apply.");
   }
+}
+function usageEventFromReport(report) {
+  return {
+    type: "token_usage",
+    message: `${report.inputTokens + report.outputTokens} tokens`,
+    tokensUsed: report.inputTokens + report.outputTokens,
+    usage: report,
+    cacheReadInputTokens: report.cacheReadInputTokens,
+    cacheCreationInputTokens: report.cacheCreationInputTokens,
+    inputTokens: report.inputTokens,
+    outputTokens: report.outputTokens
+  };
+}
+function permissionPolicyFor(mode) {
+  if (mode === "ask") return agent.ASK_PERMISSION_POLICY;
+  return agent.DEFAULT_PERMISSION_POLICY;
+}
+function buildTestingFollowupReply(userContent, history) {
+  if (!isTestingFollowup(userContent)) return null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const message = history[i];
+    if (message.role !== "assistant") continue;
+    if (!/Changes applied successfully|Task complete/i.test(message.content)) continue;
+    const files = parseFilesChanged(message.content);
+    if (files.length === 0) continue;
+    const fileList = files.slice(0, 8).join(", ");
+    const validationHint = files.some((file) => /(^|\/)index\.html$/i.test(file)) ? "Abra o index.html no navegador ou rode um servidor estatico como `npx serve -s . -l 3000` na pasta do projeto." : "Rode a validacao indicada no cartao da tarefa, ou abra os arquivos alterados para revisar o resultado.";
+    return `Sim, agora e a hora certa de testar. Os arquivos ja foram aplicados: ${fileList}. ${validationHint}`;
+  }
+  return null;
+}
+function isTestingFollowup(content) {
+  const text = content.trim().toLowerCase().normalize("NFD").replace(new RegExp("\\p{Diacritic}", "gu"), "");
+  return /\b(devo|posso|preciso|vamos|vou)\s+testar\b/.test(text) || /\btestar agora\b/.test(text) || /\bcomo\s+(eu\s+)?test(o|ar)\b/.test(text) || /\bshould i test\b/.test(text);
+}
+function parseFilesChanged(content) {
+  const line = content.split(/\r?\n/).find((item) => /^Files changed:/i.test(item.trim()));
+  if (!line) return [];
+  const raw = line.replace(/^Files changed:\s*/i, "").trim();
+  if (!raw || /^none$/i.test(raw)) return [];
+  return raw.split(",").map((item) => item.replace(/\s*\([^)]*\)\s*$/, "").trim()).filter(Boolean);
+}
+function todoEmitter(onTodosUpdated) {
+  return { onTodosUpdated };
+}
+function todosEvent(todos) {
+  return { type: "todos_updated", todos, message: `${todos.length} todo(s)` };
 }
 function formatProviderError(err) {
   const normalized = agent.normalizeProviderError(err);
@@ -1443,6 +1723,11 @@ function mapResultDecision(status, decision) {
   if (decision === "reject") return "reject";
   return "reject";
 }
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+const MAX_ATTACHMENTS = 12;
+const ALLOWED_MIME_PREFIXES = ["image/", "text/"];
+const ALLOWED_EXACT_MIME = /* @__PURE__ */ new Set(["application/pdf", "application/json"]);
 function isTrustedIpcSender(event, isDev2 = !electron.app.isPackaged) {
   const url = event.senderFrame?.url ?? "";
   if (!url) return false;
@@ -1497,11 +1782,13 @@ function mergeSettingsForSave(incoming, existing) {
     openrouterKey: optionalString(settings.openrouterKey, 4e3) ?? "",
     kimiKey: optionalString(settings.kimiKey, 4e3) ?? "",
     geminiKey: optionalString(settings.geminiKey, 4e3) ?? "",
+    xaiKey: optionalString(settings.xaiKey, 4e3) ?? "",
     openaiCompatibleKey: optionalString(settings.openaiCompatibleKey, 4e3) ?? "",
     ollamaUrl: optionalString(settings.ollamaUrl, 2e3) ?? "http://localhost:11434/v1",
     compatibleUrl: optionalString(settings.compatibleUrl, 2e3) ?? "http://localhost:1234/v1",
     model: optionalString(settings.model, 300) ?? "",
     autoApply: optionalBoolean(settings.autoApply) ?? true,
+    permissionMode: oneOf(settings.permissionMode, ["auto-review", "ask", "full-access"]) ?? "auto-review",
     maxIterations: optionalNumber(settings.maxIterations, 1, 20) ?? 5,
     fallbackProvider: optionalString(settings.fallbackProvider, 80),
     fallbackModel: optionalString(settings.fallbackModel, 300),
@@ -1510,6 +1797,33 @@ function mergeSettingsForSave(incoming, existing) {
   };
   if (!merged.nvidiaKey || merged.nvidiaKey.includes("****")) merged.nvidiaKey = existing.nvidiaKey;
   return merged;
+}
+function sanitizeAttachments(value) {
+  if (value === void 0 || value === null) return void 0;
+  if (!Array.isArray(value)) throw new Error("Invalid attachments payload");
+  if (value.length === 0) return void 0;
+  if (value.length > MAX_ATTACHMENTS) throw new Error(`Too many attachments — max ${MAX_ATTACHMENTS}`);
+  let total = 0;
+  const result = [];
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error("Invalid attachment item");
+    const kind = oneOf(item.kind, ["image", "document", "text"]);
+    if (!kind) throw new Error("Invalid attachment kind");
+    const mimeType = stringField(item.mimeType, "attachment.mimeType", 200);
+    const allowedMime = ALLOWED_MIME_PREFIXES.some((p) => mimeType.startsWith(p)) || ALLOWED_EXACT_MIME.has(mimeType);
+    if (!allowedMime) throw new Error(`Unsupported attachment type: ${mimeType}`);
+    const name = stringField(item.name, "attachment.name", 500);
+    if (typeof item.sizeBytes !== "number" || !Number.isFinite(item.sizeBytes) || item.sizeBytes < 0) {
+      throw new Error("Invalid attachment sizeBytes");
+    }
+    if (item.sizeBytes > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment "${name}" exceeds 10 MB limit`);
+    total += item.sizeBytes;
+    if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error("Total attachment size exceeds 50 MB");
+    const base64 = stringField(item.base64, "attachment.base64", MAX_ATTACHMENT_BYTES * 2);
+    if (!/^[A-Za-z0-9+/=]*$/.test(base64)) throw new Error("Invalid base64 payload");
+    result.push({ kind, name, mimeType, sizeBytes: item.sizeBytes, base64 });
+  }
+  return result;
 }
 function sanitizeDiffReviewSelection(value) {
   if (value === void 0 || value === null) return void 0;
@@ -1570,11 +1884,13 @@ const DEFAULT_SETTINGS = {
   openrouterKey: "",
   kimiKey: "",
   geminiKey: "",
+  xaiKey: "",
   openaiCompatibleKey: "",
   ollamaUrl: "http://localhost:11434/v1",
   compatibleUrl: "http://localhost:1234/v1",
   model: "",
   autoApply: true,
+  permissionMode: "auto-review",
   maxIterations: 5,
   nvidiaEnableThinking: true
 };
@@ -1621,13 +1937,14 @@ function registerIpcHandlers(win, manager2) {
     if (folder) updateProjectScope(folder);
     return folder;
   });
-  electron.ipcMain.handle("kova:send-message", async (event, message, history, params) => {
+  electron.ipcMain.handle("kova:send-message", async (event, message, history, params, attachments) => {
     assertTrustedIpcSender(event);
     const safeMessage = stringField(message, "message", 8e4);
     const safeHistory = sanitizeHistory(history);
     const safeParams = sanitizeStartTaskParams(params);
+    const safeAttachments = sanitizeAttachments(attachments);
     if (safeParams.projectRoot) updateProjectScope(safeParams.projectRoot);
-    await manager2.sendMessage(safeMessage, safeHistory, safeParams);
+    await manager2.sendMessage(safeMessage, safeHistory, safeParams, safeAttachments);
   });
   electron.ipcMain.handle("kova:detect-model", async (event, url) => {
     assertTrustedIpcSender(event);

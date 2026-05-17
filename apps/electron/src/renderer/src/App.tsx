@@ -5,6 +5,8 @@ import type { ExecutionEvent, ExecutionState, TaskDefinition, StartTaskParams } 
 import type { KovaSettings } from '../../main/ipc-handlers'
 import { buildTokenBudgetedHistory } from '../../main/history-utils'
 import { parseUserInput, type UserCommand } from './lib/parse-user-input'
+import { createChatMessageId } from './lib/message-ids'
+import { detectVisionSupport } from './lib/vision-detection'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
@@ -122,6 +124,7 @@ export function App(): React.ReactElement {
     sessionUsage: state.sessionUsage,
     executionState: state.executionState,
     executionEvents: state.executionEvents,
+    todos: state.todos,
     onSessionIdCreated: (id) => setState(prev => ({ ...prev, sessionId: id })),
   })
 
@@ -152,7 +155,7 @@ export function App(): React.ReactElement {
       autoApply: s.autoApply,
       maxIterations: s.maxIterations,
       mode: cmd.mode,                  // ← from atomic command, never stale
-      permissionMode: 'auto-review',
+      permissionMode: s.permissionMode ?? 'auto-review',
       includeProjectContext: true,
       queuedCount: state.queuedMessages.length,
       openedFiles: state.openFilePath ? [state.openFilePath] : [],
@@ -166,22 +169,26 @@ export function App(): React.ReactElement {
     setState(prev => ({
       ...prev, isThinking: true, executionState: null, task: null,
       executionEvents: [], showDiff: false, streamingText: '', reasoning: EMPTY_REASONING,
-      messages: [...prev.messages, { id: Date.now().toString(), role: 'user', content: cmd.text, isTask: false }],
+      todos: [],
+      messages: [...prev.messages, {
+        id: createChatMessageId('user'), role: 'user', content: cmd.text, isTask: false,
+        attachments: cmd.attachments,
+      }],
     }))
-    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd))
+    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd), cmd.attachments)
   }, [state.settings, state.projectRoot, state.messages, buildTaskParams])
 
-  const handleSend = useCallback(async (rawText: string, modeOverride?: ChatMode) => {
+  const handleSend = useCallback(async (rawText: string, modeOverride?: ChatMode, attachments?: import('@kova/shared').Attachment[]) => {
     if (!state.settings || !state.projectRoot) return
     // Single source of truth for user intent — parsed once, frozen, propagated.
-    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode)
+    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode, attachments)
     const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
     if (isBusy) {
       const queued: QueuedMessage = {
-        id: `${Date.now()}`,
+        id: createChatMessageId('queue'),
         content: cmd.text,
         mode: cmd.mode,
-        permissionMode: 'auto-review',
+        permissionMode: state.settings.permissionMode ?? 'auto-review',
         includeProjectContext: true,
       }
       setState(prev => ({ ...prev, queuedMessages: [...prev.queuedMessages, queued] }))
@@ -209,6 +216,7 @@ export function App(): React.ReactElement {
       messages: [], sessionId: null,
       sessionUsage: EMPTY_USAGE,
       queuedMessages: [],
+      todos: [],
     }))
   }, [])
 
@@ -222,6 +230,7 @@ export function App(): React.ReactElement {
       executionEvents: session.events || [],
       isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false, openFilePath: null,
       sessionUsage: normalizeSessionUsage(session.sessionUsage),
+      todos: session.todos || [],
     }))
   }, [])
 
@@ -301,6 +310,7 @@ export function App(): React.ReactElement {
               activeMode={state.activeMode}
               sessionUsage={state.sessionUsage}
               activeModel={state.activeModel}
+              supportsVision={state.activeModel ? detectVisionSupport(state.activeModel) : undefined}
               todos={state.todos}
               onModeChange={(activeMode) => setState(prev => ({ ...prev, activeMode }))}
               onClearQueue={() => setState(prev => ({ ...prev, queuedMessages: [] }))}
@@ -324,7 +334,7 @@ export function App(): React.ReactElement {
           onAbort={() => {
             window.kova.abort()
             // Reset renderer state immediately — don't wait for main process confirmation
-            setState(prev => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING }))
+            setState(prev => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING, todos: [] }))
           }}
           onApply={() => window.kova.forceApply()}
           onRepair={() => {
@@ -343,7 +353,7 @@ export function App(): React.ReactElement {
           }}
         />
       </React.Suspense>
-      <StatusBar executionState={state.executionState} sessionUsage={state.sessionUsage} />
+      <StatusBar executionState={state.executionState} sessionUsage={state.sessionUsage} events={state.executionEvents} />
       {state.showSettings && state.settings && (
         <ProviderModal settings={state.settings} onSave={handleSaveSettings} onClose={() => setState(prev => ({ ...prev, showSettings: false }))} />
       )}

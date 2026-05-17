@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-CxOqh7KD.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-BSMEalpM.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
 function getDefaultExportFromCjs(x) {
   return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, "default") ? x["default"] : x;
 }
@@ -12625,9 +12625,15 @@ function structuredMessageToHistoryText(message) {
   ].filter(Boolean).join("\n");
 }
 function historyContentFor(message) {
+  if (message.structured) return structuredMessageToHistoryText(message.structured);
   const content = message.content.trim();
   if (content) return content;
-  return message.structured ? structuredMessageToHistoryText(message.structured) : "";
+  return "";
+}
+let messageSeq = 0;
+function createChatMessageId(prefix = "msg") {
+  messageSeq += 1;
+  return `${prefix}-${Date.now()}-${messageSeq}`;
 }
 const _EMPTY_REASONING = {
   active: false,
@@ -12635,6 +12641,10 @@ const _EMPTY_REASONING = {
   startedAt: null,
   endedAt: null
 };
+function historyTextForStreamEnd(streamingText, structured) {
+  if (structured) return structuredMessageToHistoryText(structured);
+  return streamingText.trim();
+}
 function useEngineEvents(setState) {
   reactExports.useEffect(() => {
     window.kova.getSettings().then((s) => {
@@ -12666,7 +12676,7 @@ function useEngineEvents(setState) {
         ...prev,
         isThinking: false,
         reasoning: _EMPTY_REASONING,
-        messages: [...prev.messages, { id: Date.now().toString(), role: "assistant", content: msg, isTask: false }]
+        messages: [...prev.messages, { id: createChatMessageId("assistant"), role: "assistant", content: msg, isTask: false }]
       }))),
       window.kova.onModelDetected((model) => setState((prev) => ({ ...prev, activeModel: model, modelConnected: true }))),
       window.kova.onChatResponse((msg) => setState((prev) => {
@@ -12678,7 +12688,7 @@ function useEngineEvents(setState) {
           ...prev,
           isThinking: false,
           reasoning: _EMPTY_REASONING,
-          messages: [...prev.messages, { id: Date.now().toString(), role: "assistant", content: msg, isTask: false }]
+          messages: [...prev.messages, { id: createChatMessageId("assistant"), role: "assistant", content: msg, isTask: false }]
         };
       })),
       window.kova.onExecutionEvent((event) => setState((prev) => {
@@ -12688,6 +12698,8 @@ function useEngineEvents(setState) {
             sessionUsage: {
               contextTokens: event.context.tokensUsed,
               completionTokens: prev.sessionUsage.completionTokens,
+              cacheReadInputTokens: prev.sessionUsage.cacheReadInputTokens ?? 0,
+              cacheCreationInputTokens: prev.sessionUsage.cacheCreationInputTokens ?? 0,
               contextFiles: event.context.files,
               selectedFiles: event.context.selectedFiles ?? [],
               blockedFiles: event.context.blockedFiles ?? [],
@@ -12700,11 +12712,14 @@ function useEngineEvents(setState) {
           };
         }
         if (event.type === "token_usage") {
+          const usageEvent = event;
           return {
             ...prev,
             sessionUsage: {
               ...prev.sessionUsage,
-              completionTokens: prev.sessionUsage.completionTokens + (event.tokensUsed ?? 0)
+              completionTokens: prev.sessionUsage.completionTokens + (event.tokensUsed ?? 0),
+              cacheReadInputTokens: (prev.sessionUsage.cacheReadInputTokens ?? 0) + (usageEvent.cacheReadInputTokens ?? usageEvent.usage?.cacheReadInputTokens ?? 0),
+              cacheCreationInputTokens: (prev.sessionUsage.cacheCreationInputTokens ?? 0) + (usageEvent.cacheCreationInputTokens ?? usageEvent.usage?.cacheCreationInputTokens ?? 0)
             },
             executionEvents: [...prev.executionEvents, event].slice(-200)
           };
@@ -12765,11 +12780,10 @@ function useEngineEvents(setState) {
           };
         }
         if (event.type === "stream_end") {
-          const text = prev.streamingText.trim();
           const structured = event.structuredMessage;
-          const historyText = text || (structured ? structuredMessageToHistoryText(structured) : "");
+          const historyText = historyTextForStreamEnd(prev.streamingText, structured);
           const assistantMsg = {
-            id: Date.now().toString(),
+            id: createChatMessageId("assistant"),
             role: "assistant",
             content: historyText,
             isTask: !!structured,
@@ -12789,6 +12803,13 @@ function useEngineEvents(setState) {
           return {
             ...prev,
             executionState: prev.executionState ? { ...prev.executionState, proofPack: event.proofPack } : prev.executionState,
+            executionEvents: [...prev.executionEvents, event].slice(-200)
+          };
+        }
+        if (event.type === "todos_updated") {
+          return {
+            ...prev,
+            todos: event.todos ?? [],
             executionEvents: [...prev.executionEvents, event].slice(-200)
           };
         }
@@ -12814,6 +12835,7 @@ function useSessionPersistence(opts) {
     sessionUsage,
     executionState,
     executionEvents,
+    todos,
     onSessionIdCreated
   } = opts;
   const onCreatedRef = reactExports.useRef(onSessionIdCreated);
@@ -12831,13 +12853,14 @@ function useSessionPersistence(opts) {
       task,
       sessionUsage,
       executionState,
-      events: executionEvents
+      events: executionEvents,
+      todos
     };
     window.kova.saveSession(projectRoot, session).catch(console.error);
-  }, [messages, isThinking, executionState, sessionUsage, projectRoot, sessionId, task, executionEvents]);
+  }, [messages, isThinking, executionState, sessionUsage, projectRoot, sessionId, task, executionEvents, todos]);
 }
 const SLASH_PATTERN = /^\/(plan|review)\b\s*/i;
-function parseUserInput(raw, defaultMode) {
+function parseUserInput(raw, defaultMode, attachments) {
   const trimmed = raw.trim();
   const match = SLASH_PATTERN.exec(trimmed);
   if (match) {
@@ -12846,14 +12869,45 @@ function parseUserInput(raw, defaultMode) {
       // Preserve the slash command itself when there's no body — model still gets context
       text: stripped || trimmed,
       mode: match[1].toLowerCase(),
-      fromSlashCommand: true
+      fromSlashCommand: true,
+      attachments
     };
   }
   return {
     text: trimmed,
     mode: defaultMode,
-    fromSlashCommand: false
+    fromSlashCommand: false,
+    attachments
   };
+}
+var VISION_PATTERNS = [
+  // Anthropic Claude 3.5+ — all current and recent models are multimodal
+  /\bclaude-(opus|sonnet|haiku)-[34]/i,
+  /\bclaude-3-5/i,
+  // Google Gemini — all 2.x and 3.x are multimodal
+  /\bgemini-3/i,
+  /\bgemini-2\.5/i,
+  // OpenAI GPT-4o / GPT-4.1 / GPT-5.x (full and mini/pro tiers)
+  /\bgpt-4(o|\.1)/i,
+  /\bgpt-5(\.\d+)?(-pro|-mini)?\b/i,
+  /\bo[1-9](-mini|-pro)?/i,
+  // xAI Grok 4.x is multimodal
+  /\bgrok-(4|3|code-fast)/i,
+  /\bx-ai\/grok/i,
+  // Dedicated VL (vision-language) variants of open-source families
+  /\bdeepseek-vl/i,
+  /\bkimi-k2(\.\d+)?(-vl|-vision)/i,
+  /\bqwen2\.5-vl/i
+];
+var TEXT_ONLY_OVERRIDES = [
+  // OpenAI coding/nano variants are text-only despite the GPT-5.x prefix.
+  /\bgpt-5(\.\d+)?-codex/i,
+  /\bgpt-5(\.\d+)?-nano/i
+];
+function detectVisionSupport(modelId) {
+  if (!modelId) return false;
+  if (TEXT_ONLY_OVERRIDES.some((rx) => rx.test(modelId))) return false;
+  return VISION_PATTERNS.some((rx) => rx.test(modelId));
 }
 function serverUrl$1(s) {
   if (s.defaultProvider === "ollama") return s.ollamaUrl;
@@ -13559,10 +13613,10 @@ function Sidebar({ executionState, projectRoot, sessionUsage, changedPaths, refr
     ] }) })
   ] });
 }
-const TYPE_BADGE = {
-  create: { label: "New", color: "var(--teal)", bg: "var(--teal-dim)" },
-  modify: { label: "Modified", color: "var(--yellow)", bg: "var(--yellow-dim)" },
-  delete: { label: "Deleted", color: "var(--red)", bg: "var(--red-dim)" }
+const TYPE_META$1 = {
+  create: { label: "created", sign: "+", color: "var(--teal)", bg: "var(--teal-dim)" },
+  modify: { label: "modified", sign: "~", color: "var(--yellow)", bg: "var(--yellow-dim)" },
+  delete: { label: "deleted", sign: "-", color: "var(--red)", bg: "var(--red-dim)" }
 };
 const LINE_BG$1 = {
   add: "rgba(93,202,165,0.07)",
@@ -13570,25 +13624,29 @@ const LINE_BG$1 = {
   same: "transparent"
 };
 const LINE_MARKER_COLOR$1 = {
-  add: "rgba(93,202,165,0.6)",
-  remove: "rgba(226,75,74,0.7)",
+  add: "rgba(93,202,165,0.72)",
+  remove: "rgba(226,75,74,0.72)",
   same: "transparent"
 };
 function buildDiffLines$1(change) {
   if (change.type === "delete") {
-    return (change.before ?? "").split("\n").map((t) => ({ text: t, type: "remove" }));
+    return (change.before ?? "").split("\n").map((text) => ({ text, type: "remove" }));
   }
   if (change.type === "create" || !change.before) {
-    return (change.diff ?? "").split("\n").map((t) => ({ text: t, type: "add" }));
+    return (change.diff ?? "").split("\n").map((text) => ({ text, type: "add" }));
   }
-  const a = change.before.split("\n"), b = (change.diff ?? "").split("\n");
-  if (a.length * b.length > 2e5) return b.map((t) => ({ text: t, type: "add" }));
+  const a = change.before.split("\n");
+  const b = (change.diff ?? "").split("\n");
+  if (a.length * b.length > 2e5) return b.map((text) => ({ text, type: "add" }));
   const dp = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
-  for (let i2 = 1; i2 <= a.length; i2++)
-    for (let j2 = 1; j2 <= b.length; j2++)
+  for (let i2 = 1; i2 <= a.length; i2++) {
+    for (let j2 = 1; j2 <= b.length; j2++) {
       dp[i2][j2] = a[i2 - 1] === b[j2 - 1] ? dp[i2 - 1][j2 - 1] + 1 : Math.max(dp[i2 - 1][j2], dp[i2][j2 - 1]);
+    }
+  }
   const result = [];
-  let i = a.length, j = b.length;
+  let i = a.length;
+  let j = b.length;
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
       result.unshift({ text: a[i - 1], type: "same" });
@@ -13606,74 +13664,87 @@ function buildDiffLines$1(change) {
 }
 function FileCard({ change, defaultOpen = false }) {
   const [open, setOpen] = reactExports.useState(defaultOpen);
-  const e = getExt(change.path);
+  const ext = getExt(change.path);
   const name = getFileName(change.path);
   const folder = getFolder(change.path);
-  const { label: iconLabel, color } = fileIconInfo(name);
-  const badge = TYPE_BADGE[change.type];
+  const meta = TYPE_META$1[change.type];
   const lines = buildDiffLines$1(change);
+  const language = EXT_LANG[ext] ?? ext;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "animate-fade-in", style: {
     border: "1px solid var(--border)",
-    borderLeft: `3px solid ${color}`,
-    borderRadius: "0 6px 6px 0",
+    borderRadius: 8,
     marginBottom: 6,
     overflow: "hidden",
-    background: "var(--bg-1)"
+    background: "rgba(255,255,255,0.018)"
   }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { onClick: () => setOpen((v) => !v), style: {
       width: "100%",
       textAlign: "left",
-      padding: "8px 12px",
-      background: open ? "var(--bg-active)" : "var(--bg-2)",
+      padding: "9px 12px",
+      background: open ? "rgba(255,255,255,0.035)" : "transparent",
       display: "flex",
       alignItems: "center",
       gap: 10,
       borderRadius: 0,
       transition: "background 0.15s"
     }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-        width: 24,
-        height: 24,
-        borderRadius: 4,
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        width: 22,
+        height: 22,
+        borderRadius: 6,
         flexShrink: 0,
-        background: `${color}22`,
-        border: `1px solid ${color}55`,
+        background: meta.bg,
+        border: `1px solid ${meta.color}44`,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        fontSize: 8,
+        fontSize: 12,
         fontWeight: 800,
-        color,
+        color: meta.color,
         fontFamily: "var(--font-mono)"
-      }, children: iconLabel }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, fontWeight: 600, color: "var(--text-1)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: name }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, padding: "1px 6px", borderRadius: 10, color: badge.color, background: badge.bg, flexShrink: 0 }, children: badge.label })
+      }, children: meta.sign }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { flex: 1, minWidth: 0 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--text-1)",
+            fontFamily: "var(--font-mono)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap"
+          }, children: name }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, padding: "1px 7px", borderRadius: 999, color: meta.color, background: meta.bg, flexShrink: 0 }, children: meta.label })
         ] }),
-        folder && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "var(--text-3)", marginTop: 1 }, children: [
+        folder && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "block", fontSize: 10, color: "var(--text-3)", marginTop: 1 }, children: [
           folder,
           "/"
         ] })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, alignItems: "center", flexShrink: 0 }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "var(--text-3)" }, children: EXT_LANG[e] ?? e }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--text-3)" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "flex", gap: 10, alignItems: "center", flexShrink: 0 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "var(--text-3)", fontFamily: "var(--font-mono)" }, children: language }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--text-3)", fontFamily: "var(--font-mono)" }, children: [
           lines.length,
-          " linhas"
+          " lines"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "var(--text-3)", transition: "transform 0.2s ease", display: "inline-block", transform: open ? "rotate(180deg)" : "rotate(0deg)" }, children: "▾" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          fontSize: 12,
+          color: "var(--text-3)",
+          transition: "transform 0.2s ease",
+          display: "inline-block",
+          transform: open ? "rotate(90deg)" : "rotate(0deg)"
+        }, children: ">" })
       ] })
     ] }),
-    open && lines.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { maxHeight: 320, overflow: "auto", borderTop: "1px solid var(--border)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.65 }, children: lines.map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    open && lines.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { maxHeight: 320, overflow: "auto", borderTop: "1px solid var(--border)", background: "rgba(0,0,0,0.18)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.65 }, children: lines.map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
         style: { display: "flex", background: LINE_BG$1[line.type] },
-        onMouseEnter: (e2) => {
-          e2.currentTarget.style.background = line.type === "same" ? "var(--bg-hover)" : LINE_BG$1[line.type];
+        onMouseEnter: (event) => {
+          event.currentTarget.style.background = line.type === "same" ? "var(--bg-hover)" : LINE_BG$1[line.type];
         },
-        onMouseLeave: (e2) => {
-          e2.currentTarget.style.background = LINE_BG$1[line.type];
+        onMouseLeave: (event) => {
+          event.currentTarget.style.background = LINE_BG$1[line.type];
         },
         children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { minWidth: 40, padding: "0 10px 0 8px", color: "var(--text-ghost)", userSelect: "none", textAlign: "right", flexShrink: 0, borderRight: "1px solid var(--border)" }, children: line.type !== "remove" ? i + 1 : "" }),
@@ -13685,6 +13756,15 @@ function FileCard({ change, defaultOpen = false }) {
     )) }) })
   ] });
 }
+function serverActivityLabel(event) {
+  if (event.type !== "server_starting" && event.type !== "server_ready" && event.type !== "server_failed") return null;
+  const command = String(event.toolInput?.command ?? event.serverSession?.command ?? "server");
+  if (event.type === "server_ready") {
+    return event.serverSession?.url ? `Server ready at ${event.serverSession.url}` : `Server ready: ${command}`;
+  }
+  if (event.type === "server_failed") return `Server needs attention: ${command}`;
+  return `Starting server: ${command}`;
+}
 const Spinner = () => /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: "animate-spin", style: { opacity: 0.8 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M21 12a9 9 0 1 1-6.219-8.56" }) });
 const IconCheck = () => /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "20 6 9 17 4 12" }) });
 const IconError = () => /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
@@ -13692,6 +13772,12 @@ const IconError = () => /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "
   /* @__PURE__ */ jsxRuntimeExports.jsx("line", { x1: "6", y1: "6", x2: "18", y2: "18" })
 ] });
 const MAX_STREAMED_LINES = 40;
+const VISIBLE_ACTIVITY_COUNT = 20;
+function shortCommand(value) {
+  const trimmed = value.trim();
+  if (trimmed.length <= 96) return trimmed;
+  return `${trimmed.slice(0, 93)}...`;
+}
 function ActivityFeed({ events }) {
   const activities = reactExports.useMemo(() => {
     const list = [];
@@ -13702,20 +13788,46 @@ function ActivityFeed({ events }) {
         const shortPath = rawPath.split(/[/\\]/).pop() || rawPath;
         let type = "read";
         let label = "";
-        if (e.toolName === "write_file" || e.toolName === "delete_file") {
+        let lineCount;
+        if (e.toolName === "write_file") {
           type = "write";
-          label = e.toolName === "write_file" ? `Writing ${shortPath}` : `Deleting ${shortPath}`;
+          const content = String(e.toolInput?.content ?? "");
+          lineCount = content ? content.split("\n").length : void 0;
+          label = `Writing ${shortPath}`;
+        } else if (e.toolName === "edit_file") {
+          type = "write";
+          label = `Editing ${shortPath}`;
+        } else if (e.toolName === "delete_file") {
+          type = "write";
+          label = `Deleting ${shortPath}`;
         } else if (e.toolName === "run_command") {
           type = "command";
-          label = `Running command`;
+          label = `$ ${shortCommand(rawPath)}`;
+        } else if (e.toolName === "run_interactive_command") {
+          type = "command";
+          label = `↗ ${shortCommand(rawPath)} (terminal)`;
         } else if (e.toolName === "list_files") {
           type = "list";
-          label = `Reading directory`;
-        } else {
+          label = `Listing ${shortPath || "."}`;
+        } else if (e.toolName === "grep_codebase") {
+          const pattern = String(e.toolInput?.pattern ?? "");
+          type = "read";
+          label = `Searching: ${pattern.slice(0, 60)}`;
+        } else if (e.toolName === "glob_files") {
+          const pattern = String(e.toolInput?.pattern ?? "");
+          type = "list";
+          label = `Globbing ${pattern}`;
+        } else if (e.toolName === "read_file") {
           type = "read";
           label = `Reading ${shortPath}`;
+        } else if (e.toolName === "todo_write") {
+          type = "list";
+          label = "Updating todo list";
+        } else {
+          type = "read";
+          label = `${e.toolName ?? "tool"} ${shortPath}`.trim();
         }
-        list.push({ id: `tool_${i}`, type, status: "pending", label, detail: rawPath });
+        list.push({ id: `tool_${i}`, type, status: "pending", label, detail: rawPath, fullPath: rawPath, lineCount });
       } else if (e.type === "tool_result") {
         const lastPending = [...list].reverse().find((a) => a.status === "pending" && a.type !== "validate");
         if (lastPending) {
@@ -13726,6 +13838,16 @@ function ActivityFeed({ events }) {
         const m = e.providerMeta;
         const label = m.fallback ? `${m.resolvedProvider}/${m.resolvedModel ?? "?"} (fallback)` : `${m.resolvedProvider}/${m.resolvedModel ?? "auto"}`;
         list.push({ id: `pss_${i}`, type: "read", status: m.fallback ? "error" : "success", label, detail: m.fallbackReason });
+      } else if (e.type === "server_starting" || e.type === "server_ready" || e.type === "server_failed") {
+        const label = serverActivityLabel(e) ?? e.message ?? "Server session";
+        list.push({
+          id: `srv_${i}`,
+          type: "server",
+          status: e.type === "server_starting" ? "pending" : e.type === "server_ready" ? "success" : "error",
+          label,
+          detail: e.serverSession?.diagnostics?.join(", ") || e.message,
+          fullPath: e.serverSession?.cwd
+        });
       } else if (e.type === "validation_started") {
         list.push({ id: `val_${i}`, type: "validate", status: "pending", label: "Running harness validation" });
       } else if (e.type === "harness_layer_start") {
@@ -13762,88 +13884,266 @@ function ActivityFeed({ events }) {
     }
     return list;
   }, [events]);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(ActivityFeedView, { activities });
+}
+function ActivityFeedView({ activities }) {
+  const [expanded, setExpanded] = reactExports.useState(false);
   if (!activities.length) return null;
-  const visible = activities.slice(-5);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginTop: 8, marginBottom: 12 }, children: [
-    activities.length > 5 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--text-3)", paddingLeft: 8, marginBottom: 2 }, children: [
-      "... ",
-      activities.length - 5,
-      " previous steps"
-    ] }),
-    visible.map((act, i) => {
-      const isPending = act.status === "pending";
-      i === visible.length - 1;
-      let color = "var(--text-2)";
-      if (act.status === "error") {
-        color = "var(--red)";
-      } else if (act.type === "write") {
-        color = "var(--teal)";
-      } else if (act.type === "command") {
-        color = "var(--yellow)";
-      } else if (act.type === "validate") {
-        color = "var(--amber)";
-      } else if (act.type === "list") {
-        color = "var(--text-2)";
-      } else {
-        color = "var(--purple)";
+  const totalCount = activities.length;
+  const overflow = Math.max(0, totalCount - VISIBLE_ACTIVITY_COUNT);
+  const visible = expanded || overflow === 0 ? activities : activities.slice(-VISIBLE_ACTIVITY_COUNT);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4, marginTop: 8, marginBottom: 12 }, children: [
+    overflow > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        type: "button",
+        onClick: () => setExpanded((prev) => !prev),
+        style: {
+          alignSelf: "flex-start",
+          fontSize: 11,
+          color: "var(--text-3)",
+          background: "transparent",
+          border: "1px solid var(--border)",
+          padding: "2px 10px",
+          borderRadius: 12,
+          cursor: "pointer",
+          marginBottom: 4
+        },
+        children: expanded ? `Hide ${overflow} earlier step${overflow === 1 ? "" : "s"}` : `Show ${overflow} earlier step${overflow === 1 ? "" : "s"}`
       }
-      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "animate-fade-in", style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "6px 10px",
-        borderRadius: "6px",
-        background: isPending ? "var(--bg-active, rgba(255,255,255,0.04))" : "transparent",
-        border: isPending ? `1px solid rgba(255,255,255,0.05)` : "1px solid transparent",
-        transition: "all 0.2s ease",
-        opacity: isPending ? 1 : 0.7
-      }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: 16, display: "flex", justifyContent: "center", color: isPending || act.status === "error" ? color : "var(--teal)" }, children: isPending ? /* @__PURE__ */ jsxRuntimeExports.jsx(Spinner, {}) : act.status === "error" ? /* @__PURE__ */ jsxRuntimeExports.jsx(IconError, {}) : /* @__PURE__ */ jsxRuntimeExports.jsx(IconCheck, {}) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-            color: isPending ? "var(--text-1)" : "var(--text-2)",
-            fontSize: 12,
+    ),
+    visible.map((act) => /* @__PURE__ */ jsxRuntimeExports.jsx(ActivityRow, { activity: act }, act.id))
+  ] });
+}
+function ActivityRow({ activity: act }) {
+  const isPending = act.status === "pending";
+  const isError = act.status === "error";
+  let color = "var(--text-2)";
+  if (isError) color = "var(--red)";
+  else if (act.type === "write") color = "var(--teal)";
+  else if (act.type === "command") color = "var(--yellow)";
+  else if (act.type === "validate") color = "var(--amber)";
+  else if (act.type === "server") color = "var(--cyan)";
+  else if (act.type === "list") color = "var(--text-2)";
+  else color = "var(--purple)";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "animate-fade-in", style: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 10,
+    padding: "5px 10px",
+    borderRadius: 6,
+    background: isPending ? "var(--bg-active, rgba(255,255,255,0.04))" : "transparent",
+    border: isPending ? "1px solid rgba(255,255,255,0.06)" : "1px solid transparent",
+    transition: "all 0.2s ease",
+    opacity: isPending ? 1 : isError ? 0.95 : 0.78
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+      width: 16,
+      marginTop: 2,
+      display: "flex",
+      justifyContent: "center",
+      color: isPending ? color : isError ? "var(--red)" : "var(--teal)",
+      flexShrink: 0
+    }, children: isPending ? /* @__PURE__ */ jsxRuntimeExports.jsx(Spinner, {}) : isError ? /* @__PURE__ */ jsxRuntimeExports.jsx(IconError, {}) : /* @__PURE__ */ jsxRuntimeExports.jsx(IconCheck, {}) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          title: act.fullPath ?? void 0,
+          style: {
+            color: isPending ? "var(--text-1)" : isError ? "var(--red)" : "var(--text-2)",
+            fontSize: 12.5,
             fontWeight: isPending ? 600 : 500,
             display: "flex",
             alignItems: "center",
-            gap: 8
-          }, children: [
-            act.label,
-            !isPending && act.detail && act.type === "validate" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            gap: 8,
+            flexWrap: "wrap",
+            fontFamily: act.type === "command" ? "var(--font-mono)" : "inherit"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }, children: act.label }),
+            act.lineCount !== void 0 && act.lineCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--text-3)", fontFamily: "var(--font-mono)" }, children: [
+              "· ",
+              act.lineCount,
+              " line",
+              act.lineCount === 1 ? "" : "s"
+            ] }),
+            !isPending && act.type === "validate" && act.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
               fontSize: 10,
               padding: "1px 6px",
-              background: act.status === "error" ? "var(--red-dim)" : "var(--teal-dim)",
-              color: act.status === "error" ? "var(--red)" : "var(--teal)",
+              background: isError ? "var(--red-dim)" : "var(--teal-dim)",
+              color: isError ? "var(--red)" : "var(--teal)",
               borderRadius: 4
             }, children: act.detail })
-          ] }),
-          !isPending && act.detail && act.type === "command" && !act.lines && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: {
-            margin: "4px 0 0",
-            maxHeight: 90,
-            overflow: "hidden",
-            color: act.status === "error" ? "var(--red)" : "var(--text-3)",
-            fontSize: 10,
-            whiteSpace: "pre-wrap",
-            fontFamily: "var(--font-mono)"
-          }, children: act.detail.slice(0, 700) }),
-          act.lines && act.lines.length > 0 && act.type === "command" && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: {
-            margin: "4px 0 0",
-            maxHeight: isPending ? 180 : 140,
-            overflow: "auto",
-            color: act.status === "error" ? "var(--red)" : "var(--text-3)",
-            fontSize: 10,
-            lineHeight: 1.45,
-            whiteSpace: "pre-wrap",
-            fontFamily: "var(--font-mono)",
-            background: "rgba(0,0,0,0.25)",
-            padding: "6px 8px",
-            borderRadius: 4,
-            border: "1px solid rgba(255,255,255,0.04)"
-          }, children: act.lines.join("\n") })
-        ] })
-      ] }, act.id);
-    })
+          ]
+        }
+      ),
+      !isPending && act.detail && act.type === "command" && !act.lines && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: {
+        margin: "4px 0 0",
+        maxHeight: 90,
+        overflow: "hidden",
+        color: isError ? "var(--red)" : "var(--text-3)",
+        fontSize: 10,
+        whiteSpace: "pre-wrap",
+        fontFamily: "var(--font-mono)"
+      }, children: act.detail.slice(0, 700) }),
+      act.lines && act.lines.length > 0 && act.type === "command" && /* @__PURE__ */ jsxRuntimeExports.jsxs("pre", { style: {
+        margin: "4px 0 0",
+        maxHeight: isPending ? 220 : 160,
+        overflow: "auto",
+        color: isError ? "var(--red)" : "var(--text-2)",
+        fontSize: 10.5,
+        lineHeight: 1.5,
+        whiteSpace: "pre-wrap",
+        fontFamily: "var(--font-mono)",
+        background: "rgba(0,0,0,0.32)",
+        padding: "8px 10px",
+        borderRadius: 8,
+        border: "1px solid var(--border)"
+      }, children: [
+        act.lines.join("\n"),
+        isPending && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          display: "inline-block",
+          width: 6,
+          height: "1em",
+          marginLeft: 2,
+          background: "var(--yellow)",
+          verticalAlign: "text-bottom",
+          animation: "pulse-amber 0.9s infinite"
+        } })
+      ] })
+    ] })
   ] });
+}
+function todoStatusLabel(status) {
+  if (status === "in_progress") return "◐";
+  if (status === "completed") return "●";
+  return "○";
+}
+function todoCompletionPercent(todos) {
+  if (todos.length === 0) return 0;
+  const completed = todos.filter((t) => t.status === "completed").length;
+  return Math.round(completed / todos.length * 100);
+}
+function todoActiveContent(todo) {
+  return todo.status === "in_progress" ? todo.activeForm : todo.content;
+}
+function todoIsAllCompleted(todos) {
+  if (todos.length === 0) return false;
+  return todos.every((t) => t.status === "completed");
+}
+function todoSummaryLine(todos) {
+  if (todos.length === 0) return "No plan";
+  const completed = todos.filter((t) => t.status === "completed").length;
+  return `${completed} of ${todos.length} complete`;
+}
+function TodoListCard({ todos }) {
+  if (todos.length === 0) return null;
+  const percent = todoCompletionPercent(todos);
+  const allDone = todoIsAllCompleted(todos);
+  const summary = todoSummaryLine(todos);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "var(--bg-2)",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        padding: "12px 14px",
+        marginBottom: 12,
+        fontFamily: "var(--font-ui)",
+        fontSize: 13,
+        color: "var(--text-1)"
+      },
+      "data-testid": "todo-list-card",
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 8
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, color: "var(--text-1)" }, children: "Plan" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: allDone ? "var(--cyan)" : "var(--text-2)", fontSize: 12 }, children: summary })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              height: 3,
+              width: "100%",
+              background: "var(--bg-3)",
+              borderRadius: 2,
+              overflow: "hidden",
+              marginBottom: 10
+            },
+            "aria-label": `progress: ${percent}%`,
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  width: `${percent}%`,
+                  height: "100%",
+                  background: allDone ? "var(--cyan)" : "var(--teal)",
+                  transition: "width 200ms ease-out"
+                }
+              }
+            )
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { style: { listStyle: "none", padding: 0, margin: 0 }, children: todos.map((todo, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(TodoRow, { todo }, `${i}-${todo.content}`)) })
+      ]
+    }
+  );
+}
+function TodoRow({ todo }) {
+  const glyph = todoStatusLabel(todo.status);
+  const text = todoActiveContent(todo);
+  const muted = todo.status === "completed";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "li",
+    {
+      style: {
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
+        padding: "4px 0",
+        lineHeight: 1.5
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "span",
+          {
+            "aria-hidden": true,
+            style: {
+              color: todo.status === "completed" ? "var(--cyan)" : todo.status === "in_progress" ? "var(--amber)" : "var(--text-3)",
+              fontSize: 14,
+              minWidth: 14,
+              textAlign: "center"
+            },
+            children: glyph
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "span",
+          {
+            style: {
+              color: muted ? "var(--text-3)" : "var(--text-1)",
+              textDecoration: muted ? "line-through" : "none",
+              fontStyle: todo.status === "in_progress" ? "italic" : "normal"
+            },
+            children: text
+          }
+        )
+      ]
+    }
+  );
 }
 const HIDDEN = { show: false, tone: "info", text: "" };
 function getValidationConfidenceCopy(confidence) {
@@ -13852,14 +14152,187 @@ function getValidationConfidenceCopy(confidence) {
     return {
       show: true,
       tone: "warning",
-      text: "Score capped at 75 — no build/test commands detected for this project. Add them in your stack config to unlock full auto-apply."
+      text: "Score capped at 75 - no build/test commands detected for this project. Add them in your stack config to unlock full auto-apply."
     };
   }
   return {
     show: true,
     tone: "info",
-    text: "Score capped — only partial validation ran (some layers were skipped). Configure missing build/test/lint commands to unlock full auto-apply."
+    text: "Score capped - only partial validation ran (some layers were skipped). Configure missing build/test/lint commands to unlock full auto-apply."
   };
+}
+const MAX_FILES_IN_LABEL = 2;
+function basename(p) {
+  return p.split(/[/\\]/).pop() || p;
+}
+function summarizeRecent(events) {
+  const writePaths = [];
+  const seen2 = /* @__PURE__ */ new Set();
+  const uniqueWritePaths = [];
+  let lastCommand = null;
+  let runningCommandLines = 0;
+  let lastHarnessLayer = null;
+  let searchPattern = null;
+  let lastAgentMode = null;
+  for (const e of events) {
+    if (e.type === "tool_call") {
+      const path = typeof e.toolInput?.path === "string" ? e.toolInput.path : "";
+      if ((e.toolName === "write_file" || e.toolName === "edit_file" || e.toolName === "delete_file") && path) {
+        writePaths.push(path);
+        if (!seen2.has(path)) {
+          seen2.add(path);
+          uniqueWritePaths.push(path);
+        }
+      } else if (e.toolName === "run_command" || e.toolName === "run_interactive_command") {
+        const cmd = typeof e.toolInput?.command === "string" ? e.toolInput.command : "";
+        lastCommand = cmd;
+        runningCommandLines = 0;
+      } else if (e.toolName === "grep_codebase") {
+        const pat = typeof e.toolInput?.pattern === "string" ? e.toolInput.pattern : "";
+        searchPattern = pat;
+      }
+    } else if (e.type === "tool_result") {
+      lastCommand = null;
+      runningCommandLines = 0;
+    } else if (e.type === "command_output") {
+      runningCommandLines += 1;
+    } else if (e.type === "harness_layer_start" && e.harnessLayer) {
+      lastHarnessLayer = e.harnessLayer;
+    } else if (e.type === "validation_completed") {
+      lastHarnessLayer = null;
+    } else if (e.type === "agent_started") {
+      lastAgentMode = e.mode ?? null;
+    }
+  }
+  return { writePaths, uniqueWritePaths, lastCommand, runningCommandLines, lastHarnessLayer, searchPattern, lastAgentMode };
+}
+function shortenCommand(cmd) {
+  const trimmed = cmd.trim();
+  if (trimmed.length <= 50) return trimmed;
+  return `${trimmed.slice(0, 47)}...`;
+}
+function formatPathList(paths, total) {
+  if (paths.length === 0) return "";
+  const shown = paths.slice(-MAX_FILES_IN_LABEL).map(basename).join(", ");
+  if (total > MAX_FILES_IN_LABEL) return `${shown} (${total} files)`;
+  return shown;
+}
+function contextualStatusLabel(status, events) {
+  if (!status) return "Processing...";
+  const recent = summarizeRecent(events);
+  if (status === "structuring") return "Structuring task...";
+  if (status === "planning") {
+    if (recent.searchPattern) return `Searching: ${recent.searchPattern.slice(0, 40)}`;
+    return "Planning...";
+  }
+  if (status === "coding") {
+    if (recent.lastCommand) {
+      const detail = recent.runningCommandLines > 0 ? ` · ${recent.runningCommandLines} line${recent.runningCommandLines === 1 ? "" : "s"}` : "";
+      return `${recent.lastAgentMode === "fix" ? "Repairing with" : "Running"} ${shortenCommand(recent.lastCommand)}${detail}`;
+    }
+    if (recent.uniqueWritePaths.length > 0) {
+      const list = formatPathList(recent.uniqueWritePaths, recent.uniqueWritePaths.length);
+      return `${recent.lastAgentMode === "fix" ? "Repairing" : "Editing"} ${list}`;
+    }
+    if (recent.searchPattern) return `Searching: ${recent.searchPattern.slice(0, 40)}`;
+    if (recent.lastAgentMode === "fix") return "Repairing failures...";
+    return "Generating code...";
+  }
+  if (status === "repairing") {
+    if (recent.lastCommand) return `Repairing with ${shortenCommand(recent.lastCommand)}`;
+    if (recent.uniqueWritePaths.length > 0) return `Repairing ${formatPathList(recent.uniqueWritePaths, recent.uniqueWritePaths.length)}`;
+    return "Repairing failures...";
+  }
+  if (status === "server_starting") return "Starting dev server...";
+  if (status === "server_ready") return "Dev server is ready.";
+  if (status === "awaiting_approval") return "Waiting for command approval...";
+  if (status === "blocked") return "Blocked; needs attention.";
+  if (status === "validating") {
+    if (recent.lastHarnessLayer) return `Validating: ${recent.lastHarnessLayer}`;
+    return "Running harness validation...";
+  }
+  if (status === "deciding") return "Reviewing changes...";
+  if (status === "applying") {
+    const count = recent.uniqueWritePaths.length;
+    return count > 0 ? `Applying ${count} file${count === 1 ? "" : "s"}...` : "Applying changes...";
+  }
+  return "Processing...";
+}
+function shouldRenderFloatingResultCard(state) {
+  return state.hasResult && !state.showLive && !state.hasStructuredTaskResult && state.lastMessageRole !== "user";
+}
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+function classifyAttachment(mimeType) {
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("text/") || mimeType === "application/json") return "text";
+  return "document";
+}
+async function fileToAttachment(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 32768;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  const base64 = btoa(binary);
+  return {
+    kind: classifyAttachment(file.type || "application/octet-stream"),
+    name: file.name || "unnamed",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    base64
+  };
+}
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+function AttachmentChip({ attachment, onRemove }) {
+  const isImage = attachment.kind === "image";
+  const dataUrl = isImage ? `data:${attachment.mimeType};base64,${attachment.base64}` : null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "6px 10px 6px 6px",
+    background: "var(--bg-3)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    fontSize: 11,
+    color: "var(--text-2)",
+    maxWidth: 240
+  }, children: [
+    dataUrl ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: dataUrl, alt: attachment.name, style: { width: 32, height: 32, objectFit: "cover", borderRadius: 4, flexShrink: 0 } }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "material-symbols-outlined", style: { fontSize: 18, color: "var(--text-3)" }, children: attachment.kind === "text" ? "description" : "attach_file" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { minWidth: 0, flex: 1 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }, children: attachment.name }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "var(--text-3)", fontSize: 10 }, children: formatBytes(attachment.sizeBytes) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        type: "button",
+        onClick: onRemove,
+        title: "Remove attachment",
+        style: {
+          width: 18,
+          height: 18,
+          borderRadius: 4,
+          background: "transparent",
+          border: "none",
+          color: "var(--text-3)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          cursor: "pointer"
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "material-symbols-outlined", style: { fontSize: 14 }, children: "close" })
+      }
+    )
+  ] });
 }
 const SLASH_COMMANDS = [
   { cmd: "/plan", label: "Plan", detail: "Analyze and create a technical plan — no file changes" },
@@ -14387,31 +14860,52 @@ function TaskResultCard({ executionState }) {
   const parts = [
     created > 0 && `+${created} created`,
     modified > 0 && `~${modified} modified`,
-    deleted > 0 && `−${deleted} deleted`
+    deleted > 0 && `-${deleted} deleted`
   ].filter(Boolean);
   const statusColor = status === "completed" ? "var(--teal)" : status === "paused" ? "var(--yellow)" : "var(--red)";
-  const statusIcon = status === "completed" ? "✓" : status === "paused" ? "⏸" : "✗";
   const statusLabel = status === "completed" ? "Applied" : status === "paused" ? "Awaiting review" : decision.reason || "Repair needed";
   const passedLayers = harnessResult.layers.filter((l) => l.passed && !l.skipped);
   const failedLayers = harnessResult.layers.filter((l) => !l.passed && !l.skipped);
   const scoreColor = score >= 90 ? "var(--teal)" : score >= 70 ? "var(--yellow)" : "var(--red)";
   const validationCopy = getValidationConfidenceCopy(harnessResult.validationConfidence);
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "animate-fade-in", style: { marginBottom: 16 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { border: "1px solid var(--border)", borderRadius: "2px 12px 12px 12px", overflow: "hidden" }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, borderBottom: "1px solid var(--border)", background: "var(--bg-1)" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: statusColor, fontSize: 14, fontWeight: 700, flexShrink: 0 }, children: statusIcon }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-1)", fontSize: 13, fontWeight: 600 }, children: parts.join("  ") }),
+  const statusTitle = status === "completed" ? "Changes ready" : status === "paused" ? "Review required" : "Repair needed";
+  const statusMark = status === "completed" ? "OK" : status === "paused" ? "!" : "x";
+  const summaryText = parts.length > 0 ? parts.join(" / ") : "No file changes";
+  const repairHint = status === "failed" && failedLayers.length > 0 ? `Kova is using ${failedLayers.map((layer) => layer.name).join(", ")} output as repair context.` : null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "animate-fade-in", style: { marginBottom: 16 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", background: "var(--bg-1)" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "12px 14px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid var(--border)" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        width: 26,
+        height: 26,
+        borderRadius: 8,
+        display: "grid",
+        placeItems: "center",
+        background: status === "completed" ? "var(--teal-dim)" : status === "paused" ? "var(--yellow-dim)" : "var(--red-dim)",
+        color: statusColor,
+        fontSize: 11,
+        fontWeight: 800,
+        fontFamily: "var(--font-mono)",
+        flexShrink: 0
+      }, children: statusMark }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { minWidth: 0, flex: 1 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-1)", fontSize: 13.5, fontWeight: 700 }, children: statusTitle }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-3)", fontSize: 11, fontFamily: "var(--font-mono)" }, children: summaryText })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "var(--text-3)", fontSize: 11.5, lineHeight: 1.45, marginTop: 2 }, children: statusLabel })
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginLeft: "auto", display: "flex", gap: 5, alignItems: "center", flexShrink: 0, flexWrap: "wrap" }, children: [
         iters > 1 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--yellow)", background: "var(--yellow-dim)", padding: "1px 6px", borderRadius: 8, fontFamily: "var(--font-mono)" }, children: [
-          iters,
-          "×"
+          "iter ",
+          iters
         ] }),
         passedLayers.map((l) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--teal)", background: "var(--teal-dim)", padding: "1px 6px", borderRadius: 8, fontFamily: "var(--font-mono)" }, children: [
           l.name,
-          " ✓"
+          " ok"
         ] }, l.name)),
         failedLayers.map((l) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "var(--red)", background: "var(--red-dim)", padding: "1px 6px", borderRadius: 8, fontFamily: "var(--font-mono)" }, children: [
           l.name,
-          " ✗"
+          " failed"
         ] }, l.name)),
         harnessResult.layers.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: scoreColor, fontFamily: "var(--font-mono)", fontWeight: 700 }, children: score })
       ] })
@@ -14423,10 +14917,14 @@ function TaskResultCard({ executionState }) {
         i + 1,
         ":",
         s,
-        i < iters - 1 ? " →" : ""
+        i < iters - 1 ? " ->" : ""
       ] }, i);
     }) }),
-    status !== "completed" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "4px 14px", borderBottom: "1px solid var(--border)", fontSize: 11, color: statusColor }, children: statusLabel }),
+    status !== "completed" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "8px 14px", borderBottom: "1px solid var(--border)", fontSize: 11.5, color: statusColor, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", background: status === "failed" ? "rgba(226,75,74,0.045)" : "transparent" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: 6, height: 6, borderRadius: 999, background: statusColor, flexShrink: 0 } }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: status === "failed" ? "Repair context" : statusLabel }),
+      repairHint && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-3)" }, children: repairHint })
+    ] }),
     validationCopy.show && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       padding: "8px 14px",
       borderBottom: "1px solid var(--border)",
@@ -14438,10 +14936,10 @@ function TaskResultCard({ executionState }) {
       gap: 8,
       alignItems: "flex-start"
     }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, lineHeight: 1, flexShrink: 0, marginTop: 1 }, children: "ⓘ" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, lineHeight: 1.2, flexShrink: 0, marginTop: 1, fontWeight: 800 }, children: "i" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: validationCopy.text })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "6px 10px", background: "var(--bg-2)" }, children: changes.map((change, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileCard, { change, defaultOpen: changes.length === 1 }, i)) })
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "8px 10px", background: "var(--bg-2)" }, children: changes.map((change, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(FileCard, { change, defaultOpen: changes.length === 1 }, i)) })
   ] }) });
 }
 function extractAtRefs(text) {
@@ -14467,13 +14965,85 @@ function ChatArea({
   activeMode,
   sessionUsage,
   activeModel,
+  todos,
   onModeChange,
-  onClearQueue
+  onClearQueue,
+  supportsVision
 }) {
   const [value, setValue] = reactExports.useState("");
   const [showSlash, setShowSlash] = reactExports.useState(false);
+  const [attachments, setAttachments] = reactExports.useState([]);
+  const [attachmentError, setAttachmentError] = reactExports.useState(null);
+  const [isDragging, setIsDragging] = reactExports.useState(false);
   const bottomRef = reactExports.useRef(null);
   const textareaRef = reactExports.useRef(null);
+  const fileInputRef = reactExports.useRef(null);
+  const addFiles = reactExports.useCallback(async (files) => {
+    if (files.length === 0) return;
+    const currentTotal = attachments.reduce((sum, a) => sum + a.sizeBytes, 0);
+    let runningTotal = currentTotal;
+    const added = [];
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachmentError(`${file.name}: max 10 MB per file`);
+        continue;
+      }
+      if (runningTotal + file.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+        setAttachmentError(`Total exceeds 50 MB — drop some attachments`);
+        break;
+      }
+      const isImage = (file.type || "").startsWith("image/");
+      if (isImage && supportsVision === false) {
+        setAttachmentError(`${activeModel ?? "Active model"} does not support images. Switch to a vision model.`);
+        continue;
+      }
+      runningTotal += file.size;
+      added.push(await fileToAttachment(file));
+    }
+    if (added.length > 0) {
+      setAttachments((prev) => [...prev, ...added]);
+      setAttachmentError(null);
+    }
+  }, [attachments, supportsVision, activeModel]);
+  const removeAttachment = reactExports.useCallback((index) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+    setAttachmentError(null);
+  }, []);
+  const onPickFiles = reactExports.useCallback((e) => {
+    if (!e.target.files) return;
+    addFiles(Array.from(e.target.files));
+    e.target.value = "";
+  }, [addFiles]);
+  const onDrop = reactExports.useCallback((e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (!e.dataTransfer?.files?.length) return;
+    addFiles(Array.from(e.dataTransfer.files));
+  }, [addFiles]);
+  const onDragOver = reactExports.useCallback((e) => {
+    e.preventDefault();
+    if (!isDragging) setIsDragging(true);
+  }, [isDragging]);
+  const onDragLeave = reactExports.useCallback((e) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setIsDragging(false);
+  }, []);
+  const onPaste = reactExports.useCallback((e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  }, [addFiles]);
   reactExports.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, executionState?.status, isThinking, streamingText, reasoning.active]);
@@ -14489,12 +15059,14 @@ function ChatArea({
   }, [value]);
   const submit = reactExports.useCallback(() => {
     const t = value.trim();
-    if (!t || !projectRoot) return;
+    if (!t && attachments.length === 0 || !projectRoot) return;
     if (/^\/plan(\s|$)/i.test(t)) onModeChange("plan");
     else if (/^\/review(\s|$)/i.test(t)) onModeChange("review");
-    onSend(t);
+    onSend(t, void 0, attachments.length > 0 ? attachments : void 0);
     setValue("");
-  }, [value, projectRoot, onSend, onModeChange]);
+    setAttachments([]);
+    setAttachmentError(null);
+  }, [value, attachments, projectRoot, onSend, onModeChange]);
   const onKeyDown = reactExports.useCallback((e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -14515,6 +15087,14 @@ function ChatArea({
   const hasResult = !!lastIter && lastIter.changes.length > 0;
   const isActive2 = !!executionState && !["completed", "failed", "paused"].includes(executionState.status);
   const showLive = (isRunning || isThinking || reasoning.active) && !hasResult;
+  const hasStructuredTaskResult = messages.some((msg) => msg.structured?.kind === "agent_result");
+  const showTodoCard = todos.length > 0 && (isActive2 || isRunning || isThinking || reasoning.active);
+  const showResultCard = shouldRenderFloatingResultCard({
+    hasResult,
+    showLive,
+    hasStructuredTaskResult,
+    lastMessageRole: messages.at(-1)?.role
+  });
   const totalTokens = sessionUsage.contextTokens + sessionUsage.completionTokens;
   const contextPct = sessionUsage.maxContextTokens ? Math.min(100, Math.round(sessionUsage.contextTokens / sessionUsage.maxContextTokens * 100)) : 0;
   const isNonDefaultMode = activeMode === "plan" || activeMode === "review";
@@ -14545,10 +15125,11 @@ function ChatArea({
           fontFamily: "var(--font-mono)"
         }, children: item.label }, item.mode)) })
       ] }),
+      showTodoCard && /* @__PURE__ */ jsxRuntimeExports.jsx(TodoListCard, { todos }),
       messages.map(
         (msg) => msg.role === "user" ? /* @__PURE__ */ jsxRuntimeExports.jsx(UserBubble, { msg }, msg.id) : /* @__PURE__ */ jsxRuntimeExports.jsx(AssistantBubble, { msg }, msg.id)
       ),
-      hasResult && !showLive && /* @__PURE__ */ jsxRuntimeExports.jsx(TaskResultCard, { executionState }),
+      showResultCard && /* @__PURE__ */ jsxRuntimeExports.jsx(TaskResultCard, { executionState }),
       showLive && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 10, marginBottom: 16 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
         (reasoning.active || reasoning.text) && /* @__PURE__ */ jsxRuntimeExports.jsx(ReasoningPanel, { reasoning }),
         streamingText && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
@@ -14575,7 +15156,7 @@ function ChatArea({
           } })
         ] }),
         events.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(ActivityFeed, { events }),
-        isActive2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: 6, display: "flex", alignItems: "center", gap: 6 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kova-shimmer-text", style: { fontSize: 12, fontWeight: 500 }, children: executionState.status === "validating" ? "Validating..." : executionState.status === "applying" ? "Applying..." : executionState.status === "deciding" ? "Deciding..." : "Processing..." }) })
+        isActive2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: 6, display: "flex", alignItems: "center", gap: 6 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "kova-shimmer-text", style: { fontSize: 12, fontWeight: 500 }, children: contextualStatusLabel(executionState.status, events) }) })
       ] }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: bottomRef })
     ] }),
@@ -14613,19 +15194,46 @@ function ChatArea({
       ] }, ref)) }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative" }, children: [
         showSlash && /* @__PURE__ */ jsxRuntimeExports.jsx(SlashPalette, { query: value.trimStart(), onSelect: selectSlashCommand }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            ref: fileInputRef,
+            type: "file",
+            multiple: true,
+            accept: "image/*,text/*,application/pdf,application/json",
+            onChange: onPickFiles,
+            style: { display: "none" }
+          }
+        ),
         /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
           {
             style: {
-              border: "1px solid var(--border)",
+              border: `1px solid ${isDragging ? "var(--cyan)" : "var(--border)"}`,
               borderRadius: 12,
-              background: "var(--bg-2)",
+              background: isDragging ? "var(--cyan-dim)" : "var(--bg-2)",
               overflow: "hidden",
-              transition: "border-color 0.15s"
+              transition: "border-color 0.15s, background 0.15s"
             },
-            onFocus: () => {
-            },
+            onDrop,
+            onDragOver,
+            onDragLeave,
             children: [
+              attachments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+                display: "flex",
+                gap: 8,
+                padding: "10px 12px 0",
+                flexWrap: "wrap",
+                borderBottom: "1px solid var(--border)",
+                paddingBottom: 10
+              }, children: attachments.map((att, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx(AttachmentChip, { attachment: att, onRemove: () => removeAttachment(idx) }, `${att.name}-${idx}`)) }),
+              attachmentError && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+                padding: "6px 14px",
+                fontSize: 11,
+                color: "var(--red)",
+                background: "var(--red-dim)",
+                borderBottom: "1px solid var(--border)"
+              }, children: attachmentError }),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "textarea",
                 {
@@ -14633,8 +15241,9 @@ function ChatArea({
                   value,
                   onChange: (e) => setValue(e.target.value),
                   onKeyDown,
+                  onPaste,
                   disabled: !projectRoot,
-                  placeholder: !projectRoot ? "Open a project to get started..." : isRunning || isThinking ? "Message will be queued..." : "Ask, analyze, or request code changes. Use @file or /plan, /review",
+                  placeholder: !projectRoot ? "Open a project to get started..." : isRunning || isThinking ? "Message will be queued..." : isDragging ? "Drop files here..." : "Ask, analyze, or request code changes. Use @file or /plan, /review",
                   rows: 1,
                   style: {
                     width: "100%",
@@ -14652,6 +15261,40 @@ function ChatArea({
                 }
               ),
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", padding: "6px 10px 8px", gap: 6 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    type: "button",
+                    onClick: () => fileInputRef.current?.click(),
+                    disabled: !projectRoot,
+                    title: supportsVision === false ? "Active model does not support images — text/PDF only" : "Attach files or images (drag-drop or paste also works)",
+                    style: {
+                      width: 28,
+                      height: 28,
+                      borderRadius: 8,
+                      background: "transparent",
+                      border: "1px solid var(--border)",
+                      color: "var(--text-3)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                      cursor: projectRoot ? "pointer" : "not-allowed",
+                      transition: "background 0.15s, color 0.15s, border-color 0.15s"
+                    },
+                    onMouseEnter: (e) => {
+                      if (projectRoot) {
+                        e.currentTarget.style.borderColor = "var(--cyan)";
+                        e.currentTarget.style.color = "var(--cyan)";
+                      }
+                    },
+                    onMouseLeave: (e) => {
+                      e.currentTarget.style.borderColor = "var(--border)";
+                      e.currentTarget.style.color = "var(--text-3)";
+                    },
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "material-symbols-outlined", style: { fontSize: 16 }, children: "add" })
+                  }
+                ),
                 ["plan", "review"].map((mode) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "button",
                   {
@@ -14690,14 +15333,14 @@ function ChatArea({
                   "button",
                   {
                     onClick: submit,
-                    disabled: !value.trim() || !projectRoot,
+                    disabled: !value.trim() && attachments.length === 0 || !projectRoot,
                     style: {
                       width: 34,
                       height: 34,
                       borderRadius: 8,
                       flexShrink: 0,
-                      background: value.trim() && projectRoot ? "var(--cyan)" : "var(--bg-active)",
-                      color: value.trim() && projectRoot ? "#000" : "var(--text-3)",
+                      background: (value.trim() || attachments.length > 0) && projectRoot ? "var(--cyan)" : "var(--bg-active)",
+                      color: (value.trim() || attachments.length > 0) && projectRoot ? "#000" : "var(--text-3)",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -14716,6 +15359,29 @@ function ChatArea({
     ] })
   ] });
 }
+function ServerSessionCard({ events }) {
+  const session = [...events].reverse().find((event) => event.serverSession)?.serverSession;
+  if (!session) return null;
+  const tone = session.ready ? "pass" : session.diagnostics?.length ? "fail" : "warn";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "kova-panel-section kova-server-session", "data-tone": tone, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-section-title", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Dev Server" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: session.ready ? "ready" : "starting" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-contract-grid", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Port" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: session.port ?? "-" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Session" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: session.sessionId ?? "-" })
+      ] })
+    ] }),
+    session.url && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "kova-proof-next", children: session.url }),
+    session.diagnostics?.length ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "kova-proof-list danger", children: session.diagnostics.map((item) => /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: item }, item)) }) : null
+  ] });
+}
 const PHASES = [
   { key: "contract", label: "Contract", events: ["contract_created"] },
   { key: "plan", label: "Plan", events: ["agent_started", "agent_completed"] },
@@ -14724,8 +15390,9 @@ const PHASES = [
   { key: "decide", label: "Decide", events: ["decision_made"] },
   { key: "apply", label: "Apply", events: ["apply_started", "apply_completed"] }
 ];
-const LAYER_ORDER = ["build", "typecheck", "tests", "rules", "security", "lint"];
+const LAYER_ORDER = ["completion", "build", "typecheck", "tests", "rules", "security", "lint"];
 const LAYER_LABEL = {
+  completion: "Completion",
   build: "Build",
   typecheck: "Typecheck",
   tests: "Tests",
@@ -14740,6 +15407,11 @@ const STATUS_COPY = {
   validating: "Validating",
   deciding: "Deciding",
   applying: "Applying",
+  repairing: "Repairing",
+  awaiting_approval: "Approval",
+  server_starting: "Server",
+  server_ready: "Server Ready",
+  blocked: "Blocked",
   completed: "Completed",
   failed: "Failed",
   paused: "Review"
@@ -15006,7 +15678,7 @@ function ProofPackCard({ executionState }) {
       failed.slice(0, 3).map((validation) => /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { children: [
         validation.command ?? validation.kind,
         " - ",
-        validation.note ?? "falhou"
+        validation.note ?? "failed"
       ] }, `${validation.kind}:${validation.command ?? validation.note}`))
     ] }),
     proof.validationsNotRun.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-proof-list", children: [
@@ -15149,6 +15821,7 @@ function HarnessDashboard({ executionState, events, sessionUsage, isThinking, on
         ] })
       ] }),
       (tab === "timeline" || tab === "events") && /* @__PURE__ */ jsxRuntimeExports.jsx(ContextEvidenceCard, { sessionUsage }),
+      (tab === "timeline" || tab === "run") && /* @__PURE__ */ jsxRuntimeExports.jsx(ServerSessionCard, { events }),
       tab === "timeline" && /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "kova-panel-section", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-section-title", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Timeline" }),
@@ -15235,9 +15908,43 @@ function HarnessDashboard({ executionState, events, sessionUsage, isThinking, on
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-run-actions", children: [
+      isPaused && changes.length > 0 && uxMode === "Task" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        padding: "12px 14px",
+        background: "var(--yellow-dim)",
+        border: "1px solid var(--yellow)",
+        borderRadius: 6,
+        marginBottom: 10
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--yellow)", marginBottom: 4 }, children: [
+          changes.length,
+          " file",
+          changes.length === 1 ? "" : "s",
+          " ready to apply"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-2)", lineHeight: 1.4 }, children: decision?.reason ?? "Review and apply to write these files to disk." })
+      ] }),
       needsRepair && onRepair && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "primary repair", onClick: onRepair, children: "Fix failures" }),
+      isPaused && uxMode === "Task" && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          className: "primary",
+          onClick: onApply,
+          style: {
+            fontSize: 14,
+            fontWeight: 700,
+            padding: "10px 16px",
+            background: "var(--teal)",
+            color: "var(--bg-0)",
+            width: "100%"
+          },
+          children: [
+            "Apply ",
+            changes.length > 0 ? `${changes.length} file${changes.length === 1 ? "" : "s"}` : "changes",
+            " to disk"
+          ]
+        }
+      ),
       onViewDiff && uxMode === "Task" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "secondary", onClick: onViewDiff, children: "Review files" }),
-      isPaused && uxMode === "Task" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "primary", onClick: onApply, children: "Apply changes" }),
       isRunning && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "kova-action-row", children: [
         uxMode === "Task" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "secondary", onClick: onPause, children: "Pause" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "danger", onClick: onAbort, children: "Cancel" })
@@ -15571,21 +16278,45 @@ const STATUS_COLOR = {
   deciding: "var(--yellow)",
   applying: "var(--teal)",
   completed: "var(--teal)",
+  repairing: "var(--amber)",
+  awaiting_approval: "var(--yellow)",
+  server_starting: "var(--cyan)",
+  server_ready: "var(--teal)",
+  blocked: "var(--red)",
   failed: "var(--red)",
   paused: "var(--text-3)"
 };
-function StatusBar({ executionState, sessionUsage }) {
+function StatusBar({ executionState, sessionUsage, events }) {
   const status = executionState?.status ?? null;
   const last = executionState?.iterationHistory?.at(-1) ?? null;
+  const pendingChanges = status === "paused" ? last?.changes.length ?? 0 : 0;
+  const isActive2 = !!status && !["completed", "failed", "paused"].includes(status);
+  const liveLabel = isActive2 && events && events.length > 0 ? contextualStatusLabel(status, events) : null;
+  const server = events ? [...events].reverse().find((event) => event.serverSession)?.serverSession : null;
   const tokens = Math.max(executionState?.totalTokens ?? 0, sessionUsage.contextTokens + sessionUsage.completionTokens);
   const contextPercent = sessionUsage.maxContextTokens ? Math.min(100, Math.round(sessionUsage.contextTokens / sessionUsage.maxContextTokens * 100)) : null;
-  const isActive2 = status && !["completed", "failed"].includes(status);
+  const cacheTokens = sessionUsage.cacheReadInputTokens;
   const tokenLabel = tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M tokens` : tokens > 0 ? `${(tokens / 1e3).toFixed(1)}k tokens` : null;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { height: 28, background: "var(--bg-3)", borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 14px", gap: 16, flexShrink: 0 }, children: [
     status && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: 6, height: 6, borderRadius: "50%", background: STATUS_COLOR[status] ?? "var(--text-3)", animation: isActive2 ? "pulse-amber 1.5s infinite" : "none" } }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: STATUS_COLOR[status] ?? "var(--text-3)" }, children: status })
     ] }),
+    liveLabel && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: {
+          fontSize: 11,
+          color: "var(--text-2)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          maxWidth: 360
+        },
+        title: liveLabel,
+        children: liveLabel
+      }
+    ),
     executionState && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--text-3)" }, children: [
       "iter ",
       executionState.currentIteration + 1,
@@ -15596,9 +16327,30 @@ function StatusBar({ executionState, sessionUsage }) {
       "score ",
       last.harnessResult.score
     ] }),
+    pendingChanges > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: "var(--yellow)",
+      padding: "2px 8px",
+      background: "var(--yellow-dim)",
+      borderRadius: 10,
+      animation: "pulse-amber 2s infinite"
+    }, children: [
+      pendingChanges,
+      " awaiting apply"
+    ] }),
+    server?.ready && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--cyan)" }, children: [
+      "server ",
+      server.url ?? server.port ?? "ready"
+    ] }),
     tokenLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-3)", marginLeft: "auto" }, children: tokenLabel }),
+    cacheTokens > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--teal)" }, children: [
+      "cache ",
+      (cacheTokens / 1e3).toFixed(1),
+      "k"
+    ] }),
     contextPercent !== null && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--text-3)", marginLeft: tokenLabel ? 0 : "auto" }, children: [
-      "contexto ",
+      "context ",
       contextPercent,
       "%"
     ] }),
@@ -15613,23 +16365,25 @@ const PROVIDERS = [
   { value: "ollama", label: "Ollama", description: "Local Ollama server", local: true },
   { value: "anthropic", label: "Anthropic Claude", description: "Claude API models", local: false },
   { value: "openai", label: "OpenAI", description: "OpenAI API models", local: false },
-  { value: "deepseek", label: "DeepSeek", description: "DeepSeek API models", local: false },
   { value: "gemini", label: "Google Gemini", description: "Gemini OpenAI-compatible endpoint", local: false },
+  { value: "deepseek", label: "DeepSeek", description: "DeepSeek API models", local: false },
+  { value: "kimi", label: "Kimi (Moonshot)", description: "Moonshot Kimi K2.x models", local: false },
+  { value: "xai", label: "xAI (Grok)", description: "Grok 4 family", local: false },
   { value: "openrouter", label: "OpenRouter", description: "Router for Claude, GPT, Gemini and OSS models", local: false },
-  { value: "kimi", label: "Kimi Moonshot", description: "Moonshot Kimi models", local: false },
   { value: "nvidia", label: "NVIDIA Kimi K2.6", description: "NVIDIA hosted Kimi endpoint", local: false },
   { value: "openai-compatible", label: "OpenAI Compatible", description: "Custom compatible endpoint", local: false }
 ];
 const HINTS = {
   lmstudio: "Abra LM Studio > Local Server > carregue um modelo > Start Server.",
   ollama: "Instale Ollama (ollama.ai) e rode: ollama pull qwen2.5-coder:7b",
-  anthropic: "Acesse console.anthropic.com > API Keys. Selecione o modelo no dropdown.",
-  openai: "Acesse platform.openai.com > API Keys. Selecione o modelo no dropdown.",
-  deepseek: "Acesse platform.deepseek.com > API Keys. Modelos: deepseek-v4-flash ou deepseek-v4-pro.",
-  gemini: "Acesse aistudio.google.com > Get API Key. Usa endpoint OpenAI-compatible do Google.",
-  openrouter: "Acesse openrouter.ai. Suporta Claude, GPT, Gemini, Llama e outros modelos.",
-  kimi: "Acesse platform.moonshot.ai > API Keys.",
-  nvidia: "Acesse build.nvidia.com > Moonshot Kimi K2.6 > Get API Key.",
+  anthropic: "console.anthropic.com → API Keys. Selecione o modelo no dropdown.",
+  openai: "platform.openai.com → API Keys. GPT-5.x recomendado.",
+  deepseek: "platform.deepseek.com → API Keys. Modelos: deepseek-chat (V3.2) ou deepseek-reasoner (R1).",
+  gemini: "aistudio.google.com → Get API Key. Usa o endpoint OpenAI-compatible do Google.",
+  openrouter: "openrouter.ai → Keys. Suporta Claude, GPT, Gemini, Llama e outros modelos.",
+  kimi: "platform.moonshot.ai → API Keys.",
+  xai: "console.x.ai → API Keys. Grok 4 e variantes fast/code.",
+  nvidia: "build.nvidia.com → Kimi K2.6 → Get API Key.",
   "openai-compatible": "Qualquer API compativel com OpenAI: Groq, Together, Fireworks, LM Studio remoto. Informe URL e modelo."
 };
 const API_KEY_CONFIG = {
@@ -15639,16 +16393,18 @@ const API_KEY_CONFIG = {
   gemini: { label: "Google Gemini API Key", placeholder: "AIza...", key: "geminiKey" },
   openrouter: { label: "OpenRouter API Key", placeholder: "sk-or-v1-...", key: "openrouterKey" },
   kimi: { label: "Kimi / Moonshot Key", placeholder: "sk-...", key: "kimiKey" },
+  xai: { label: "xAI API Key", placeholder: "xai-...", key: "xaiKey" },
   nvidia: { label: "NVIDIA API Key", placeholder: "nvapi-...", key: "nvidiaKey" },
-  "openai-compatible": { label: "API Key (opcional)", placeholder: "deixe vazio se nao precisar", key: "openaiCompatibleKey" }
+  "openai-compatible": { label: "API Key (optional)", placeholder: "leave empty when not required", key: "openaiCompatibleKey" }
 };
 const DEFAULT_MODELS = {
   anthropic: "claude-sonnet-4-6",
-  openai: "gpt-4.1",
-  deepseek: "deepseek-v4-flash",
-  gemini: "gemini-2.5-flash",
-  openrouter: "anthropic/claude-sonnet-4.5",
-  kimi: "kimi-k2.5",
+  openai: "gpt-5.5",
+  deepseek: "deepseek-chat",
+  gemini: "gemini-3-flash-preview",
+  openrouter: "anthropic/claude-sonnet-4-6",
+  kimi: "kimi-k2.6",
+  xai: "grok-4",
   nvidia: "moonshotai/kimi-k2.6"
 };
 const KNOWN_MODELS = {
@@ -15657,58 +16413,54 @@ const KNOWN_MODELS = {
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
     "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
-    "claude-3-opus-20240229"
+    "claude-3-5-haiku-20241022"
   ],
   openai: [
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5.2-codex",
     "gpt-4.1",
-    "gpt-4.1-mini",
-    "gpt-4.1-nano",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o3",
-    "o3-mini",
-    "o4-mini",
-    "o1",
-    "o1-mini"
-  ],
-  deepseek: [
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-    "deepseek-chat",
-    "deepseek-coder",
-    "deepseek-r1",
-    "deepseek-r1-distill-qwen-32b"
+    "gpt-4o"
   ],
   gemini: [
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite-preview-06-17",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-thinking-exp-01-21",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash"
-  ],
-  openrouter: [
-    "anthropic/claude-opus-4",
-    "anthropic/claude-sonnet-4.5",
-    "openai/gpt-4.1",
-    "openai/gpt-4o",
-    "openai/o3-mini",
-    "google/gemini-2.5-pro-preview",
-    "google/gemini-2.5-flash-preview-05-20",
-    "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-r1",
-    "meta-llama/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-2407",
-    "qwen/qwen2.5-72b-instruct",
-    "x-ai/grok-2"
+    "gemini-2.5-flash"
   ],
   kimi: [
+    "kimi-k2.6",
+    "kimi-k2.6-thinking",
     "kimi-k2.5",
-    "moonshot-v1-8k",
-    "moonshot-v1-32k",
-    "moonshot-v1-128k"
+    "kimi-k2"
+  ],
+  deepseek: [
+    "deepseek-chat",
+    "deepseek-reasoner"
+  ],
+  xai: [
+    "grok-4",
+    "grok-4.1",
+    "grok-4-fast-reasoning",
+    "grok-4-fast-non-reasoning",
+    "grok-code-fast-1"
+  ],
+  openrouter: [
+    "anthropic/claude-opus-4-7",
+    "anthropic/claude-sonnet-4-6",
+    "openai/gpt-5.5",
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-3-flash-preview",
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-reasoner",
+    "moonshotai/kimi-k2.6",
+    "x-ai/grok-4",
+    "meta-llama/llama-3.3-70b-instruct",
+    "qwen/qwen2.5-72b-instruct"
   ],
   nvidia: [
     "moonshotai/kimi-k2.6"
@@ -15850,7 +16602,7 @@ function ProviderModal({ settings, onSave, onClose }) {
             models.length > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { value: form.model, onChange: set("model"), style: { ...FIELD, flex: 1, cursor: "pointer" }, children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: "Usar modelo carregado" }),
               models.map((m) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: m, children: m }, m))
-            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "text", value: form.model, onChange: set("model"), placeholder: "Clique em Detectar", style: { ...FIELD, flex: 1 } }),
+            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "text", value: form.model, onChange: set("model"), placeholder: "Click Detect", style: { ...FIELD, flex: 1 } }),
             canDetect && /* @__PURE__ */ jsxRuntimeExports.jsx(
               "button",
               {
@@ -15871,7 +16623,7 @@ function ProviderModal({ settings, onSave, onClose }) {
                   type: "text",
                   value: form.model,
                   onChange: set("model"),
-                  placeholder: "Cole o ID exato da API (ex: gemini-3.1-pro)",
+                  placeholder: "Paste the exact API ID (for example: gemini-3.1-pro)",
                   style: { ...FIELD, borderColor: !form.model ? "var(--amber)" : void 0 },
                   autoFocus: true
                 }
@@ -15886,15 +16638,15 @@ function ProviderModal({ settings, onSave, onClose }) {
                 children: modelMode === "preset" ? "+ Modelo personalizado / mais recente" : "Voltar para lista"
               }
             ) })
-          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "text", value: form.model, onChange: set("model"), placeholder: "nome exato do modelo (obrigatorio)", style: FIELD }),
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "text", value: form.model, onChange: set("model"), placeholder: "exact model name (required)", style: FIELD }),
           detectError && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: 11, color: "var(--red)", marginTop: 4 }, children: detectError }),
           models.length > 1 && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: 11, color: "var(--teal)", marginTop: 4 }, children: [
             models.length,
             " modelos detectados"
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 20, alignItems: "flex-end", paddingTop: 12 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "Max. iteracoes", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 20, alignItems: "flex-end", paddingTop: 12, flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "Max iterations", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
             "input",
             {
               type: "number",
@@ -15905,9 +16657,14 @@ function ProviderModal({ settings, onSave, onClose }) {
               style: { ...FIELD, width: 88 }
             }
           ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "Command permissions", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("select", { value: form.permissionMode ?? "auto-review", onChange: set("permissionMode"), style: { ...FIELD, width: 180 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "auto-review", children: "Auto-review safe commands" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "ask", children: "Ask before commands" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "full-access", children: "Full access" })
+          ] }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--text-2)", fontSize: 13, paddingBottom: 2 }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("input", { type: "checkbox", checked: form.autoApply, onChange: set("autoApply") }),
-            "Auto-aplicar (score maior ou igual a 90)"
+            "Auto-apply when score is 90+"
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, justifyContent: "flex-end", paddingTop: 16, borderTop: "1px solid var(--border)" }, children: [
@@ -15918,7 +16675,7 @@ function ProviderModal({ settings, onSave, onClose }) {
     }
   );
 }
-const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-CxOqh7KD.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
+const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-BSMEalpM.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
 const EMPTY_REASONING = {
   active: false,
   text: "",
@@ -15933,6 +16690,8 @@ function localServerUrl(s) {
 const EMPTY_USAGE = {
   contextTokens: 0,
   completionTokens: 0,
+  cacheReadInputTokens: 0,
+  cacheCreationInputTokens: 0,
   contextFiles: [],
   selectedFiles: [],
   blockedFiles: [],
@@ -15941,6 +16700,9 @@ const EMPTY_USAGE = {
   learningsCount: 0,
   maxContextTokens: null
 };
+function normalizeSessionUsage(usage) {
+  return { ...EMPTY_USAGE, ...usage ?? {} };
+}
 function App() {
   const [state, setState] = reactExports.useState({
     projectRoot: null,
@@ -15963,7 +16725,8 @@ function App() {
     queuedMessages: [],
     activeMode: "patch",
     terminalSessions: [],
-    pendingApproval: null
+    pendingApproval: null,
+    todos: []
   });
   useEngineEvents(setState);
   reactExports.useEffect(() => {
@@ -16014,6 +16777,7 @@ function App() {
     sessionUsage: state.sessionUsage,
     executionState: state.executionState,
     executionEvents: state.executionEvents,
+    todos: state.todos,
     onSessionIdCreated: (id) => setState((prev) => ({ ...prev, sessionId: id }))
   });
   const buildTaskParams = reactExports.useCallback((cmd) => {
@@ -16038,7 +16802,7 @@ function App() {
       maxIterations: s.maxIterations,
       mode: cmd.mode,
       // ← from atomic command, never stale
-      permissionMode: "auto-review",
+      permissionMode: s.permissionMode ?? "auto-review",
       includeProjectContext: true,
       queuedCount: state.queuedMessages.length,
       openedFiles: state.openFilePath ? [state.openFilePath] : []
@@ -16057,20 +16821,27 @@ function App() {
       showDiff: false,
       streamingText: "",
       reasoning: EMPTY_REASONING,
-      messages: [...prev.messages, { id: Date.now().toString(), role: "user", content: cmd.text, isTask: false }]
+      todos: [],
+      messages: [...prev.messages, {
+        id: createChatMessageId("user"),
+        role: "user",
+        content: cmd.text,
+        isTask: false,
+        attachments: cmd.attachments
+      }]
     }));
-    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd));
+    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd), cmd.attachments);
   }, [state.settings, state.projectRoot, state.messages, buildTaskParams]);
-  const handleSend = reactExports.useCallback(async (rawText, modeOverride) => {
+  const handleSend = reactExports.useCallback(async (rawText, modeOverride, attachments) => {
     if (!state.settings || !state.projectRoot) return;
-    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode);
+    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode, attachments);
     const isBusy = state.isThinking || !!state.executionState && !["completed", "failed", "paused"].includes(state.executionState.status);
     if (isBusy) {
       const queued = {
-        id: `${Date.now()}`,
+        id: createChatMessageId("queue"),
         content: cmd.text,
         mode: cmd.mode,
-        permissionMode: "auto-review",
+        permissionMode: state.settings.permissionMode ?? "auto-review",
         includeProjectContext: true
       };
       setState((prev) => ({ ...prev, queuedMessages: [...prev.queuedMessages, queued] }));
@@ -16101,7 +16872,8 @@ function App() {
       messages: [],
       sessionId: null,
       sessionUsage: EMPTY_USAGE,
-      queuedMessages: []
+      queuedMessages: [],
+      todos: []
     }));
   }, []);
   const handleLoadSession = reactExports.useCallback((session) => {
@@ -16117,7 +16889,8 @@ function App() {
       reasoning: EMPTY_REASONING,
       showDiff: false,
       openFilePath: null,
-      sessionUsage: session.sessionUsage || EMPTY_USAGE
+      sessionUsage: normalizeSessionUsage(session.sessionUsage),
+      todos: session.todos || []
     }));
   }, []);
   const handleSaveSettings = reactExports.useCallback(async (settings) => {
@@ -16206,6 +16979,8 @@ function App() {
             activeMode: state.activeMode,
             sessionUsage: state.sessionUsage,
             activeModel: state.activeModel,
+            supportsVision: state.activeModel ? detectVisionSupport(state.activeModel) : void 0,
+            todos: state.todos,
             onModeChange: (activeMode) => setState((prev) => ({ ...prev, activeMode })),
             onClearQueue: () => setState((prev) => ({ ...prev, queuedMessages: [] }))
           }
@@ -16230,7 +17005,7 @@ function App() {
           onPause: () => window.kova.pause(),
           onAbort: () => {
             window.kova.abort();
-            setState((prev) => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: "", reasoning: EMPTY_REASONING }));
+            setState((prev) => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: "", reasoning: EMPTY_REASONING, todos: [] }));
           },
           onApply: () => window.kova.forceApply(),
           onRepair: () => {
@@ -16243,7 +17018,6 @@ function App() {
       TerminalPanel,
       {
         sessions: state.terminalSessions,
-        commandEvents: state.executionEvents,
         pendingApproval: state.pendingApproval,
         onClose: (id) => setState((prev) => ({ ...prev, terminalSessions: prev.terminalSessions.filter((s) => s.id !== id) })),
         onApprove: (id, approved) => {
@@ -16252,7 +17026,7 @@ function App() {
         }
       }
     ) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(StatusBar, { executionState: state.executionState, sessionUsage: state.sessionUsage }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(StatusBar, { executionState: state.executionState, sessionUsage: state.sessionUsage, events: state.executionEvents }),
     state.showSettings && state.settings && /* @__PURE__ */ jsxRuntimeExports.jsx(ProviderModal, { settings: state.settings, onSave: handleSaveSettings, onClose: () => setState((prev) => ({ ...prev, showSettings: false })) })
   ] });
 }

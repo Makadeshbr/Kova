@@ -71,7 +71,7 @@ export function TaskInput({ projectRoot, isRunning, onStart, onOpenFolder }: Pro
             value={value}
             onChange={e => setValue(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={isRunning ? 'Agente trabalhando...' : 'Descreva a tarefa (Enter para enviar, Shift+Enter para nova linha)'}
+            placeholder={isRunning ? 'Agent working...' : 'Describe the task (Enter to send, Shift+Enter for a new line)'}
             disabled={isRunning || !projectRoot}
             rows={1}
             style={{

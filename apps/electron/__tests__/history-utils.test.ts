@@ -356,6 +356,29 @@ describe('buildTokenBudgetedHistory — structured assistant cards', () => {
     expect(result.map(m => m.content).join('\n')).toContain('Created calculator helpers.')
   })
 
+  it('prefers structured summary over raw content when both are present', () => {
+    const structured: AgentResultMessage = {
+      kind: 'agent_result',
+      title: 'Task complete',
+      summary: 'Changes applied successfully.',
+      filesChanged: [{ path: 'src/main.ts', displayName: 'main.ts', status: 'created' }],
+      validations: [],
+      risk: 'low',
+      decision: 'apply',
+      notes: [],
+    }
+
+    const result = buildTokenBudgetedHistory([
+      user('create app'),
+      { role: 'assistant', content: '```ts\nconsole.log("raw leaked code")\n```', isTask: true, structured },
+      user('Perfeito'),
+    ])
+
+    const history = result.map(m => m.content).join('\n')
+    expect(history).toContain('Files changed: src/main.ts (created)')
+    expect(history).not.toContain('raw leaked code')
+  })
+
   it('serializes plan cards into compact history text', () => {
     const structured: PlanResultMessage = {
       kind: 'plan_result',

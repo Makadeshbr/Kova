@@ -30,7 +30,7 @@ describe('structureTask', () => {
 
     expect(result.valid).toBe(false)
     if (result.valid) throw new Error('expected invalid result')
-    expect(result.suggestions[0]).toContain('objetivo concreto')
+    expect(result.suggestions[0]).toContain('concrete objective')
     expect(project.llm.generate).not.toHaveBeenCalled()
   })
 

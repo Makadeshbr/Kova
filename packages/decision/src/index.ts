@@ -1,6 +1,6 @@
 export { calculateScore, getHardFailReason } from './score'
 export { buildFeedback } from './feedback'
-export { decide } from './decision-engine'
+export { decide, AUTO_APPLY_THRESHOLD, SUGGEST_THRESHOLD } from './decision-engine'
 export type { DecisionContext } from './decision-engine'
 export { runReviewGate } from './review-gate'
 export type { ReviewGateInput } from './review-gate'

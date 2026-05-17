@@ -1,10 +1,13 @@
 import type {
   AgentContext, AgentMode, AgentOutput, CommandOutputCallback, DecisionResult, ExecutionContract,
   DiffReviewSelection, ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
-  IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation, Todo
+  IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation, Todo, ServerSessionInfo
 } from '@kova/shared'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { createOrchestratorConfig } from '@kova/orchestrator'
 import type { OrchestratorConfig, OrchestratorResult } from '@kova/orchestrator'
+import { runCompletionLayer } from '@kova/harness'
 import { decide } from '@kova/decision'
 import { recordTrace } from '@kova/observability'
 import { createInitialState, withIteration, withStatus } from './state'
@@ -15,9 +18,29 @@ import {
   validateContractChanges,
 } from './execution-contract'
 import { generateProofPack } from './proof-pack'
+import { buildCompletionProof, type CompletionTrace } from './completion-contract'
 import { buildContextCacheKey, shouldReuseContext, type ContextCacheKey } from './context-cache'
 
-type InteractiveCommandRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
+type InteractiveCommandRunner = (command: string, cwd: string, reason: string, options?: { previewChanges?: FileChange[] }) => Promise<{
+  exitCode: number
+  output: string
+  sessionId?: string
+  persistent?: boolean
+  ready?: boolean
+  url?: string
+  port?: number
+  cwd?: string
+  diagnostics?: string[]
+}>
+
+interface ProviderUsageReport {
+  cacheReadInputTokens: number
+  cacheCreationInputTokens: number
+  inputTokens: number
+  outputTokens: number
+}
+
+type AgentPermissionPolicy = Record<string, unknown>
 
 interface IAgent {
   execute(task: TaskDefinition, context: AgentContext, mode: AgentMode, options?: {
@@ -27,6 +50,8 @@ interface IAgent {
     onToolResult?: (name: string, result: string) => void
     interactiveRunner?: InteractiveCommandRunner
     onCommandOutput?: CommandOutputCallback
+    onUsageReport?: (report: ProviderUsageReport) => void
+    permissionPolicy?: AgentPermissionPolicy
     /** FIX-018: seed and listen to the multi-step todo list. */
     initialTodos?: Todo[]
     onTodosUpdated?: (todos: Todo[]) => void
@@ -76,6 +101,10 @@ export interface ExecutionEngineOptions extends StopOptions {
   interactiveRunner?: InteractiveCommandRunner
   /** FIX-003: forwarded to the agent so run_command can stream stdout/stderr live. */
   onCommandOutput?: CommandOutputCallback
+  /** Provider token/cache telemetry, reported once per model API call. */
+  onUsageReport?: (report: ProviderUsageReport) => void
+  /** Tool permission policy selected by the user. */
+  permissionPolicy?: AgentPermissionPolicy
   /**
    * FIX-018: fired whenever the agent calls todo_write. Carries the full new
    * list. The engine also emits a 'todos_updated' ExecutionEvent on the same
@@ -159,8 +188,8 @@ export class ExecutionEngine {
 
   async forceApply(selection?: DiffReviewSelection): Promise<void> {
     const last = this.state?.iterationHistory.at(-1)
-    if (!last || !this.task) throw new Error('Sem changes para aplicar')
-    if (last.changes.length === 0) throw new Error('Sem changes para aplicar')
+    if (!last || !this.task) throw new Error('No changes to apply')
+    if (last.changes.length === 0) throw new Error('No changes to apply')
 
     const score = last.harnessResult.score
     const result = await this.deps.applicationEngine.apply(last.changes, this.task.id, score, selection)
@@ -204,7 +233,18 @@ export class ExecutionEngine {
       const stopReason = shouldStop(this.state!, lastDecision, this.options)
       if (stopReason) {
         if (stopReason === 'max_iterations' || stopReason === 'timeout') {
-          this.state = withStatus(this.state!, 'failed')
+          // If the agent produced reviewable changes during the loop, give the
+          // user a chance to apply/reject them instead of dropping straight to
+          // 'failed' (which the UI renders as an error). Hard fails (raw harness
+          // score 0 — broken build, secret leaked) still end as 'failed' because
+          // the code does not work. We look at harnessResult.score, not
+          // decision.score: the decision score is capped at 55 in the soft-reject
+          // path, but the underlying harness score still reflects code quality.
+          const last = this.state!.iterationHistory.at(-1)
+          const hasReviewableChanges = !!last
+            && last.changes.length > 0
+            && (last.harnessResult?.score ?? 0) >= 70
+          this.state = withStatus(this.state!, hasReviewableChanges ? 'paused' : 'failed')
           this.emit()
         } else if (stopReason === 'human_required') {
           this.state = withStatus(this.state!, 'paused')
@@ -319,12 +359,27 @@ export class ExecutionEngine {
 
     const reasoning = createReasoningEvents((event) => this.event(event))
     reasoning.start()
+    const completionTrace: CompletionTrace = { toolCalls: [], toolResults: [], events: [] }
 
     const agentOptions = {
       history: this.options.history,
       signal: this.abortController.signal,
       interactiveRunner: this.options.interactiveRunner,
       onCommandOutput: this.options.onCommandOutput,
+      permissionPolicy: this.options.permissionPolicy,
+      onUsageReport: (report: ProviderUsageReport) => {
+        this.options.onUsageReport?.(report)
+        this.event({
+          type: 'token_usage',
+          message: `${report.inputTokens + report.outputTokens} tokens`,
+          tokensUsed: report.inputTokens + report.outputTokens,
+          usage: report,
+          cacheReadInputTokens: report.cacheReadInputTokens,
+          cacheCreationInputTokens: report.cacheCreationInputTokens,
+          inputTokens: report.inputTokens,
+          outputTokens: report.outputTokens,
+        } as Omit<ExecutionEvent, 'taskId' | 'timestamp' | 'iteration'>)
+      },
       // FIX-018: pass the current session-scoped todo list to the agent so plans
       // persist across the code → harness → fix repair cycle. Replacement after
       // todo_write happens via the callback below + the AgentOutput.todos read.
@@ -343,15 +398,37 @@ export class ExecutionEngine {
       onReasoningEnd: () => reasoning.end(),
       onToolCall: (name: string, input: Record<string, unknown>) => {
         const preview = name === 'write_file' ? String(input.path ?? '') : name === 'run_command' ? String(input.command ?? '') : ''
-        this.event({ type: 'tool_call', toolName: name, toolInput: input, message: preview ? `${name}: ${preview}` : name })
+        completionTrace.toolCalls.push({ name, input })
+        if (name === 'run_interactive_command') {
+          this.event({ type: 'server_starting', toolName: name, toolInput: input, message: `Starting server/session: ${String(input.command ?? '')}` })
+        }
+        const event = { type: 'tool_call' as const, toolName: name, toolInput: input, message: preview ? `${name}: ${preview}` : name }
+        completionTrace.events.push(event)
+        this.event(event)
       },
       onToolResult: (name: string, result: string) => {
-        this.event({
+        completionTrace.toolResults.push({ name, result })
+        const serverSession = name === 'run_interactive_command' ? serverSessionFromToolResult(result) : undefined
+        if (serverSession?.persistent) {
+          this.event({
+            type: serverSession.ready ? 'server_ready' : 'server_failed',
+            toolName: name,
+            toolOutput: result.slice(0, 20_000),
+            serverSession,
+            message: serverSession.ready
+              ? `Server ready${serverSession.url ? ` at ${serverSession.url}` : ''}`
+              : 'Persistent server/session started without readiness proof',
+          })
+        }
+        const event = {
           type: 'tool_result',
           toolName: name,
           message: result.slice(0, 2_000),
           toolOutput: result.slice(0, 20_000),
-        })
+          serverSession,
+        } as const
+        completionTrace.events.push(event)
+        this.event(event)
       }
     }
 
@@ -370,6 +447,10 @@ export class ExecutionEngine {
       this.state = withStatus(this.state!, 'coding')
       this.emit()
       const mode: AgentMode = isFirst ? (this.options.skipPlan ? 'unified' : 'code') : 'fix'
+      if (!isFirst) {
+        this.state = withStatus(this.state!, 'repairing')
+        this.emit()
+      }
       this.event({ type: 'agent_started', mode, message: `${mode} started` })
       codeOutput = await this.deps.agent.execute(task, context, mode, agentOptions)
       reasoning.end()
@@ -379,29 +460,39 @@ export class ExecutionEngine {
       reasoning.end()
     }
 
-    // Text-only response: model responded without writing any files.
-    // Nothing to validate and nothing to apply — complete immediately.
+    // Text-only response: valid for docs/explanations, but a hard product bug
+    // for implementation tasks. Kova must not say "done" when the user asked
+    // it to create/fix/refactor code and no files were changed.
     if (codeOutput.changes.length === 0) {
-      const emptyDecision: import('@kova/shared').DecisionResult = {
-        decision: 'auto_apply', score: 100,
-        reason: 'No file changes — text-only response',
-        feedback: [],
-      }
-      const emptyHarness: import('@kova/shared').HarnessResult = {
-        passed: true, score: 100, duration: 0, iteration: this.state!.currentIteration + 1,
-        layers: [], validationConfidence: 'full',
-      }
+      const textOnlyAllowed = task.type === 'docs'
+      const emptyHarness = textOnlyAllowed
+        ? buildTextOnlySuccessHarness(this.state!.currentIteration + 1)
+        : buildMissingChangesHarness(this.state!.currentIteration + 1)
+      const emptyDecision: import('@kova/shared').DecisionResult = textOnlyAllowed
+        ? {
+            decision: 'auto_apply', score: 100,
+            reason: 'No file changes — text-only response',
+            feedback: [],
+          }
+        : {
+            decision: 'reject',
+            score: 0,
+            reason: 'Implementation task produced no file changes',
+            feedback: [],
+          }
       this.state = withIteration(this.state!, buildRecord(this.state!.currentIteration, codeOutput, emptyHarness, emptyDecision, context, iterStart))
       this.emit()
-      this.state = withStatus(this.state!, 'completed')
-      this.emit()
+      if (textOnlyAllowed) {
+        this.state = withStatus(this.state!, 'completed')
+        this.emit()
+      }
       return emptyDecision
     }
 
     this.state = withStatus(this.state!, 'validating')
     this.emit()
     this.event({ type: 'validation_started', changes: codeOutput.changes, message: 'Validation started' })
-    const harnessResult = await this.validateOutput(codeOutput)
+    const harnessResult = await this.validateOutput(codeOutput, task, completionTrace)
     this.event({ type: 'validation_completed', harnessResult, message: 'Validation completed' })
 
     this.state = withStatus(this.state!, 'deciding')
@@ -455,7 +546,7 @@ export class ExecutionEngine {
     return decision
   }
 
-  private async validateOutput(output: AgentOutput): Promise<HarnessResult> {
+  private async validateOutput(output: AgentOutput, task: TaskDefinition, completionTrace: CompletionTrace): Promise<HarnessResult> {
     const iteration = this.state!.currentIteration + 1
     if (output.changes.length === 0) {
       return {
@@ -469,11 +560,42 @@ export class ExecutionEngine {
       }
     }
 
-    const contract = this.contract ?? createExecutionContract(this.task!)
+    const contract = this.contract ?? createExecutionContract(task)
     const violations = validateContractChanges(output.changes, contract)
     if (violations.length > 0) {
       return contractViolationsToHarnessResult(violations, iteration)
     }
+
+    const missingRequiredPaths = findMissingRequiredPaths(task, output.changes, this.options.projectRoot)
+    if (missingRequiredPaths.length > 0) {
+      return buildMissingRequiredPathsHarness(missingRequiredPaths, iteration)
+    }
+
+    // Claude Code parity for scaffolding: when every change creates a brand-new
+    // file, skip the build/test/lint harness entirely. A fresh project has no
+    // build script to run yet — Claude Code, Codex and Cursor all just write
+    // the files and let the user run their own validation when they're ready.
+    // Combined with the pure-create auto_apply rule in @kova/decision, this
+    // produces score 90 → auto_apply → files committed.
+    const completionProof = buildCompletionProof(task, output.changes, completionTrace, output.thought)
+    if (output.maxTurnsReached || output.incompleteReason) {
+      completionProof.requirements.push({
+        id: 'agent:finished',
+        kind: 'claim',
+        label: 'Agent finished within turn budget',
+        value: output.incompleteReason ?? 'max turns reached',
+        required: true,
+        source: 'contract',
+      })
+      completionProof.items.push({
+        requirementId: 'agent:finished',
+        satisfied: false,
+        blocking: true,
+        fixable: true,
+        reason: output.incompleteReason ?? 'Agent reached max turns before a natural final response.',
+      })
+    }
+    const completionLayer = runCompletionLayer({ proof: completionProof })
 
     const config = createOrchestratorConfig(
       this.options.projectRoot,
@@ -491,12 +613,70 @@ export class ExecutionEngine {
         this.event({ type: 'harness_line', harnessLayer: layer, harnessLine: line, harnessStream: stream, message: line })
       },
     })
-    return orchResult.harnessResult
+    return mergeCompletionLayer(orchResult.harnessResult, completionLayer, completionProof)
   }
 
   private previousHarnessErrors(): HarnessError[] {
     const last = this.state?.iterationHistory.at(-1)
     return last?.harnessResult.layers.flatMap(layer => layer.errors) ?? []
+  }
+}
+
+function mergeCompletionLayer(
+  harness: HarnessResult,
+  completionLayer: HarnessResult['layers'][number],
+  completionProof: import('@kova/shared').CompletionProof,
+): HarnessResult {
+  const layers = [completionLayer, ...harness.layers.filter(layer => layer.name !== 'completion')]
+  const completionFailed = !completionLayer.skipped && !completionLayer.passed
+  const score = completionFailed ? Math.min(harness.score, 55) : harness.score
+  const validationConfidence = harness.validationConfidence ?? 'partial'
+  return {
+    ...harness,
+    layers,
+    score,
+    passed: harness.passed && completionLayer.passed,
+    validationConfidence,
+    completionProof,
+    evidenceScore: harness.evidenceScore
+      ? {
+          ...harness.evidenceScore,
+          score,
+          validationConfidence,
+          validation: {
+            ...harness.evidenceScore.validation,
+            executedLayers: ['completion', ...harness.evidenceScore.validation.executedLayers.filter(name => name !== 'completion')],
+            passedLayers: completionLayer.passed
+              ? ['completion', ...harness.evidenceScore.validation.passedLayers.filter(name => name !== 'completion')]
+              : harness.evidenceScore.validation.passedLayers.filter(name => name !== 'completion'),
+            failedLayers: completionLayer.passed
+              ? harness.evidenceScore.validation.failedLayers.filter(name => name !== 'completion')
+              : ['completion', ...harness.evidenceScore.validation.failedLayers.filter(name => name !== 'completion')],
+          },
+          blockers: completionLayer.passed
+            ? harness.evidenceScore.blockers
+            : [...new Set(['completion failed', ...harness.evidenceScore.blockers])],
+          notes: completionLayer.passed
+            ? harness.evidenceScore.notes
+            : [...new Set(['completion proof failed', ...harness.evidenceScore.notes])],
+        }
+      : harness.evidenceScore,
+  }
+}
+
+function serverSessionFromToolResult(result: string): ServerSessionInfo | undefined {
+  if (!/Persistent command started/i.test(result)) return undefined
+  const sessionId = result.match(/\((term-[^)]+)\)/)?.[1]
+  const url = result.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0]
+  const port = url?.match(/:(\d+)/)?.[1]
+  return {
+    sessionId,
+    command: 'run_interactive_command',
+    cwd: '',
+    persistent: true,
+    ready: /ready|local:|localhost|127\.0\.0\.1/i.test(result),
+    url,
+    port: port ? Number(port) : undefined,
   }
 }
 
@@ -539,6 +719,124 @@ function buildRecord(
   }
 }
 
+function buildTextOnlySuccessHarness(iteration: number): HarnessResult {
+  return {
+    passed: true,
+    score: 100,
+    duration: 0,
+    iteration,
+    layers: [],
+    validationConfidence: 'full',
+  }
+}
+
+function buildMissingChangesHarness(iteration: number): HarnessResult {
+  return {
+    passed: false,
+    score: 0,
+    duration: 0,
+    iteration,
+    validationConfidence: 'partial',
+    layers: [{
+      name: 'rules',
+      passed: false,
+      errors: [{
+        layer: 'rules',
+        type: 'architecture',
+        severity: 'high',
+        fixable: true,
+        message: 'Implementation task produced no file changes',
+        humanMessage: 'A tarefa pedia alteracao de codigo, mas o agente respondeu apenas texto. Use write_file/edit_file e materialize os arquivos antes de concluir.',
+        file: '',
+        rule: 'missing_file_changes',
+      }],
+      warnings: [],
+      duration: 0,
+      skipped: false,
+    }],
+  }
+}
+
+function buildMissingRequiredPathsHarness(paths: string[], iteration: number): HarnessResult {
+  return {
+    passed: false,
+    score: 0,
+    duration: 0,
+    iteration,
+    validationConfidence: 'partial',
+    layers: [{
+      name: 'rules',
+      passed: false,
+      errors: paths.map(path => ({
+        layer: 'rules',
+        type: 'architecture' as const,
+        severity: 'high' as const,
+        fixable: true,
+        message: `Required file was not produced: ${path}`,
+        humanMessage: `O pedido exigia ${path}, mas o agente nao produziu esse arquivo. Continue a implementacao e crie o arquivo real antes de concluir.`,
+        file: path,
+        rule: 'missing_required_path',
+      })),
+      warnings: [],
+      duration: 0,
+      skipped: false,
+    }],
+  }
+}
+
+function findMissingRequiredPaths(task: TaskDefinition, changes: FileChange[], projectRoot: string): string[] {
+  const required = extractExplicitRequiredPaths(task.objective)
+  if (required.length === 0) return []
+  const changed = new Set(changes.map(change => normalizeProjectPath(change.path)))
+  return required.filter(path => !changed.has(path) && !existsSync(join(projectRoot, path)))
+}
+
+export function extractExplicitRequiredPaths(objective: string): string[] {
+  const normalized = objective.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+  const requirementIndex = normalized.search(/\b(no minimo|minimum|at least|required|obrigatorio|obrigatorios|obrigatorias|materialize)\b/)
+  const explicitListMatch = normalized.match(/\b(arquitetura|estrutura|architecture|structure|arquivos|files)\b[^:\n]{0,140}:/)
+    ?? normalized.match(/\b(crie|criar|create|implemente|implement)\b[^:\n]{0,100}\b(arquivos|files)\b[^:\n]{0,100}:/)
+  if (requirementIndex === -1 && !explicitListMatch) return []
+
+  const paths = new Set<string>()
+  const searchStart = requirementIndex !== -1
+    ? requirementIndex
+    : explicitListMatch?.index ?? 0
+  const searchArea = objective.slice(searchStart, searchStart + 900)
+  const pattern = /\b(?:[A-Za-z0-9_.@-]+[\\/])*[A-Za-z0-9_.@-]+\.[A-Za-z0-9]+\b/g
+  for (const match of searchArea.matchAll(pattern)) {
+    const path = normalizeProjectPath(match[0])
+    if (isLikelyProjectPath(path)) paths.add(path)
+  }
+  return [...paths]
+}
+
+function normalizeProjectPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/[),.;:]+$/, '').trim()
+}
+
+function isLikelyProjectPath(path: string): boolean {
+  if (!path || path.includes('://')) return false
+  if (/^\d+(?:\.\d+)+[a-z]*$/i.test(path)) return false
+  const basename = path.split('/').pop() ?? ''
+  const dot = basename.lastIndexOf('.')
+  if (dot <= 0) return false
+  const stem = basename.slice(0, dot)
+  const ext = basename.slice(dot + 1)
+  if (ext !== ext.toLowerCase()) return false
+  if (!KNOWN_REQUIRED_PATH_EXTS.has(ext)) return false
+  return /[A-Za-z_@-]/.test(stem)
+}
+
+const KNOWN_REQUIRED_PATH_EXTS = new Set([
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'css', 'scss', 'sass', 'less', 'html', 'htm',
+  'json', 'md', 'mdx', 'yml', 'yaml', 'toml',
+  'go', 'py', 'rs', 'java', 'kt', 'kts', 'cs',
+  'rb', 'php', 'swift', 'dart', 'vue', 'svelte',
+  'svg', 'png', 'jpg', 'jpeg', 'webp', 'ico',
+])
+
 function createReasoningEvents(
   emit: (event: Omit<ExecutionEvent, 'taskId' | 'timestamp' | 'iteration'> & { iteration?: number }) => void,
 ): { start: () => void; delta: (delta: string) => void; end: () => void } {
@@ -547,13 +845,13 @@ function createReasoningEvents(
     start: () => {
       if (active) return
       active = true
-      emit({ type: 'reasoning_start', message: 'Raciocinando...' })
+      emit({ type: 'reasoning_start', message: 'Reasoning...' })
     },
     delta: (delta: string) => {
       if (!delta) return
       if (!active) {
         active = true
-        emit({ type: 'reasoning_start', message: 'Raciocinando...' })
+        emit({ type: 'reasoning_start', message: 'Reasoning...' })
       }
       emit({ type: 'reasoning_delta', reasoning: delta })
     },

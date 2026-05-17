@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, dirname, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { CommandOutputCallback, FileChange, Todo, TodoStatus, ValidationCommandKind } from '@kova/shared'
-import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
+import { isLongRunningCommand, normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
 import { globFiles, type GlobOptions } from './glob-files'
 
@@ -209,7 +209,7 @@ Returns paths relative to the project root with forward slashes, newest first. S
   },
   {
     name: 'run_command',
-    description: 'Run a single safe command in the project root or a structured cwd. Use for build, test, lint, typecheck, format, or read-only inspection. Do not use cd, pipes, redirects, &&, or ;.',
+    description: 'Run a single safe command in the project root or a structured cwd. Use for build, test, lint, typecheck, format, install, or read-only inspection. Do not use for dev servers/watch modes; those must use run_interactive_command. Do not use cd, pipes, redirects, &&, or ;.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,9 +222,10 @@ Returns paths relative to the project root with forward slashes, newest first. S
   },
   {
     name: 'run_interactive_command',
-    description: `Run a command that requires interactive user input via a built-in terminal panel.
+    description: `Run a command that requires interactive user input or stays alive via a built-in terminal panel.
 Use this for: authentication (gh auth login, npm login, docker login), interactive setup wizards,
-git operations that open an editor, or any command that prompts for keyboard input.
+git operations that open an editor, dev servers (npm run dev, pnpm dev, vite, next dev), watch modes,
+or any command that prompts for keyboard input or does not exit by itself.
 DO NOT use run_command for these — it cannot handle interactive prompts and will fail.
 DO NOT try to install missing CLIs with shell scripts; ask the user to install them.
 The user will see an approval dialog before the terminal opens. Examples:
@@ -248,7 +249,17 @@ The user will see an approval dialog before the terminal opens. Examples:
 const READ_ONLY_TOOL_NAMES = new Set(['read_file', 'list_files', 'grep_codebase', 'glob_files', 'todo_write'])
 export const READ_ONLY_TOOLS: KovaTool[] = AGENT_TOOLS.filter(t => READ_ONLY_TOOL_NAMES.has(t.name))
 
-export type InteractiveRunner = (command: string, cwd: string, reason: string) => Promise<{ exitCode: number; output: string }>
+export type InteractiveRunner = (command: string, cwd: string, reason: string, options?: { previewChanges?: FileChange[] }) => Promise<{
+  exitCode: number
+  output: string
+  sessionId?: string
+  persistent?: boolean
+  ready?: boolean
+  url?: string
+  port?: number
+  cwd?: string
+  diagnostics?: string[]
+}>
 
 /**
  * FIX-018: optional knobs for the multi-step todo list. Passed as the 6th
@@ -287,6 +298,12 @@ export class ToolExecutor {
   private readonly originals = new Map<string, string | undefined>()
   /** Accumulated FileChange records for getChanges() — consumed by orchestrator */
   private readonly written = new Map<string, FileChange>()
+  /**
+   * Claude Code parity: paths of files this executor wrote directly to disk
+   * (brand-new creates). Tracked so rollbackWrites() can clean them up if the
+   * iteration aborts before ApplicationEngine.apply commits.
+   */
+  private readonly streamedCreates = new Set<string>()
   /**
    * Receives each stdout/stderr line emitted by run_command in real time.
    * A fresh commandId is generated per command so the UI can group lines.
@@ -353,13 +370,18 @@ export class ToolExecutor {
 
   /**
    * Clears the in-memory buffer and all tracking maps.
-   * No disk restoration is needed because writes never reached the project root.
+   * Streamed-create files (new files written directly to disk for live
+   * feedback) are left in place — the agent may have crashed mid-task, and
+   * leaving partial work on disk matches Claude Code's behaviour and lets the
+   * user inspect what was generated. The streamed paths are still recorded
+   * in `written`, so a successful iteration commits them via ApplicationEngine.
    * Always called in the agent.execute() finally block.
    */
   rollbackWrites(): void {
     this.buffer.clear()
     this.written.clear()
     this.originals.clear()
+    this.streamedCreates.clear()
   }
 
   private writeFile(rawPath: string, content: string): string {
@@ -379,12 +401,32 @@ export class ToolExecutor {
       this.originals.set(path, existsSync(fullPath) ? readFileSync(fullPath, 'utf-8') : undefined)
     }
     const original = this.originals.get(path)
+    const isCreate = original === undefined
 
-    // Stage write in memory — projectRoot disk is never touched
+    // Claude Code parity: stream brand-new files to disk immediately so the
+    // user sees them appearing live in the file tree. Modifies stay buffered
+    // — the user's existing code is not touched until ApplicationEngine.apply
+    // commits the full iteration atomically.
+    //
+    // Order matters: do the disk write FIRST, then update bookkeeping. If the
+    // write fails (disk full, permission, path conflict), the executor's
+    // state stays consistent with disk and the agent sees a clear error.
+    if (isCreate) {
+      const fullPath = join(this.projectRoot, path)
+      try {
+        mkdirSync(dirname(fullPath), { recursive: true })
+        writeFileSync(fullPath, content, 'utf-8')
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        return `Error: could not write ${path} to disk — ${reason}`
+      }
+      this.streamedCreates.add(path)
+    }
+
     this.buffer.set(path, content)
     this.written.set(path, {
       path,
-      type: original === undefined ? 'create' : 'modify',
+      type: isCreate ? 'create' : 'modify',
       diff: content,
       before: original,
     })
@@ -457,7 +499,21 @@ export class ToolExecutor {
     }
     const original = this.originals.get(path)
 
-    // Stage in memory — never touch disk
+    // If this path was already streamed to disk (a create + subsequent edit
+    // in the same iteration), keep the disk content in sync so the user sees
+    // the live edit too. Pre-existing files stay buffered — their on-disk
+    // state is only changed by ApplicationEngine.apply.
+    if (this.streamedCreates.has(path)) {
+      const fullPath = join(this.projectRoot, path)
+      try {
+        mkdirSync(dirname(fullPath), { recursive: true })
+        writeFileSync(fullPath, newContent, 'utf-8')
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        return `Error: could not update streamed ${path} on disk — ${reason}`
+      }
+    }
+
     this.buffer.set(path, newContent)
     this.written.set(path, {
       path,
@@ -528,15 +584,28 @@ export class ToolExecutor {
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
 
+    const fullPath = join(this.projectRoot, path)
+
+    // Streamed create followed by delete in the same iteration — undo the
+    // disk write and drop the bookkeeping; the file never "existed" for the
+    // user. Matches Claude Code's transient-file behaviour.
+    if (this.streamedCreates.has(path)) {
+      try { rmSync(fullPath, { force: true }) } catch { /* best effort */ }
+      this.streamedCreates.delete(path)
+      this.buffer.delete(path)
+      this.written.delete(path)
+      this.originals.delete(path)
+      return `OK: deleted ${path}`
+    }
+
     // If file was staged but never existed on disk, just remove from buffer
-    if (this.buffer.has(path) && this.buffer.get(path) !== null && !existsSync(join(this.projectRoot, path))) {
+    if (this.buffer.has(path) && this.buffer.get(path) !== null && !existsSync(fullPath)) {
       this.buffer.delete(path)
       this.written.delete(path)
       return `OK: ${path} does not exist`
     }
 
     // File must exist on disk (or be staged) to record a delete
-    const fullPath = join(this.projectRoot, path)
     if (!this.buffer.has(path) && !existsSync(fullPath)) return `OK: ${path} does not exist`
 
     if (!this.originals.has(path)) {
@@ -678,6 +747,12 @@ export class ToolExecutor {
       additionalManifests: stagedManifests,
     })
     if (!normalized.ok) {
+      if (normalized.reason.includes('Long-running command')) {
+        if (!this.interactiveRunner) {
+          return `Blocked: "${command}" is a long-running server/watch command. Use run_interactive_command in the Kova terminal panel instead of run_command.`
+        }
+        return this.runInteractiveCommand(command, `Start persistent dev server in Kova terminal: ${command}`, cwd)
+      }
       return `Blocked: ${normalized.reason}${normalized.hint ? ` ${normalized.hint}` : ''}`
     }
     if (bashPermission === 'ask') {
@@ -761,9 +836,20 @@ export class ToolExecutor {
     if (!this.interactiveRunner) {
       return 'Interactive commands are not available in this context. Ask the user to run this command manually: ' + command
     }
+    const previewChanges = isLongRunningCommand(command) && this.buffer.size > 0 ? [...this.written.values()] : undefined
     const resolvedCwd = cwd ? join(this.projectRoot, cwd) : this.projectRoot
     try {
-      const result = await this.interactiveRunner(command, resolvedCwd, reason)
+      const result = await this.interactiveRunner(command, resolvedCwd, reason, previewChanges ? { previewChanges } : undefined)
+      if (result.persistent) {
+        const meta = [
+          `ready=${result.ready === true ? 'true' : 'false'}`,
+          result.url ? `url=${result.url}` : '',
+          result.port ? `port=${result.port}` : '',
+          result.cwd ? `cwd=${result.cwd}` : `cwd=${resolvedCwd}`,
+          result.diagnostics?.length ? `diagnostics=${result.diagnostics.join(',')}` : '',
+        ].filter(Boolean).join(' ')
+        return `Persistent command started in Kova terminal${result.sessionId ? ` (${result.sessionId})` : ''}. ${meta}\nOutput:\n${result.output.slice(-3_000)}`
+      }
       return result.exitCode === 0
         ? `Interactive command completed successfully (exit 0).\nOutput:\n${result.output.slice(-3_000)}`
         : `Interactive command exited with code ${result.exitCode}.\nOutput:\n${result.output.slice(-3_000)}`
@@ -771,6 +857,7 @@ export class ToolExecutor {
       return `Interactive command failed: ${err instanceof Error ? err.message : String(err)}`
     }
   }
+
 }
 
 function resolvePermission(rule: PermissionAction | PermissionRule[] | undefined, target: string): PermissionAction {

@@ -1,7 +1,15 @@
 import { app } from 'electron'
-import type { DiffReviewSelection } from '@kova/shared'
+import type { Attachment, DiffReviewSelection } from '@kova/shared'
 import type { StartTaskParams } from './engine-manager'
 import type { KovaSettings } from './ipc-handlers'
+
+// Mirror of the renderer's per-attachment / per-message caps. Enforced
+// server-side so a malicious renderer cannot bypass the limit by faking the IPC.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024
+const MAX_ATTACHMENTS = 12
+const ALLOWED_MIME_PREFIXES = ['image/', 'text/']
+const ALLOWED_EXACT_MIME = new Set(['application/pdf', 'application/json'])
 
 type EventLike = { senderFrame?: { url?: string } | null }
 
@@ -69,6 +77,7 @@ export function mergeSettingsForSave(incoming: unknown, existing: Partial<KovaSe
     compatibleUrl: optionalString(settings.compatibleUrl, 2_000) ?? 'http://localhost:1234/v1',
     model: optionalString(settings.model, 300) ?? '',
     autoApply: optionalBoolean(settings.autoApply) ?? true,
+    permissionMode: oneOf(settings.permissionMode, ['auto-review', 'ask', 'full-access']) ?? 'auto-review',
     maxIterations: optionalNumber(settings.maxIterations, 1, 20) ?? 5,
     fallbackProvider: optionalString(settings.fallbackProvider, 80),
     fallbackModel: optionalString(settings.fallbackModel, 300),
@@ -77,6 +86,34 @@ export function mergeSettingsForSave(incoming: unknown, existing: Partial<KovaSe
   }
   if (!merged.nvidiaKey || merged.nvidiaKey.includes('****')) merged.nvidiaKey = existing.nvidiaKey
   return merged
+}
+
+export function sanitizeAttachments(value: unknown): Attachment[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw new Error('Invalid attachments payload')
+  if (value.length === 0) return undefined
+  if (value.length > MAX_ATTACHMENTS) throw new Error(`Too many attachments — max ${MAX_ATTACHMENTS}`)
+  let total = 0
+  const result: Attachment[] = []
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error('Invalid attachment item')
+    const kind = oneOf(item.kind, ['image', 'document', 'text']) as Attachment['kind'] | undefined
+    if (!kind) throw new Error('Invalid attachment kind')
+    const mimeType = stringField(item.mimeType, 'attachment.mimeType', 200)
+    const allowedMime = ALLOWED_MIME_PREFIXES.some(p => mimeType.startsWith(p)) || ALLOWED_EXACT_MIME.has(mimeType)
+    if (!allowedMime) throw new Error(`Unsupported attachment type: ${mimeType}`)
+    const name = stringField(item.name, 'attachment.name', 500)
+    if (typeof item.sizeBytes !== 'number' || !Number.isFinite(item.sizeBytes) || item.sizeBytes < 0) {
+      throw new Error('Invalid attachment sizeBytes')
+    }
+    if (item.sizeBytes > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment "${name}" exceeds 10 MB limit`)
+    total += item.sizeBytes
+    if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error('Total attachment size exceeds 50 MB')
+    const base64 = stringField(item.base64, 'attachment.base64', MAX_ATTACHMENT_BYTES * 2)
+    if (!/^[A-Za-z0-9+/=]*$/.test(base64)) throw new Error('Invalid base64 payload')
+    result.push({ kind, name, mimeType, sizeBytes: item.sizeBytes, base64 })
+  }
+  return result
 }
 
 export function sanitizeDiffReviewSelection(value: unknown): DiffReviewSelection | undefined {

@@ -5,7 +5,7 @@
  * circular dependencies with App.tsx.
  */
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from './types'
-import type { StructuredAgentMessage, ContextPackFile, ContextBlockedFile, ContextRejectedFile, Todo } from '@kova/shared'
+import type { Attachment, StructuredAgentMessage, ContextPackFile, ContextBlockedFile, ContextRejectedFile, Todo } from '@kova/shared'
 import type { KovaSettings } from '../../main/ipc-handlers'
 
 // Terminal session types defined here (not imported from TerminalPanel)
@@ -29,6 +29,8 @@ export interface ChatMessage {
   content: string
   isTask: boolean
   structured?: StructuredAgentMessage
+  /** Files/images attached by the user when sending this message. */
+  attachments?: Attachment[]
 }
 
 export type ChatMode = 'chat' | 'plan' | 'patch' | 'review'
@@ -46,6 +48,8 @@ export interface QueuedMessage {
 export interface SessionUsage {
   contextTokens: number
   completionTokens: number
+  cacheReadInputTokens: number
+  cacheCreationInputTokens: number
   contextFiles: string[]
   selectedFiles: Array<Pick<ContextPackFile, 'path' | 'score' | 'confidence' | 'reason' | 'evidence' | 'source' | 'kind'>>
   blockedFiles: ContextBlockedFile[]

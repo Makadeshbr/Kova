@@ -22,10 +22,12 @@ export interface HarnessResult {
   validationConfidence?: 'none' | 'partial' | 'full'
   /** Layer names that were present but skipped (not executed) */
   skippedLayers?: string[]
+  /** Completion proof used by the completion layer, when present. */
+  completionProof?: CompletionProof
 }
 
 export interface LayerResult {
-  name: 'tests' | 'build' | 'rules' | 'security' | 'lint' | 'typecheck'
+  name: 'tests' | 'build' | 'rules' | 'security' | 'lint' | 'typecheck' | 'completion'
   /** Alias for event/UI consumers that expect a generic layer key */
   layer?: LayerResult['name']
   passed: boolean
@@ -169,7 +171,21 @@ export interface Evidence {
 
 export interface ExecutionState {
   taskId: string
-  status: 'structuring' | 'planning' | 'coding' | 'validating' | 'deciding' | 'applying' | 'completed' | 'paused' | 'failed'
+  status:
+    | 'structuring'
+    | 'planning'
+    | 'coding'
+    | 'validating'
+    | 'deciding'
+    | 'applying'
+    | 'completed'
+    | 'paused'
+    | 'failed'
+    | 'repairing'
+    | 'awaiting_approval'
+    | 'server_starting'
+    | 'server_ready'
+    | 'blocked'
   currentIteration: number
   maxIterations: number
   iterationHistory: IterationRecord[]
@@ -235,8 +251,6 @@ export interface ExecutionContract {
   allowedPaths: string[]
   forbiddenPaths: string[]
   safeZones: string[]
-  allowedCommands: string[]
-  forbiddenCommands: string[]
   validationCriteria: string[]
   requiresTests: boolean
   maxFilesChanged: number
@@ -272,6 +286,47 @@ export interface AgentResultMessage {
   notes: string[]
   logsRef?: string
   proofPackRef?: string
+}
+
+export type CompletionRequirementKind = 'file' | 'command' | 'dev_server' | 'validation' | 'claim'
+
+export interface CompletionRequirement {
+  id: string
+  kind: CompletionRequirementKind
+  label: string
+  value: string
+  required: boolean
+  source: 'user_request' | 'agent_claim' | 'contract'
+}
+
+export interface CompletionProofItem {
+  requirementId: string
+  satisfied: boolean
+  evidence?: string
+  blocking?: boolean
+  fixable: boolean
+  reason?: string
+}
+
+export interface CompletionProof {
+  requirements: CompletionRequirement[]
+  items: CompletionProofItem[]
+  changedFiles: string[]
+  commandsRun: string[]
+  validationsRun: string[]
+  serverSessions: ServerSessionInfo[]
+  claims: string[]
+}
+
+export interface ServerSessionInfo {
+  sessionId?: string
+  command: string
+  cwd: string
+  persistent: boolean
+  ready: boolean
+  url?: string
+  port?: number
+  diagnostics?: string[]
 }
 
 export interface PlanResultMessage {
@@ -330,6 +385,11 @@ export interface ExecutionEvent {
     | 'provider_session_start' // provider/model resolved for this session — auditable metadata
     | 'diff_review_ready' // pending changes were converted into reviewable file/hunk decisions
     | 'todos_updated' // FIX-018: agent updated the multi-step todo list (full replacement)
+    | 'phase_started'
+    | 'server_starting'
+    | 'server_ready'
+    | 'server_failed'
+    | 'blocked'
   taskId: string
   timestamp: string
   iteration?: number
@@ -342,6 +402,7 @@ export interface ExecutionEvent {
   changes?: FileChange[]
   proofPack?: ProofPack
   structuredMessage?: StructuredAgentMessage
+  completionProof?: CompletionProof
   // streaming
   token?: string
   reasoning?: string
@@ -357,6 +418,12 @@ export interface ExecutionEvent {
     warnings?: string[]
   }
   tokensUsed?: number
+  /** Provider-reported cache/input/output counters for auditable token usage. */
+  usage?: ProviderUsageReport
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  inputTokens?: number
+  outputTokens?: number
   providerError?: 'provider_rate_limited' | 'provider_unavailable' | 'provider_auth' | 'provider_model_not_found' | 'provider_unknown'
   providerStatus?: number
   provider?: string
@@ -387,6 +454,7 @@ export interface ExecutionEvent {
     fallback: boolean
     fallbackReason?: string
   }
+  serverSession?: ServerSessionInfo
 }
 
 export interface StackAdapter {
@@ -618,9 +686,37 @@ export interface RuleProfile {
 
 export type AgentMode = 'plan' | 'code' | 'test' | 'fix' | 'review' | 'unified'
 
+/**
+ * User-supplied attachment: image, document, or text file pasted/dropped into
+ * the chat input. Stored as base64 so the renderer-to-main IPC stays serializable
+ * and providers can convert to their native image/file formats.
+ *
+ * Size invariants enforced at the IPC boundary:
+ *   - Per-attachment: 10 MB
+ *   - Per-message:    50 MB (sum of all attachments)
+ */
+export type AttachmentKind = 'image' | 'document' | 'text'
+
+export interface Attachment {
+  kind: AttachmentKind
+  name: string
+  /** Standard MIME type (e.g. "image/png", "application/pdf", "text/plain"). */
+  mimeType: string
+  /** Raw size in bytes. */
+  sizeBytes: number
+  /** Base64-encoded content (no data: URL prefix). */
+  base64: string
+}
+
 export interface AgentMessage {
   role: 'user' | 'assistant'
   content: string
+  /**
+   * Optional attachments authored by the user in this turn. Providers that
+   * support vision/files convert these to their native format; providers that
+   * don't either flatten to a text description or surface a clear error.
+   */
+  attachments?: Attachment[]
 }
 
 export interface AgentOutput {
@@ -634,6 +730,21 @@ export interface AgentOutput {
    * Undefined means "agent never touched the list" — preserve the caller's state.
    */
   todos?: Todo[]
+  /** True when the provider loop exhausted maxTurns before a natural final answer. */
+  maxTurnsReached?: boolean
+  /** Human-readable reason when the agent could not finish cleanly. */
+  incompleteReason?: string
+}
+
+export interface ProviderUsageReport {
+  /** Input tokens read from provider cache. */
+  cacheReadInputTokens: number
+  /** Input tokens written into provider cache this call. */
+  cacheCreationInputTokens: number
+  /** Non-cached input tokens consumed. */
+  inputTokens: number
+  /** Output tokens generated. */
+  outputTokens: number
 }
 
 /**
@@ -769,7 +880,7 @@ export interface AgentContext {
 // ─── Proof Pack ──────────────────────────────────────────────────────────────
 
 export interface ProofPackValidation {
-  kind: 'build' | 'test' | 'tests' | 'lint' | 'typecheck' | 'security' | 'rules'
+  kind: 'build' | 'test' | 'tests' | 'lint' | 'typecheck' | 'security' | 'rules' | 'completion'
   layer?: LayerResult['name']
   command?: string
   scope?: string
@@ -820,6 +931,7 @@ export interface ProofPack {
     validationConfidence: HarnessResult['validationConfidence']
     evidenceScore?: EvidenceScoreBreakdown
   }
+  completionProof?: CompletionProof
   /** Risco residual identificado */
   residualRisk: string[]
   notes?: string[]

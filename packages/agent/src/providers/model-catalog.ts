@@ -15,6 +15,7 @@
  * MODEL_CATALOG **and** extend the capability detection regexes in
  * `detectCapabilities`. The companion test file locks the public surface.
  */
+import { detectVisionSupport } from '@kova/shared'
 
 export type ProviderId =
   | 'anthropic'
@@ -40,6 +41,8 @@ export interface ModelInfo {
   supportsToolCalls: boolean
   /** True for reasoning-tuned variants (DeepSeek R1, Kimi K2.6-thinking, etc.). */
   supportsThinking?: boolean
+  /** True for vision-capable models (accept image inputs). */
+  supportsVision?: boolean
   /** Short note rendered next to the label. */
   notes?: string
 }
@@ -71,34 +74,36 @@ export interface DetectedCapabilities {
    * caching (DeepSeek, OpenAI 5.x) is not reported here — it's transparent.
    */
   supportsPromptCaching?: boolean
+  /** Whether the active model accepts image inputs (vision). */
+  supportsVision?: boolean
 }
 
 // ─── 2026 catalog — search-confirmed IDs ─────────────────────────────────────
 
 export const MODEL_CATALOG: Record<ProviderId, ModelInfo[]> = {
   anthropic: [
-    { id: 'claude-opus-4-7',             label: 'Claude Opus 4.7',         contextTokens: 200_000, supportsToolCalls: true },
-    { id: 'claude-sonnet-4-6',           label: 'Claude Sonnet 4.6',       contextTokens: 200_000, supportsToolCalls: true },
-    { id: 'claude-haiku-4-5-20251001',   label: 'Claude Haiku 4.5',        contextTokens: 200_000, supportsToolCalls: true },
-    { id: 'claude-3-5-sonnet-20241022',  label: 'Claude 3.5 Sonnet (legacy)', contextTokens: 200_000, supportsToolCalls: true, notes: 'legacy' },
+    { id: 'claude-opus-4-7',             label: 'Claude Opus 4.7',         contextTokens: 200_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'claude-sonnet-4-6',           label: 'Claude Sonnet 4.6',       contextTokens: 200_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'claude-haiku-4-5-20251001',   label: 'Claude Haiku 4.5',        contextTokens: 200_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'claude-3-5-sonnet-20241022',  label: 'Claude 3.5 Sonnet (legacy)', contextTokens: 200_000, supportsToolCalls: true, supportsVision: true, notes: 'legacy' },
     { id: 'claude-3-5-haiku-20241022',   label: 'Claude 3.5 Haiku (legacy)',  contextTokens: 200_000, supportsToolCalls: true, notes: 'legacy' },
   ],
   openai: [
-    { id: 'gpt-5.5',           label: 'GPT-5.5',           contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'gpt-5.5-pro',       label: 'GPT-5.5 Pro',       contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'gpt-5.4',           label: 'GPT-5.4',           contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'gpt-5.4-mini',      label: 'GPT-5.4 Mini',      contextTokens: 128_000, supportsToolCalls: true },
+    { id: 'gpt-5.5',           label: 'GPT-5.5',           contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gpt-5.5-pro',       label: 'GPT-5.5 Pro',       contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gpt-5.4',           label: 'GPT-5.4',           contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gpt-5.4-mini',      label: 'GPT-5.4 Mini',      contextTokens: 128_000, supportsToolCalls: true, supportsVision: true },
     { id: 'gpt-5.4-nano',      label: 'GPT-5.4 Nano',      contextTokens: 128_000, supportsToolCalls: true },
     { id: 'gpt-5.2-codex',     label: 'GPT-5.2 Codex',     contextTokens: 256_000, supportsToolCalls: true, notes: 'coding-tuned' },
-    { id: 'gpt-4.1',           label: 'GPT-4.1 (legacy)',  contextTokens: 1_000_000, supportsToolCalls: true, notes: 'legacy' },
-    { id: 'gpt-4o',            label: 'GPT-4o (legacy)',   contextTokens: 128_000, supportsToolCalls: true, notes: 'legacy' },
+    { id: 'gpt-4.1',           label: 'GPT-4.1 (legacy)',  contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true, notes: 'legacy' },
+    { id: 'gpt-4o',            label: 'GPT-4o (legacy)',   contextTokens: 128_000, supportsToolCalls: true, supportsVision: true, notes: 'legacy' },
   ],
   gemini: [
-    { id: 'gemini-3.1-pro-preview',   label: 'Gemini 3.1 Pro',          contextTokens: 1_000_000, supportsToolCalls: true },
-    { id: 'gemini-3-flash-preview',   label: 'Gemini 3 Flash',          contextTokens: 1_000_000, supportsToolCalls: true },
-    { id: 'gemini-3.1-flash-lite',    label: 'Gemini 3.1 Flash-Lite',   contextTokens: 1_000_000, supportsToolCalls: true },
-    { id: 'gemini-2.5-pro',           label: 'Gemini 2.5 Pro (legacy)', contextTokens: 2_000_000, supportsToolCalls: true, notes: 'legacy' },
-    { id: 'gemini-2.5-flash',         label: 'Gemini 2.5 Flash (legacy)', contextTokens: 1_000_000, supportsToolCalls: true, notes: 'legacy' },
+    { id: 'gemini-3.1-pro-preview',   label: 'Gemini 3.1 Pro',          contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gemini-3-flash-preview',   label: 'Gemini 3 Flash',          contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gemini-3.1-flash-lite',    label: 'Gemini 3.1 Flash-Lite',   contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'gemini-2.5-pro',           label: 'Gemini 2.5 Pro (legacy)', contextTokens: 2_000_000, supportsToolCalls: true, supportsVision: true, notes: 'legacy' },
+    { id: 'gemini-2.5-flash',         label: 'Gemini 2.5 Flash (legacy)', contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true, notes: 'legacy' },
   ],
   kimi: [
     { id: 'kimi-k2.6',           label: 'Kimi K2.6',           contextTokens: 256_000, supportsToolCalls: true },
@@ -111,18 +116,18 @@ export const MODEL_CATALOG: Record<ProviderId, ModelInfo[]> = {
     { id: 'deepseek-reasoner',  label: 'DeepSeek Reasoner (R1)', contextTokens: 128_000, supportsToolCalls: true, supportsThinking: true },
   ],
   xai: [
-    { id: 'grok-4',                     label: 'Grok 4',                     contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'grok-4.1',                   label: 'Grok 4.1',                   contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'grok-4-fast-reasoning',      label: 'Grok 4 Fast Reasoning',      contextTokens: 256_000, supportsToolCalls: true, supportsThinking: true },
-    { id: 'grok-4-fast-non-reasoning',  label: 'Grok 4 Fast',                contextTokens: 256_000, supportsToolCalls: true },
+    { id: 'grok-4',                     label: 'Grok 4',                     contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'grok-4.1',                   label: 'Grok 4.1',                   contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'grok-4-fast-reasoning',      label: 'Grok 4 Fast Reasoning',      contextTokens: 256_000, supportsToolCalls: true, supportsThinking: true, supportsVision: true },
+    { id: 'grok-4-fast-non-reasoning',  label: 'Grok 4 Fast',                contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
     { id: 'grok-code-fast-1',           label: 'Grok Code Fast',             contextTokens: 256_000, supportsToolCalls: true, notes: 'coding-tuned' },
   ],
   openrouter: [
-    { id: 'anthropic/claude-opus-4-7',          label: 'Claude Opus 4.7 (OR)',     contextTokens: 200_000, supportsToolCalls: true },
-    { id: 'anthropic/claude-sonnet-4-6',        label: 'Claude Sonnet 4.6 (OR)',   contextTokens: 200_000, supportsToolCalls: true },
-    { id: 'openai/gpt-5.5',                     label: 'GPT-5.5 (OR)',             contextTokens: 256_000, supportsToolCalls: true },
-    { id: 'google/gemini-3.1-pro-preview',      label: 'Gemini 3.1 Pro (OR)',      contextTokens: 1_000_000, supportsToolCalls: true },
-    { id: 'google/gemini-3-flash-preview',      label: 'Gemini 3 Flash (OR)',      contextTokens: 1_000_000, supportsToolCalls: true },
+    { id: 'anthropic/claude-opus-4-7',          label: 'Claude Opus 4.7 (OR)',     contextTokens: 200_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'anthropic/claude-sonnet-4-6',        label: 'Claude Sonnet 4.6 (OR)',   contextTokens: 200_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'openai/gpt-5.5',                     label: 'GPT-5.5 (OR)',             contextTokens: 256_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'google/gemini-3.1-pro-preview',      label: 'Gemini 3.1 Pro (OR)',      contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true },
+    { id: 'google/gemini-3-flash-preview',      label: 'Gemini 3 Flash (OR)',      contextTokens: 1_000_000, supportsToolCalls: true, supportsVision: true },
     { id: 'deepseek/deepseek-chat',             label: 'DeepSeek Chat (OR)',       contextTokens: 128_000, supportsToolCalls: true },
     { id: 'deepseek/deepseek-reasoner',         label: 'DeepSeek Reasoner (OR)',   contextTokens: 128_000, supportsToolCalls: true, supportsThinking: true },
     { id: 'moonshotai/kimi-k2.6',               label: 'Kimi K2.6 (OR)',           contextTokens: 256_000, supportsToolCalls: true },
@@ -216,9 +221,14 @@ export const PROVIDER_DEFAULTS: Record<ProviderId, ProviderDefaults> = {
  * `vendor/model`, custom fine-tunes, brand-new releases). The catalog is the
  * curated dropdown source; this matcher is the safety net for everything else.
  */
+// Capability rules carry context window + caching info. Vision support is
+// delegated to `detectVisionSupport` in @kova/shared so the renderer (which
+// can't bundle this agent package) reads the same source of truth.
+type CapabilityRuleSpec = Omit<DetectedCapabilities, 'supportsVision'>
+
 const CAPABILITY_RULES: Array<{
   pattern: RegExp
-  caps: DetectedCapabilities
+  caps: CapabilityRuleSpec
 }> = [
   // Anthropic — caching surface is unique to this family
   { pattern: /\bclaude-(opus|sonnet|haiku)-[34]/i, caps: { supportsToolCalls: true, contextTokenLimit: 200_000, supportsPromptCaching: true } },
@@ -231,11 +241,13 @@ const CAPABILITY_RULES: Array<{
   { pattern: /\bgemini-/i,                          caps: { supportsToolCalls: true, contextTokenLimit: 1_000_000 } },
 
   // Moonshot Kimi K2.x — 256k context, agentic tool use
+  { pattern: /\bkimi-k2(\.\d+)?(-vl|-vision)/i,     caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
   { pattern: /\bkimi-k2(\.\d+)?(-thinking)?/i,      caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
   { pattern: /\bmoonshotai\/kimi/i,                 caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
   { pattern: /\bmoonshot-v1/i,                      caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
 
-  // DeepSeek — chat (V3.2) + reasoner (R1)
+  // DeepSeek
+  { pattern: /\bdeepseek-vl/i,                       caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bdeepseek-(chat|reasoner|v3|v4|r1)/i, caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bdeepseek/i,                          caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
 
@@ -245,6 +257,8 @@ const CAPABILITY_RULES: Array<{
   { pattern: /\bx-ai\/grok/i,                        caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
 
   // OpenAI GPT-5.x family — 256k context, native tools
+  { pattern: /\bgpt-5(\.\d+)?-codex/i,              caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
+  { pattern: /\bgpt-5(\.\d+)?-nano/i,               caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bgpt-5(\.\d+)?/i,                    caps: { supportsToolCalls: true, contextTokenLimit: 256_000 } },
   // OpenAI GPT-4.1 — 1M context
   { pattern: /\bgpt-4\.1/i,                          caps: { supportsToolCalls: true, contextTokenLimit: 1_000_000 } },
@@ -252,7 +266,8 @@ const CAPABILITY_RULES: Array<{
   { pattern: /\bgpt-4(o|\b)/i,                       caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bo[1-9](-mini|-pro)?/i,               caps: { supportsToolCalls: true, contextTokenLimit: 200_000 } },
 
-  // Open-source ecosystem — Llama 3.x, Qwen 2.5, Mistral large
+  // Open-source ecosystem
+  { pattern: /\bqwen2\.5-vl/i,                       caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bllama-3\.[1-9]/i,                    caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bqwen2\.5/i,                          caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
   { pattern: /\bmistral-large/i,                     caps: { supportsToolCalls: true, contextTokenLimit: 128_000 } },
@@ -264,10 +279,13 @@ const CAPABILITY_RULES: Array<{
  * silently truncate prompts or call tools the model can't handle.
  */
 export function detectCapabilities(modelId: string): DetectedCapabilities {
+  const visionSupport = detectVisionSupport(modelId)
   for (const rule of CAPABILITY_RULES) {
-    if (rule.pattern.test(modelId)) return { ...rule.caps }
+    if (rule.pattern.test(modelId)) {
+      return { ...rule.caps, supportsVision: visionSupport }
+    }
   }
-  return { supportsToolCalls: false, contextTokenLimit: 8_000 }
+  return { supportsToolCalls: false, contextTokenLimit: 8_000, supportsVision: visionSupport }
 }
 
 // ─── lookup helpers ──────────────────────────────────────────────────────────

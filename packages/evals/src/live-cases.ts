@@ -119,7 +119,7 @@ export const EVAL_SAFE_ZONE: LiveEvalCase = {
  */
 export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
   id: 'live-no-validation-suggests',
-  description: 'Empty project: no validation configured → suggest, never auto_apply',
+  description: 'Empty project: pure-create must not auto-apply when harness validation fails',
   task: task({
     objective: 'create a simple utility function',
     stackAdapter: 'generic',
@@ -127,8 +127,8 @@ export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
   }),
   projectRoot: '',
   maxIterations: 1,
-  expectedStatus: 'paused',
-  expectedDecision: 'suggest',
+  expectedStatus: 'failed',
+  expectedDecision: 'reject',
   dryRun: true,
 }
 
@@ -137,7 +137,7 @@ export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
  */
 export const EVAL_MAX_FILES_EXCEEDED: LiveEvalCase = {
   id: 'live-max-files-exceeded',
-  description: 'Low-impact task but model edits 8 files → contract rejects',
+  description: 'Pure-create many files avoids max_files, but failed validation rejects',
   task: task({
     objective: 'refactor utility functions',
     stackAdapter: 'generic',
@@ -146,7 +146,7 @@ export const EVAL_MAX_FILES_EXCEEDED: LiveEvalCase = {
   }),
   projectRoot: '',
   maxIterations: 1,
-  expectedStatus: 'paused',
+  expectedStatus: 'failed',
   expectedDecision: 'reject',
   dryRun: true,
 }
@@ -220,6 +220,11 @@ export const ALL_LIVE_CASES = [
 
 export function setupProjectForCase(caseId: string, projectRoot: string): void {
   switch (caseId) {
+    case 'live-stack-mismatch-go-ts':
+      // Stack mismatch is only enforced for MODIFY changes (Claude Code parity).
+      // Create the .ts file on disk so the mock's write_file becomes a modify.
+      writeFileSync(join(projectRoot, 'helpers.ts'), 'export const x = 0\n')
+      break
     case 'live-harness-build-passes':
     case 'live-multi-turn-repair-loop':
       mkdirSync(join(projectRoot, '.kova'), { recursive: true })
@@ -232,6 +237,11 @@ export function setupProjectForCase(caseId: string, projectRoot: string): void {
           },
         }),
       )
+      // Repair loop test needs an EXISTING app.js so the first iteration is a
+      // MODIFY (harness runs) instead of a CREATE (scaffolding bypass skips it).
+      if (caseId === 'live-multi-turn-repair-loop') {
+        writeFileSync(join(projectRoot, 'app.js'), 'function answer() { return 0 }\nmodule.exports = { answer }\n')
+      }
       break
     case 'live-safe-zone-env':
       writeFileSync(join(projectRoot, '.env'), 'SECRET=existing\n')
@@ -244,6 +254,8 @@ export function setupProjectForCase(caseId: string, projectRoot: string): void {
 export function mocksForCase(caseId: string, _projectRoot: string): import('./mock-provider').MockTurn[] {
   switch (caseId) {
     case 'live-stack-mismatch-go-ts':
+      // setupProjectForCase creates helpers.ts so this becomes a MODIFY,
+      // which is the only path that still enforces stack_mismatch.
       return [{ toolCalls: [{ name: 'write_file', input: { path: 'helpers.ts', content: 'export const x = 1\n' } }] }]
 
     case 'live-safe-zone-env':

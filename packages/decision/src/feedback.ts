@@ -18,22 +18,22 @@ export function buildFeedback(result: HarnessResult): AgentFeedback[] {
 function buildInstruction(error: HarnessError, layer: string): string {
   switch (layer) {
     case 'build':
-      return `Corrija o erro de compilação em ${error.file}:${error.line ?? '?'} — ${error.message}`
+      return `Fix the compilation error in ${error.file}:${error.line ?? '?'} - ${error.message}`
     case 'tests':
-      return `Corrija o teste falhando: ${error.message}`
+      return `Fix the failing test: ${error.message}`
     case 'rules': {
       if (error.message.includes('Complexidade')) {
-        return `Extraia sub-funções para reduzir a complexidade ciclomática: ${error.message}`
+        return `Extract helper functions to reduce cyclomatic complexity: ${error.message}`
       }
       if (error.message.includes('Nesting')) {
-        return `Use early-return ou extração de funções para reduzir nesting: ${error.message}`
+        return `Use early returns or extract functions to reduce nesting: ${error.message}`
       }
-      return `Corrija a violação de arquitetura: ${error.message}`
+      return `Fix the architecture violation: ${error.message}`
     }
     case 'security':
-      return `CRÍTICO: ${error.message}. Mova o valor para variável de ambiente.`
+      return `CRITICAL: ${error.message}. Move the value to an environment variable.`
     case 'lint':
-      return `Corrija a violação de lint em ${error.file}:${error.line ?? '?'} — ${error.message}`
+      return `Fix the lint violation in ${error.file}:${error.line ?? '?'} - ${error.message}`
     default:
       return error.message
   }
@@ -41,9 +41,9 @@ function buildInstruction(error: HarnessError, layer: string): string {
 
 function buildContext(error: HarnessError): string {
   const parts: string[] = []
-  if (error.file) parts.push(`Arquivo: ${error.file}`)
-  if (error.line) parts.push(`Linha: ${error.line}`)
-  if (error.rule) parts.push(`Regra: ${error.rule}`)
-  parts.push(`Severidade: ${error.severity}`)
+  if (error.file) parts.push(`File: ${error.file}`)
+  if (error.line) parts.push(`Line: ${error.line}`)
+  if (error.rule) parts.push(`Rule: ${error.rule}`)
+  parts.push(`Severity: ${error.severity}`)
   return parts.join(' | ')
 }

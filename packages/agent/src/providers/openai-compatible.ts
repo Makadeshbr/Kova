@@ -1,4 +1,5 @@
 import type { AgentMessage } from '@kova/shared'
+import { formatTextAttachment } from '@kova/shared'
 import type { GenerateOptions, LLMResponse, AgentProvider, AgentLoopOptions, ProviderCapabilities } from './provider'
 import type { KovaTool } from '../tools'
 import { extractChangesFromXml, extractChangesFromTools, extractChangesFromText, type OpenAIToolCall } from './openai-text-parser'
@@ -12,9 +13,16 @@ export interface OpenAICompatibleProviderOptions {
   extraBody?: Record<string, unknown>
 }
 
+// OpenAI multimodal content parts — used when a user message includes images.
+// `image_url.url` accepts data: URLs (data:<mime>;base64,<base64>) so we can
+// inline attachments without uploading to a separate file endpoint.
+type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } }
+
 interface ChatMessage {
   role: string
-  content?: string | null
+  content?: string | null | ChatContentPart[]
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
   // DeepSeek / extended thinking: must be echoed back in subsequent turns
@@ -55,12 +63,15 @@ export class OpenAICompatibleProvider implements AgentProvider {
 
   // Single-turn — used for task structuring
   async generate(messages: AgentMessage[], options: GenerateOptions = {}): Promise<LLMResponse> {
-    const chatMessages = options.system
-      ? [{ role: 'system', content: options.system }, ...messages]
-      : messages
+    const userMessages = toOpenAIMessages(messages)
+    const chatMessages: ChatMessage[] = options.system
+      ? [{ role: 'system', content: options.system }, ...userMessages]
+      : userMessages
     const response = await this.callApi(chatMessages, [], options)
     const message = response.choices?.[0]?.message
-    const text = message?.content ?? ''
+    // Assistant responses always come back as plain text strings — the
+    // multimodal array shape is request-side only (user → model image inputs).
+    const text = typeof message?.content === 'string' ? message.content : ''
     const toolChanges = extractChangesFromTools(message?.tool_calls ?? [])
     if (toolChanges.length > 0) return { thought: text.trim(), changes: toolChanges, tokensUsed: tokenCount(response) }
     const xmlChanges = extractChangesFromXml(text)
@@ -73,15 +84,17 @@ export class OpenAICompatibleProvider implements AgentProvider {
     const { system, tools, executor, maxTurns = 10, onToken, onToolCall, onToolResult, signal } = options
     const history: ChatMessage[] = [
       { role: 'system', content: system },
-      ...messages.map(m => ({ role: m.role, content: m.content })),
+      ...toOpenAIMessages(messages),
     ]
     const openaiTools = tools.map(toOpenAITool)
     let thought = ''
     let tokensUsed = 0
+    const requestedPaths = extractRequestedPaths(messages)
+    let completedNaturally = false
 
     for (let turn = 0; turn < maxTurns; turn++) {
       if (signal?.aborted) break
-      const { text: textContent, toolCalls, finishReason, tokens, reasoningContent } = await this.streamingTurn(
+      const { text: textContent, toolCalls, tokens, reasoningContent } = await this.streamingTurn(
         history, openaiTools, options, onToken, signal, {
           onStart: options.onReasoningStart,
           onDelta: options.onReasoningDelta,
@@ -100,28 +113,48 @@ export class OpenAICompatibleProvider implements AgentProvider {
       }
       history.push(assistantMsg)
 
-      if (finishReason !== 'tool_calls' || !toolCalls.length) {
-        if (executor.getChanges().length === 0 && textContent) {
-          const xmlChanges = extractChangesFromXml(textContent)
-          const changes = xmlChanges.length > 0 ? xmlChanges : extractChangesFromText(textContent)
-          for (const c of changes) {
-            if (c.type !== 'delete') await executor.execute('write_file', { path: c.path, content: c.diff })
-          }
+      if (toolCalls.length > 0) {
+        // Some OpenAI-compatible providers emit valid tool calls while reporting
+        // finish_reason=stop. Tool calls are authoritative; text extraction is
+        // only a fallback for a final turn with no tool calls.
+        for (const tc of toolCalls) {
+          const name = tc.function?.name ?? ''
+          const input = parseArgs(tc.function?.arguments)
+          onToolCall?.(name, input ?? {})
+          const result = input ? await executor.execute(name, input) : 'Error: invalid arguments'
+          onToolResult?.(name, result)
+          history.push({ role: 'tool', tool_call_id: tc.id ?? '', content: result })
         }
-        break
+        continue
       }
 
-      for (const tc of toolCalls) {
-        const name = tc.function?.name ?? ''
-        const input = parseArgs(tc.function?.arguments)
-        onToolCall?.(name, input ?? {})
-        const result = input ? await executor.execute(name, input) : 'Error: invalid arguments'
-        onToolResult?.(name, result)
-        history.push({ role: 'tool', tool_call_id: tc.id ?? '', content: result })
+      if (textContent) {
+        const existingPaths = new Set(executor.getChanges().map(change => change.path))
+        const xmlChanges = extractChangesFromXml(textContent)
+        const changes = xmlChanges.length > 0
+          ? xmlChanges
+          : extractChangesFromText(textContent, { includeBareBlocks: existingPaths.size === 0 && requestedPaths.size === 0 })
+        for (const c of changes) {
+          if (c.type === 'delete' || existingPaths.has(c.path)) continue
+          const input = { path: c.path, content: c.diff }
+          onToolCall?.('write_file', input)
+          const result = await executor.execute('write_file', input)
+          onToolResult?.('write_file', result)
+          existingPaths.add(c.path)
+        }
       }
+      completedNaturally = true
+      break
     }
 
-    return { thought, changes: executor.getChanges(), tokensUsed }
+    const maxTurnsReached = !completedNaturally && !signal?.aborted
+    return {
+      thought,
+      changes: executor.getChanges(),
+      tokensUsed,
+      maxTurnsReached,
+      incompleteReason: maxTurnsReached ? `Agent reached maxTurns (${maxTurns}) before a final response.` : undefined,
+    }
   }
 
   // Streaming turn — uses SSE when onToken is provided, falls back to regular JSON otherwise
@@ -137,7 +170,8 @@ export class OpenAICompatibleProvider implements AgentProvider {
     if (!onToken) {
       const response = await this.callApi(messages, tools, options)
       const choice = response.choices?.[0]
-      const parsed = stripThinkBlocks(choice?.message?.content ?? '')
+      const rawContent = typeof choice?.message?.content === 'string' ? choice.message.content : ''
+      const parsed = stripThinkBlocks(rawContent)
       const toolCalls = ((choice?.message?.tool_calls ?? []) as ToolCall[])
       const reasoningContent = choice?.message?.reasoning_content || undefined
       const combinedReasoning = [reasoningContent, parsed.reasoning].filter(Boolean).join('\n')
@@ -279,6 +313,32 @@ function toOpenAITool(tool: KovaTool) {
   }
 }
 
+/**
+ * Convert Kova AgentMessage[] to the OpenAI Chat Completions message shape.
+ * User messages with attachments become multimodal: image attachments become
+ * `image_url` parts (data: URLs so we don't hit any external file endpoint);
+ * non-image attachments are inlined as text excerpts so they still reach the
+ * model even when only an image-capable schema is supported.
+ */
+function toOpenAIMessages(messages: AgentMessage[]): ChatMessage[] {
+  return messages.map(m => {
+    if (m.role !== 'user' || !m.attachments?.length) {
+      return { role: m.role, content: m.content }
+    }
+    const parts: ChatContentPart[] = []
+    for (const att of m.attachments) {
+      if (att.kind === 'image') {
+        parts.push({ type: 'image_url', image_url: { url: `data:${att.mimeType};base64,${att.base64}` } })
+      } else {
+        parts.push({ type: 'text', text: formatTextAttachment(att) })
+      }
+    }
+    parts.push({ type: 'text', text: m.content })
+    return { role: 'user', content: parts }
+  })
+}
+
+
 function parseArgs(raw?: string): Record<string, unknown> | null {
   if (!raw) return null
   try {
@@ -287,6 +347,23 @@ function parseArgs(raw?: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+function extractRequestedPaths(messages: AgentMessage[]): Set<string> {
+  const paths = new Set<string>()
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    const text = typeof message.content === 'string' ? message.content : ''
+    for (const match of text.matchAll(/\b(?:[A-Za-z0-9_.@-]+[\\/])*[A-Za-z0-9_.@-]+\.[A-Za-z0-9]+\b/g)) {
+      const path = normalizeRequestedPath(match[0])
+      if (path && !path.includes('://')) paths.add(path)
+    }
+  }
+  return paths
+}
+
+function normalizeRequestedPath(raw: string): string {
+  return raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/[),.;:]+$/, '').trim()
 }
 
 function tokenCount(response: ChatResponse): number {

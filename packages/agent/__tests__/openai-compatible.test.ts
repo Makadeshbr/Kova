@@ -128,6 +128,161 @@ describe('OpenAICompatibleProvider', () => {
       expect(result.thought).toContain('Done.')
     })
 
+    it('executa tool_calls mesmo quando provider retorna finish_reason=stop', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: 'Writing with a provider that mislabeled finish_reason.',
+              tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'write_file', arguments: '{"path":"src/main.ts","content":"console.log(\\"ok\\")\\n"}' } }],
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { total_tokens: 150 },
+        }),
+        text: async () => '',
+      } as Response)
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: 'assistant', content: 'Done.' }, finish_reason: 'stop' }],
+          usage: { total_tokens: 80 },
+        }),
+        text: async () => '',
+      } as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'kimi-k2.6' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'Crie src/main.ts' }],
+        { system: 'be helpful', tools: AGENT_TOOLS, executor },
+      )
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(result.changes.map(change => change.path)).toEqual(['src/main.ts'])
+      expect(result.thought).toContain('Done.')
+    })
+
+    it('ignora blocos genericos quando o pedido lista caminhos reais', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: [
+                'Aqui estao os arquivos.',
+                '',
+                '```css',
+                'body { color: white; }',
+                '```',
+                '',
+                '```ts',
+                'console.log("ok")',
+                '```',
+              ].join('\n'),
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { total_tokens: 80 },
+        }),
+        text: async () => '',
+      } as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'kimi-k2.6' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'Crie index.html, src/main.ts e src/style.css' }],
+        { system: 'be helpful', tools: AGENT_TOOLS, executor },
+      )
+
+      expect(result.changes).toEqual([])
+    })
+
+    it('materializa blocos de arquivo explicitos no texto final mesmo apos tool_calls parciais', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: 'Writing package files...',
+              tool_calls: [
+                { id: 'tc1', type: 'function', function: { name: 'write_file', arguments: '{"path":"package.json","content":"{\\"scripts\\":{\\"dev\\":\\"vite\\"}}\\n"}' } },
+                { id: 'tc2', type: 'function', function: { name: 'write_file', arguments: '{"path":"vite.config.js","content":"export default {}\\n"}' } },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { total_tokens: 150 },
+        }),
+        text: async () => '',
+      } as Response)
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: [
+                'Aqui esta o projeto completo.',
+                '',
+                'index.html',
+                '```html',
+                '<main>Sakura</main>',
+                '```',
+                '',
+                'src/style.css',
+                '```css',
+                'body { background: #0a0a0a; }',
+                '```',
+                '',
+                'package.json',
+                '```json',
+                '{"ignored":true}',
+                '```',
+                '',
+                '```bash',
+                'npm run dev',
+                '```',
+              ].join('\n'),
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { total_tokens: 80 },
+        }),
+        text: async () => '',
+      } as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const toolEvents: string[] = []
+      const executor = new ToolExecutor(projectRoot)
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'create a landing page' }],
+        {
+          system: 'be helpful',
+          tools: AGENT_TOOLS,
+          executor,
+          onToolCall: (name, input) => toolEvents.push(`${name}:${String(input.path ?? '')}`),
+        },
+      )
+
+      expect(result.changes.map(change => change.path)).toEqual([
+        'package.json',
+        'vite.config.js',
+        'index.html',
+        'src/style.css',
+      ])
+      expect(result.changes.find(change => change.path === 'package.json')?.diff).toContain('"dev"')
+      expect(toolEvents).toContain('write_file:index.html')
+      expect(toolEvents).toContain('write_file:src/style.css')
+    })
+
     it('deve enviar tools na request body', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,

@@ -25,7 +25,7 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
           kind: layer.name,
           reason: layer.skippedReason ?? layer.warnings[0]?.message ?? 'Validation skipped by harness.',
         })
-      } else {
+      } else if (layer.name !== 'completion') {
         validationsRun.push({
           kind: layer.name as ProofPackValidation['kind'],
           layer: layer.name,
@@ -69,7 +69,7 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
   for (const iter of state.iterationHistory) {
     for (const f of iter.contextFiles ?? []) {
       if (!contextFileMap.has(f.path)) {
-        contextFileMap.set(f.path, { path: f.path, reason: `No contexto da iteracao ${iter.iteration}`, source: 'context_pack' })
+        contextFileMap.set(f.path, { path: f.path, reason: `In context during iteration ${iter.iteration}`, source: 'context_pack' })
       }
     }
   }
@@ -96,6 +96,7 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
       validationConfidence: harness.validationConfidence,
       evidenceScore: harness.evidenceScore,
     } : undefined,
+    completionProof: harness?.completionProof,
     residualRisk: [...new Set(residualRisk)],
     notes: [...new Set(notes)],
     finalDecision,
@@ -113,9 +114,9 @@ function summarizeChangeReason(change: FileChange): string {
 }
 
 function summarizeLayer(layer: HarnessResult['layers'][number]): string | undefined {
-  if (layer.passed) return 'Passou no harness.'
+  if (layer.passed) return 'Passed in harness.'
   const first = layer.errors[0]?.humanMessage || layer.errors[0]?.message
-  return first ? `${layer.errors.length} erro(s): ${first}` : `${layer.errors.length} erro(s).`
+  return first ? `${layer.errors.length} error(s): ${first}` : `${layer.errors.length} error(s).`
 }
 
 function limitOutput(output?: string): string | undefined {

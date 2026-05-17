@@ -1,4 +1,4 @@
-import { r as reactExports, j as jsxRuntimeExports } from "./index-BCtyL0ZQ.js";
+import { r as reactExports, j as jsxRuntimeExports } from "./index-RKXIy0lA.js";
 var xterm = { exports: {} };
 var hasRequiredXterm;
 function requireXterm() {
@@ -6248,54 +6248,7 @@ function ApprovalDialog({ approval, onApprove }) {
     ] })
   ] }) });
 }
-function CommandOutputLog({ events }) {
-  const blocks = [];
-  for (const event of events) {
-    if (event.type === "tool_call" && event.toolName === "run_command") {
-      blocks.push({
-        id: `${blocks.length}`,
-        command: String(event.toolInput?.command ?? event.message ?? "run_command"),
-        lines: [],
-        status: "running"
-      });
-    } else if (event.type === "command_output") {
-      const block = [...blocks].reverse().find((item) => item.status === "running");
-      if (block && event.commandLine) block.lines.push(event.commandLine);
-    } else if (event.type === "tool_result") {
-      const block = [...blocks].reverse().find((item) => item.status === "running");
-      if (block) {
-        block.status = event.message?.startsWith("Error:") || event.message?.startsWith("Blocked:") ? "error" : "done";
-        if (event.message && block.lines.length === 0) block.lines.push(event.message);
-      }
-    }
-  }
-  const visible = blocks.slice(-3);
-  if (visible.length === 0) return null;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-    position: "fixed",
-    right: 18,
-    bottom: 18,
-    width: "min(720px, calc(100vw - 36px))",
-    maxHeight: "42vh",
-    background: "#0D0F14",
-    color: "#E8E8EB",
-    border: "1px solid var(--border)",
-    borderRadius: 8,
-    overflow: "hidden",
-    boxShadow: "0 18px 50px rgba(0,0,0,0.45)",
-    zIndex: 40
-  }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "7px 10px", borderBottom: "1px solid var(--border)", color: "var(--text-2)", fontSize: 11 }, children: "Command output" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflow: "auto", maxHeight: "calc(42vh - 32px)" }, children: visible.map((block) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "9px 10px", borderBottom: "1px solid rgba(255,255,255,0.05)" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: block.status === "error" ? "var(--red)" : "var(--cyan)", fontFamily: "var(--font-mono)", fontSize: 11, marginBottom: 6 }, children: [
-        "$ ",
-        block.command
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: { margin: 0, whiteSpace: "pre-wrap", color: "var(--text-2)", fontSize: 11, lineHeight: 1.45 }, children: block.lines.slice(-80).join("\n") || "(running...)" })
-    ] }, block.id)) })
-  ] });
-}
-function TerminalPanel({ sessions, commandEvents, pendingApproval, onClose, onApprove }) {
+function TerminalPanel({ sessions, pendingApproval, onClose, onApprove }) {
   const [activeId, setActiveId] = reactExports.useState(null);
   reactExports.useEffect(() => {
     if (sessions.length > 0) {
@@ -6305,10 +6258,8 @@ function TerminalPanel({ sessions, commandEvents, pendingApproval, onClose, onAp
     }
   }, [sessions.length]);
   const activeSession = sessions.find((s) => s.id === activeId);
-  const commandLog = /* @__PURE__ */ jsxRuntimeExports.jsx(CommandOutputLog, { events: commandEvents });
-  if (sessions.length === 0 && !pendingApproval) return commandLog;
+  if (sessions.length === 0 && !pendingApproval) return null;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-    commandLog,
     pendingApproval && /* @__PURE__ */ jsxRuntimeExports.jsx(ApprovalDialog, { approval: pendingApproval, onApprove }),
     sessions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       height: 280,

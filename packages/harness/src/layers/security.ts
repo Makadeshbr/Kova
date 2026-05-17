@@ -25,7 +25,7 @@ export async function runSecurityLayer(config: SecurityLayerConfig): Promise<Lay
   if (!available) {
     const warn: HarnessWarning = {
       layer: 'security',
-      message: 'Semgrep não encontrado — análise SAST pulada',
+      message: 'Semgrep not found - SAST analysis skipped',
       file: '',
     }
     return { name: 'security', passed: true, errors: [], warnings: [warn], duration: 0, skipped: false }
@@ -51,8 +51,8 @@ function checkSecrets(changes: FileChange[]): HarnessError[] {
             type: 'security',
             severity: 'critical',
             fixable: false,
-            message: `${label} detectado em ${change.path}`,
-            humanMessage: `Possível ${label} hardcoded — use variáveis de ambiente`,
+            message: `${label} detected in ${change.path}`,
+            humanMessage: `Possible hardcoded ${label} - use environment variables`,
             file: change.path,
             line: idx + 1,
           })

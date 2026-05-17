@@ -9,6 +9,8 @@
  * Pure function, exhaustively tested.
  */
 
+import type { Attachment } from '@kova/shared'
+
 export type ChatMode = 'patch' | 'plan' | 'review' | 'chat'
 
 export interface UserCommand {
@@ -18,11 +20,13 @@ export interface UserCommand {
   mode: ChatMode
   /** True when the slash command came from the input itself (not the active pill). */
   fromSlashCommand: boolean
+  /** Optional user-supplied attachments (images, documents, text files). */
+  attachments?: Attachment[]
 }
 
 const SLASH_PATTERN = /^\/(plan|review)\b\s*/i
 
-export function parseUserInput(raw: string, defaultMode: ChatMode): UserCommand {
+export function parseUserInput(raw: string, defaultMode: ChatMode, attachments?: Attachment[]): UserCommand {
   const trimmed = raw.trim()
   const match = SLASH_PATTERN.exec(trimmed)
   if (match) {
@@ -32,11 +36,13 @@ export function parseUserInput(raw: string, defaultMode: ChatMode): UserCommand 
       text: stripped || trimmed,
       mode: match[1].toLowerCase() as ChatMode,
       fromSlashCommand: true,
+      attachments,
     }
   }
   return {
     text: trimmed,
     mode: defaultMode,
     fromSlashCommand: false,
+    attachments,
   }
 }

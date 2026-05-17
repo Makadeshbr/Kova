@@ -12,7 +12,7 @@ export type {
   AgentMessage, ReviewGateResult, ReviewFinding, DiffReviewSelection, DiffReviewDecision, DiffReviewHunk, KovaSettings, StartTaskParams,
 }
 
-export type LayerName = 'build' | 'lint' | 'tests' | 'security' | 'rules'
+export type LayerName = 'completion' | 'build' | 'lint' | 'tests' | 'security' | 'rules' | 'typecheck'
 
 export type LayerStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
 

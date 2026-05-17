@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition } from '@kova/shared'
+import type { Attachment, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition } from '@kova/shared'
 import type { StartTaskParams } from '../main/engine-manager'
 import type { KovaSettings } from '../main/ipc-handlers'
 
@@ -10,8 +10,8 @@ const kovaAPI = {
   openFolder: (): Promise<string | null> =>
     ipcRenderer.invoke('kova:open-folder'),
 
-  sendMessage: (message: string, history: MsgHistory, params: StartTaskParams): Promise<void> =>
-    ipcRenderer.invoke('kova:send-message', message, history, params),
+  sendMessage: (message: string, history: MsgHistory, params: StartTaskParams, attachments?: Attachment[]): Promise<void> =>
+    ipcRenderer.invoke('kova:send-message', message, history, params, attachments),
 
   detectModel: (url: string): Promise<string | null> =>
     ipcRenderer.invoke('kova:detect-model', url),

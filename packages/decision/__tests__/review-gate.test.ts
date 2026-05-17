@@ -18,8 +18,6 @@ const contract: ExecutionContract = {
   allowedPaths: ['src/**'],
   forbiddenPaths: ['dist/**', 'out/**', 'node_modules/**'],
   safeZones: ['.env', 'package.json'],
-  allowedCommands: [],
-  forbiddenCommands: [],
   validationCriteria: [],
   requiresTests: true,
   maxFilesChanged: 4,
@@ -127,7 +125,7 @@ describe('runReviewGate', () => {
     })
 
     expect(review.passed).toBe(false)
-    expect(review.findings.map(f => f.message).join('\n')).toContain('Retorno publico alterado')
+    expect(review.findings.map(f => f.message).join('\n')).toContain('Public return type changed')
   })
 })
 

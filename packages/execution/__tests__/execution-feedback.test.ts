@@ -28,16 +28,21 @@ function task(): TaskDefinition {
 }
 
 function result(passed: boolean, errors: HarnessError[] = []): HarnessResult {
-  const layer: LayerResult = {
-    name: passed ? 'build' : 'lint',
-    passed,
-    errors,
-    warnings: [],
-    duration: 1,
-    skipped: false,
-  }
+  const layers: LayerResult[] = passed
+    ? [
+        { name: 'build', passed: true, errors: [], warnings: [], duration: 1, skipped: false },
+        { name: 'tests', passed: true, errors: [], warnings: [], duration: 1, skipped: false },
+      ]
+    : [{
+        name: 'lint',
+        passed,
+        errors,
+        warnings: [],
+        duration: 1,
+        skipped: false,
+      }]
   // Use score 40 for failures (reject but repairable) instead of 0 (hard fail)
-  return { passed, score: passed ? 100 : 40, layers: [layer], duration: 1, iteration: 1 }
+  return { passed, score: passed ? 100 : 40, layers, duration: 1, iteration: 1, validationConfidence: passed ? 'full' : 'partial' }
 }
 
 describe('ExecutionEngine feedback loop', () => {

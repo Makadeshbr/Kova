@@ -1,7 +1,7 @@
 import type { EvidenceScoreBreakdown, FileChange, HarnessResult, LayerResult } from '@kova/shared'
 
 export interface LayerDef {
-  name: 'build' | 'tests' | 'lint' | 'rules' | 'security' | 'typecheck'
+  name: LayerResult['name']
   run: () => Promise<LayerResult>
   hardFail: boolean
   /** Human-readable command string for progress events (optional). */
@@ -23,12 +23,14 @@ const SCORE_WEIGHTS: Record<LayerResult['name'], number> = {
   build: 20,
   typecheck: 15,
   tests: 30,
+  completion: 20,
   rules: 10,
   security: 15,
   lint: 10,
 }
 
 const VALIDATION_LAYERS = new Set<LayerResult['name']>(['build', 'typecheck', 'tests', 'lint'])
+const COMPLETION_LAYERS = new Set<LayerResult['name']>(['completion'])
 
 export async function runPipeline(
   layers: LayerDef[],
@@ -112,7 +114,7 @@ function computeEvidenceScore(
   let score = validationScore - completeness.penalty - risk.penalty
   if (validationConfidence === 'none') score = Math.min(score, 55)
   if (validationConfidence === 'partial') score = Math.min(score, 85)
-  if (failedLayers.some(name => VALIDATION_LAYERS.has(name as LayerResult['name']))) score = Math.min(score, 55)
+  if (failedLayers.some(name => VALIDATION_LAYERS.has(name as LayerResult['name']) || COMPLETION_LAYERS.has(name as LayerResult['name']))) score = Math.min(score, 55)
   if (active.some(layer => layer.name === 'security' && layer.errors.some(error => error.severity === 'critical'))) score = 0
   if (active.some(layer => layer.name === 'build' && !layer.passed)) score = 0
   score = Math.max(0, Math.min(100, score))
@@ -142,9 +144,22 @@ function computeCompleteness(
   const names = new Set(active.map(layer => layer.name))
   const hasCompilationCheck = names.has('build') || names.has('typecheck')
   const hasTestEvidence = names.has('tests')
+  const hasCompletionEvidence = names.has('completion')
   const hasSecurityEvidence = names.has('security')
   const reasons: string[] = []
   let penalty = 0
+
+  const onlyCompletionProof = hasCompletionEvidence && active.length === 1
+  if (onlyCompletionProof) {
+    return {
+      hasCompilationCheck,
+      hasTestEvidence,
+      hasSecurityEvidence,
+      partial: true,
+      penalty: 20,
+      reasons: ['somente prova de conclusao; sem build/test executado'],
+    }
+  }
 
   if (!hasCompilationCheck) {
     penalty += 12

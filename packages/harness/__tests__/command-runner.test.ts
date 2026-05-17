@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
+import { isLongRunningCommand, normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 import { runTestsLayer } from '../src/layers/tests'
 
 let root: string
@@ -91,6 +91,60 @@ describe('safe command normalization', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain('manifest/build file')
+  })
+
+  it('blocks npx serve as a persistent server even for a static HTML project', () => {
+    writeFileSync(join(root, 'index.html'), '<main>Hello</main>', 'utf-8')
+
+    const result = normalizeCommandInvocation({ command: 'npx serve -s . -l 3000', workspaceRoot: root, kind: 'run' })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('Long-running command')
+  })
+
+  it('blocks npx static server when index.html is staged in the same iteration', () => {
+    const result = normalizeCommandInvocation({
+      command: 'npx serve -s . -l 3000',
+      workspaceRoot: root,
+      kind: 'run',
+      additionalManifests: ['index.html'],
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('Long-running command')
+  })
+
+  it('blocks npx serve before manifest validation in an empty folder', () => {
+    const result = normalizeCommandInvocation({ command: 'npx serve -s . -l 3000', workspaceRoot: root, kind: 'run' })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('Long-running command')
+  })
+
+  it('classifies dev servers and watch modes as long-running and blocks run_command', () => {
+    const commands = [
+      'npm run dev',
+      'pnpm dev',
+      'yarn dev',
+      'vite --host 0.0.0.0',
+      'next dev',
+      'astro dev',
+      'remix dev',
+      'webpack serve',
+      'python manage.py runserver',
+      'rails s',
+      'vitest --watch',
+    ]
+
+    for (const command of commands) {
+      expect(isLongRunningCommand(command), command).toBe(true)
+      const result = normalizeCommandInvocation({ command, workspaceRoot: root, kind: 'run' })
+      expect(result.ok, command).toBe(false)
+      if (!result.ok) expect(result.reason).toContain('Long-running command')
+    }
+
+    expect(isLongRunningCommand('vite build')).toBe(false)
+    expect(isLongRunningCommand('astro build')).toBe(false)
   })
 })
 

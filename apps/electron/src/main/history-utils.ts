@@ -110,7 +110,8 @@ export function structuredMessageToHistoryText(message: StructuredAgentMessage):
 }
 
 function historyContentFor(message: HistoryInputMessage): string {
+  if (message.structured) return structuredMessageToHistoryText(message.structured)
   const content = message.content.trim()
   if (content) return content
-  return message.structured ? structuredMessageToHistoryText(message.structured) : ''
+  return ''
 }

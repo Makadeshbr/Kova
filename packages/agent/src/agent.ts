@@ -1,10 +1,13 @@
 import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage, CommandOutputCallback, Todo } from '@kova/shared'
-import type { AgentProvider, LLMResponse } from './providers/provider'
+import type { AgentProvider, LLMResponse, ProviderUsageReport } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
-import type { InteractiveRunner } from './tools'
+import type { InteractiveRunner, PermissionPolicy } from './tools'
 import { MODE_PROMPTS } from './modes'
 
-const MAX_TURNS = 10
+// Complex frontend tasks can legitimately need many tool turns: read existing
+// files, create components, edit styles, install deps, validate, then start a
+// server. A low cap made capable models stop mid-task and look "stuck".
+const MAX_TURNS = 24
 const AGENT_TIMEOUT_MS = 8 * 60 * 1000 // 8 min — generous for slow local models
 
 const WRITE_MODES = new Set<AgentMode>(['code', 'test', 'fix', 'unified'])
@@ -39,6 +42,10 @@ export class Agent {
       interactiveRunner?: InteractiveRunner
       /** FIX-003: forwarded to ToolExecutor for live stdout/stderr streaming. */
       onCommandOutput?: CommandOutputCallback
+      /** Provider token/cache telemetry, reported once per model API call. */
+      onUsageReport?: (report: ProviderUsageReport) => void
+      /** Permission policy for edit/bash/list/read tools. */
+      permissionPolicy?: PermissionPolicy
       /** FIX-018: seed the todo list with a prior iteration's plan. */
       initialTodos?: Todo[]
       /** FIX-018: fired after every successful todo_write. */
@@ -65,7 +72,7 @@ export class Agent {
     const executor = new ToolExecutor(
       this.projectRoot,
       composedSignal,
-      WRITE_MODES.has(mode) ? undefined : READ_ONLY_PERMISSION_POLICY,
+      WRITE_MODES.has(mode) ? options?.permissionPolicy : READ_ONLY_PERMISSION_POLICY,
       options?.interactiveRunner,
       options?.onCommandOutput,
       // FIX-018: seed + listener for the multi-step todo list
@@ -91,6 +98,7 @@ export class Agent {
         onReasoningEnd: options?.onReasoningEnd,
         onToolCall: options?.onToolCall,
         onToolResult: options?.onToolResult,
+        onUsageReport: options?.onUsageReport,
       })
     } catch (err) {
       executor.rollbackWrites()
@@ -109,7 +117,15 @@ export class Agent {
     const finalTodos = executor.getTodos()
     const todos = finalTodos.length > 0 || options?.initialTodos ? finalTodos : undefined
 
-    return { mode, thought: result.thought, changes: result.changes, tokensUsed: result.tokensUsed, todos }
+    return {
+      mode,
+      thought: result.thought,
+      changes: result.changes,
+      tokensUsed: result.tokensUsed,
+      todos,
+      maxTurnsReached: result.maxTurnsReached,
+      incompleteReason: result.incompleteReason,
+    }
   }
 }
 

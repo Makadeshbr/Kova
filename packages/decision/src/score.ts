@@ -3,6 +3,7 @@ import type { HarnessResult, LayerResult } from '@kova/shared'
 const BASE_WEIGHTS: Record<string, number> = {
   build: 25,
   typecheck: 0,
+  completion: 20,
   tests: 30,
   rules: 25,
   security: 10,
@@ -70,6 +71,7 @@ function hasHardFail(result: HarnessResult): boolean {
   for (const layer of result.layers) {
     if (layer.passed || layer.skipped) continue
     if (layer.name === 'build') return true
+    if (layer.name === 'completion' && hasCriticalError(layer)) return true
     if (layer.name === 'security' && hasCriticalError(layer)) return true
   }
   return false
@@ -83,6 +85,7 @@ export function getHardFailReason(result: HarnessResult): string {
   for (const layer of result.layers) {
     if (layer.passed) continue
     if (layer.name === 'build') return 'Build failed — code does not compile'
+    if (layer.name === 'completion') return 'Completion proof failed'
     if (layer.name === 'security' && hasCriticalError(layer)) {
       const n = layer.errors.filter(e => e.severity === 'critical').length
       return `${n} secret(s) exposed`

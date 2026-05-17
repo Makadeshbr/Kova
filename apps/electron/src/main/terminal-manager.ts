@@ -1,5 +1,7 @@
-import { join, resolve, relative } from 'node:path'
+import { resolve, relative } from 'node:path'
+import { execFile } from 'node:child_process'
 import type { WebContents } from 'electron'
+import { isLongRunningCommand, type ServerSessionInfo } from '@kova/shared'
 
 // node-pty is a native module that requires the correct Node.js ABI for the
 // Electron version. Load it lazily with a try-catch so that if it is not
@@ -29,15 +31,43 @@ export interface TerminalSession {
 export interface InteractiveResult {
   exitCode: number
   output: string
+  sessionId?: string
+  persistent?: boolean
+  ready?: boolean
+  url?: string
+  port?: number
+  cwd?: string
+  diagnostics?: string[]
 }
 
 const INTERACTIVE_ALLOWLIST = new Set([
   'gh', 'git', 'npm', 'npx', 'pnpm', 'yarn', 'bun',
+  'npm.cmd', 'npx.cmd', 'pnpm.cmd', 'yarn.cmd', 'bun.cmd',
   'node', 'python', 'python3', 'pip', 'pip3', 'uv',
+  'node.exe', 'python.exe', 'python3.exe', 'pip.exe', 'pip3.exe', 'uv.exe',
   'cargo', 'rustup', 'go', 'mvn', 'gradle',
+  'cargo.exe', 'rustup.exe', 'go.exe', 'mvn.cmd', 'gradle.bat',
   'dotnet', 'docker', 'kubectl', 'aws', 'gcloud', 'az',
+  'dotnet.exe', 'docker.exe', 'kubectl.exe', 'aws.exe', 'gcloud.cmd', 'az.cmd',
   'heroku', 'vercel', 'fly', 'railway', 'ssh', 'sftp',
+  'vite', 'next', 'astro', 'remix', 'webpack', 'webpack-dev-server',
+  'vite.cmd', 'next.cmd', 'astro.cmd', 'remix.cmd', 'webpack.cmd', 'webpack-dev-server.cmd',
+  'serve', 'http-server', 'rails', 'flask', 'uvicorn', 'gunicorn', 'nodemon',
+  'serve.cmd', 'http-server.cmd', 'rails.bat', 'flask.exe', 'uvicorn.exe', 'nodemon.cmd',
 ])
+
+const PERSISTENT_READY_PATTERNS = [
+  /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])[:/]/i,
+  /\blocal:\s*https?:\/\//i,
+  /\bready\b/i,
+  /\bcompiled\b/i,
+  /\bserver (?:running|started|listening)\b/i,
+  /\blistening on\b/i,
+  /\bwebpack compiled\b/i,
+  /\bvite\b.*\bready\b/i,
+]
+
+const PERSISTENT_START_GRACE_MS = 2_500
 
 export class TerminalManager {
   private sessions = new Map<string, TerminalSession>()
@@ -117,7 +147,7 @@ export class TerminalManager {
       return { exitCode: 1, output: 'User denied interactive command execution.' }
     }
 
-    return this.startSession(id, command, safeCwd)
+    return this.startSession(id, command, safeCwd, { persistent: isLongRunningCommand(command) })
   }
 
   /** Open terminal directly from UI (no agent involvement) */
@@ -148,7 +178,7 @@ export class TerminalManager {
   kill(id: string): void {
     const session = this.sessions.get(id)
     if (session) {
-      try { session.pty.kill() } catch { /* ignore */ }
+      this.killProcessTree(session)
       this.sessions.delete(id)
     }
   }
@@ -177,7 +207,12 @@ export class TerminalManager {
     })
   }
 
-  private startSession(id: string, command: string, cwd: string): Promise<InteractiveResult> {
+  private startSession(
+    id: string,
+    command: string,
+    cwd: string,
+    options: { persistent?: boolean } = {},
+  ): Promise<InteractiveResult> {
     return new Promise((resolve) => {
       if (!this.ptyImpl) {
         resolve({ exitCode: 1, output: 'node-pty not available' })
@@ -188,6 +223,15 @@ export class TerminalManager {
       const args = process.platform === 'win32' ? ['/c', command] : ['-c', command]
 
       let outputBuf = ''
+      let settled = false
+      let readyTimer: NodeJS.Timeout | null = null
+      const persistent = options.persistent === true
+      const settle = (result: InteractiveResult): void => {
+        if (settled) return
+        settled = true
+        if (readyTimer) clearTimeout(readyTimer)
+        resolve(result)
+      }
 
       const ptyProcess = this.ptyImpl.spawn(shell, args, {
         name: 'xterm-color',
@@ -205,21 +249,96 @@ export class TerminalManager {
       this.sessions.set(id, session)
 
       this.webContents?.send('kova:terminal-started', { id, command, cwd })
+      if (persistent) {
+        readyTimer = setTimeout(() => {
+          const meta = analyzePersistentOutput(outputBuf)
+          settle({
+            exitCode: 0,
+            output: outputBuf || `Persistent command started in Kova terminal: ${command}`,
+            sessionId: id,
+            persistent: true,
+            ready: meta.ready,
+            url: meta.url,
+            port: meta.port,
+            cwd,
+            diagnostics: meta.diagnostics,
+          })
+        }, PERSISTENT_START_GRACE_MS)
+        if (typeof readyTimer.unref === 'function') readyTimer.unref()
+      }
 
       ptyProcess.onData((data) => {
         outputBuf += data
+        if (outputBuf.length > 100_000) outputBuf = outputBuf.slice(-100_000)
         session.outputBuf = outputBuf
         this.webContents?.send('kova:terminal-data', { id, data })
+        if (persistent && PERSISTENT_READY_PATTERNS.some(pattern => pattern.test(outputBuf))) {
+          const meta = analyzePersistentOutput(outputBuf)
+          settle({
+            exitCode: 0,
+            output: outputBuf,
+            sessionId: id,
+            persistent: true,
+            ready: true,
+            url: meta.url,
+            port: meta.port,
+            cwd,
+            diagnostics: meta.diagnostics,
+          })
+        }
       })
 
       ptyProcess.onExit(({ exitCode }) => {
         session.exitCode = exitCode
         this.webContents?.send('kova:terminal-exit', { id, exitCode })
         this.sessions.delete(id)
-        resolve({ exitCode, output: outputBuf })
+        const meta = analyzePersistentOutput(outputBuf)
+        settle(persistent
+          ? { exitCode, output: outputBuf, sessionId: id, persistent: true, ready: false, url: meta.url, port: meta.port, cwd, diagnostics: meta.diagnostics }
+          : { exitCode, output: outputBuf })
       })
     })
+  }
+
+  private killProcessTree(session: TerminalSession): void {
+    const pid = typeof session.pty.pid === 'number' ? session.pty.pid : null
+    if (process.platform === 'win32' && pid) {
+      try {
+        execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, () => {})
+        try { session.pty.kill() } catch { /* ignore */ }
+      } catch {
+        try { session.pty.kill() } catch { /* ignore */ }
+      }
+      return
+    }
+    try { session.pty.kill() } catch { /* ignore */ }
   }
 }
 
 export const terminalManager = new TerminalManager()
+
+export function analyzePersistentOutput(output: string): Omit<ServerSessionInfo, 'persistent' | 'command' | 'cwd'> {
+  const url = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0]
+  const portMatch = url?.match(/:(\d+)/) ?? output.match(/\b(?:port|porta)\s+(\d{2,5})\b/i)
+  const diagnostics: string[] = []
+  if (/EADDRINUSE|address already in use|port .* already in use|porta .* em uso/i.test(output)) {
+    diagnostics.push('port_in_use')
+  }
+  if (/requires Node\.js version|unsupported engine|EBADENGINE|node version/i.test(output)) {
+    diagnostics.push('node_version_mismatch')
+  }
+  if (/missing script|script .* not found/i.test(output)) {
+    diagnostics.push('missing_script')
+  }
+  if (/command not found|is not recognized as an internal or external command|ENOENT/i.test(output)) {
+    diagnostics.push('command_not_found')
+  }
+  const ready = !!url || PERSISTENT_READY_PATTERNS.some(pattern => pattern.test(output))
+  return {
+    sessionId: undefined,
+    ready,
+    url,
+    port: portMatch?.[1] ? Number(portMatch[1]) : undefined,
+    diagnostics,
+  }
+}

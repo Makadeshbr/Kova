@@ -224,7 +224,7 @@ describe('Agent', () => {
     expect(mockProvider.runAgentLoop).toHaveBeenCalledOnce()
   })
 
-  it('faz rollback das escritas do agente antes de retornar as mudancas para staging/apply', async () => {
+  it('streamed creates ficam no disco para feedback ao vivo (Claude Code parity)', async () => {
     const mockProvider: AgentProvider = {
       generate: vi.fn(),
       capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
@@ -243,7 +243,10 @@ describe('Agent', () => {
 
     expect(output.changes).toHaveLength(1)
     expect(output.changes[0]).toMatchObject({ path: 'src/new-file.ts', type: 'create' })
-    expect(existsSync(join(projectRoot, 'src', 'new-file.ts'))).toBe(false)
+    // Brand-new files stream to disk immediately so the user sees them in the
+    // file tree. ApplicationEngine.apply still runs at the end of the
+    // iteration to create the git checkpoint covering all changes.
+    expect(existsSync(join(projectRoot, 'src', 'new-file.ts'))).toBe(true)
   })
 
   it('restaura conteudo original apos modificar arquivo existente durante o turno', async () => {

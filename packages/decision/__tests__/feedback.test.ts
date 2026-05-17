@@ -19,40 +19,40 @@ function result(layers: LayerResult[]): HarnessResult {
 }
 
 describe('buildFeedback', () => {
-  it('deve retornar array vazio quando tudo passa', () => {
+  it('returns an empty array when all layers pass', () => {
     const r = result([passedLayer('build'), passedLayer('lint')])
     expect(buildFeedback(r)).toHaveLength(0)
   })
 
-  it('deve gerar feedback para erro de build', () => {
+  it('builds feedback for build errors', () => {
     const r = result([failedLayer('build', [makeError('build', "Type 'string' is not assignable")])])
     const fb = buildFeedback(r)
     expect(fb).toHaveLength(1)
-    expect(fb[0].instruction).toContain('Corrija o erro de compilação')
+    expect(fb[0].instruction).toContain('Fix the compilation error')
     expect(fb[0].instruction).toContain('src/file.ts:10')
   })
 
-  it('deve mencionar "CRÍTICO" para erro de security', () => {
-    const r = result([failedLayer('security', [makeError('security', 'OpenAI API key detectado', 'critical')])])
+  it('marks security errors as critical', () => {
+    const r = result([failedLayer('security', [makeError('security', 'OpenAI API key detected', 'critical')])])
     const fb = buildFeedback(r)
-    expect(fb[0].instruction).toContain('CRÍTICO')
-    expect(fb[0].instruction).toContain('variável de ambiente')
+    expect(fb[0].instruction).toContain('CRITICAL')
+    expect(fb[0].instruction).toContain('environment variable')
   })
 
-  it('deve sugerir extração de sub-funções para complexidade', () => {
-    const r = result([failedLayer('rules', [makeError('rules', 'Complexidade ciclomática 14 excede 10')])])
+  it('suggests extracting helper functions for complexity errors', () => {
+    const r = result([failedLayer('rules', [makeError('rules', 'Complexidade ciclomatica 14 excede 10')])])
     const fb = buildFeedback(r)
-    expect(fb[0].instruction).toContain('Extraia sub-funções')
+    expect(fb[0].instruction).toContain('Extract helper functions')
     expect(fb[0].instruction).toContain('14')
   })
 
-  it('deve sugerir early-return para nesting', () => {
-    const r = result([failedLayer('rules', [makeError('rules', 'Nesting 3 excede 2')])])
+  it('suggests early returns for nesting errors', () => {
+    const r = result([failedLayer('rules', [makeError('rules', 'Nesting 3 exceeds 2')])])
     const fb = buildFeedback(r)
-    expect(fb[0].instruction).toContain('early-return')
+    expect(fb[0].instruction).toContain('early returns')
   })
 
-  it('deve incluir contexto com arquivo, linha e severidade', () => {
+  it('includes context with file, line, and severity', () => {
     const r = result([failedLayer('lint', [makeError('lint', 'Missing semicolon')])])
     const fb = buildFeedback(r)
     expect(fb[0].context).toContain('src/file.ts')
@@ -60,7 +60,7 @@ describe('buildFeedback', () => {
     expect(fb[0].context).toContain('high')
   })
 
-  it('deve gerar um feedback por erro', () => {
+  it('builds one feedback item per error', () => {
     const errors = [
       makeError('build', 'Error 1'),
       makeError('build', 'Error 2'),

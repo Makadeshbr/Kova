@@ -50,6 +50,11 @@ export type CommandPolicyResult =
   | ({ ok: true } & NormalizedCommandInvocation)
   | CommandPolicyBlock
 
+export interface LongRunningCommandMatch {
+  longRunning: boolean
+  reason?: string
+}
+
 export interface CommandRunResult {
   command: string
   cwd: string
@@ -125,6 +130,8 @@ const PROJECT_MANIFESTS = [
   'Gemfile', 'pubspec.yaml', 'Package.swift', 'CMakeLists.txt', 'Makefile', 'makefile',
   'Taskfile.yml', 'Taskfile.yaml', 'justfile', 'Justfile',
 ]
+const STATIC_ENTRYPOINTS = ['index.html', 'index.htm']
+const STATIC_SERVER_PACKAGES = new Set(['serve', 'http-server', 'vite'])
 
 export function normalizeCommandInvocation(input: CommandInvocationInput): CommandPolicyResult {
   const workspaceRoot = resolve(input.workspaceRoot)
@@ -167,6 +174,14 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
 
   if (isInteractiveCommand(parsed.tokens)) {
     return block('Interactive command blocked.', 'Use run_interactive_command so the user can approve and interact with it.')
+  }
+
+  const longRunning = classifyLongRunningCommandTokens(parsed.tokens)
+  if (longRunning.longRunning) {
+    return block(
+      'Long-running command blocked in run_command.',
+      'Use run_interactive_command so Kova can keep the process in the terminal panel without blocking the conversation.',
+    )
   }
 
   const executable = normalizeExecutableName(parsed.tokens[0])
@@ -483,6 +498,19 @@ function executableForPlatform(value: string): string {
   return value
 }
 
+export function classifyLongRunningCommand(command: string): LongRunningCommandMatch {
+  const cd = extractSimpleCd(command.trim())
+  let effectiveCommand = (cd?.command ?? command).trim()
+  effectiveCommand = stripNativeStderrMerge(effectiveCommand).command
+  const parsed = parseCommandLine(effectiveCommand)
+  if (!parsed.ok || parsed.tokens.length === 0) return { longRunning: false }
+  return classifyLongRunningCommandTokens(parsed.tokens)
+}
+
+export function isLongRunningCommand(command: string): boolean {
+  return classifyLongRunningCommand(command).longRunning
+}
+
 function isInteractiveCommand(tokens: string[]): boolean {
   const exe = normalizeExecutableName(tokens[0])
   const sub = (tokens[1] ?? '').toLowerCase()
@@ -491,6 +519,85 @@ function isInteractiveCommand(tokens: string[]): boolean {
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(exe) && ['login', 'adduser'].includes(sub)) return true
   if (['docker', 'vercel', 'netlify', 'railway', 'fly', 'gcloud', 'aws', 'az'].includes(exe) && sub === 'login') return true
   return false
+}
+
+function classifyLongRunningCommandTokens(tokens: string[]): LongRunningCommandMatch {
+  const exe = normalizeExecutableName(tokens[0])
+  const normalized = tokens.map(token => token.toLowerCase())
+  const sub = normalized[1] ?? ''
+  const third = normalized[2] ?? ''
+  const packageScript = packageManagerScriptName(exe, normalized)
+
+  if (packageScript && isLongRunningScriptName(packageScript)) {
+    return { longRunning: true, reason: `${exe} script ${packageScript}` }
+  }
+
+  if (exe === 'vite' && (!sub || ['dev', 'serve', 'preview', '--host'].includes(sub))) {
+    return { longRunning: true, reason: sub ? `vite ${sub}` : 'vite' }
+  }
+  if (['astro', 'remix'].includes(exe) && (!sub || ['dev', 'serve', 'preview'].includes(sub))) {
+    return { longRunning: true, reason: sub ? `${exe} ${sub}` : exe }
+  }
+  if (['nodemon', 'ts-node-dev', 'webpack-dev-server'].includes(exe)) {
+    return { longRunning: true, reason: exe }
+  }
+  if (exe === 'next' && (sub === 'dev' || sub === 'start')) return { longRunning: true, reason: `next ${sub}` }
+  if (exe === 'webpack' && sub === 'serve') return { longRunning: true, reason: 'webpack serve' }
+  if (exe === 'serve' || exe === 'http-server') return { longRunning: true, reason: exe }
+  if (exe === 'rails' && (sub === 's' || sub === 'server')) return { longRunning: true, reason: `rails ${sub}` }
+  if (['python', 'python3', 'py'].includes(exe) && sub === 'manage.py' && third === 'runserver') {
+    return { longRunning: true, reason: 'django runserver' }
+  }
+  if (['flask', 'uvicorn', 'gunicorn'].includes(exe) && sub === 'run') return { longRunning: true, reason: `${exe} run` }
+  if (exe === 'uvicorn' || exe === 'gunicorn') return { longRunning: true, reason: exe }
+  if (exe === 'dotnet' && sub === 'watch') return { longRunning: true, reason: 'dotnet watch' }
+  if (exe === 'cargo' && sub === 'watch') return { longRunning: true, reason: 'cargo watch' }
+
+  if (normalized.some(token => token === '--watch' || token === '--watchAll' || token === '--watchall')) {
+    return { longRunning: true, reason: 'watch mode' }
+  }
+  if (sub === 'watch' || third === 'watch') return { longRunning: true, reason: 'watch script' }
+
+  return { longRunning: false }
+}
+
+function packageManagerScriptName(exe: string, tokens: string[]): string | null {
+  if (!['npm', 'pnpm', 'yarn', 'bun', 'npx'].includes(exe)) return null
+  if (exe === 'npm') {
+    if (tokens[1] === 'run') return tokens[2] ?? null
+    if (tokens[1] === 'start') return 'start'
+    return null
+  }
+  if (exe === 'npx') {
+    const command = packageCommandName(tokens[1] ?? '')
+    const commandSub = tokens[2] ?? ''
+    if (['serve', 'http-server', 'webpack-dev-server'].includes(command)) return command
+    if (command === 'vite' && (!commandSub || ['dev', 'serve', 'preview', '--host'].includes(commandSub))) return command
+    if (command === 'next' && ['dev', 'start'].includes(tokens[2] ?? '')) return tokens[2]
+    if (command === 'astro' && ['dev', 'preview'].includes(tokens[2] ?? '')) return tokens[2]
+    return null
+  }
+  if (tokens[1] === 'run') return tokens[2] ?? null
+  return tokens[1] ?? null
+}
+
+function isLongRunningScriptName(value: string): boolean {
+  const script = packageCommandName(value)
+  return [
+    'dev',
+    'start',
+    'serve',
+    'preview',
+    'watch',
+    'develop',
+    'storybook',
+    'vite',
+    'next',
+    'astro',
+    'remix',
+    'http-server',
+    'webpack-dev-server',
+  ].includes(script)
 }
 
 function prepareExecFile(executable: string, args: string[]): { executable: string; args: string[] } {
@@ -570,6 +677,7 @@ function validateManifestRequirement(
 ): string | null {
   if (!MANIFEST_REQUIRED.has(executable)) return null
   if (isBootstrapInvocation(executable, tokens)) return null
+  if (isStaticServerInvocation(executable, tokens) && hasStaticEntrypoint(cwd, workspaceRoot, additionalManifests)) return null
   if (executable === 'dotnet' && tokens.some(token => token.endsWith('.csproj') || token.endsWith('.sln'))) return null
   if (PROJECT_MANIFESTS.some(file => existsSync(resolve(cwd, file)))) return null
   // Honour staged manifests: ToolExecutor passes paths it's about to
@@ -588,7 +696,43 @@ function validateManifestRequirement(
   return `Validation blocked: no recognized manifest/build file was found in ${cwd}. Run from the correct project/module root or create the required manifest before validation.`
 }
 
+function isStaticServerInvocation(executable: string, tokens: string[]): boolean {
+  if (executable === 'npx') {
+    const packageName = firstNpxPackageName(tokens)
+    return packageName ? STATIC_SERVER_PACKAGES.has(packageName) : false
+  }
+  return STATIC_SERVER_PACKAGES.has(executable)
+}
+
+function firstNpxPackageName(tokens: string[]): string | null {
+  for (const token of tokens.slice(1)) {
+    if (!token || token.startsWith('-')) continue
+    return packageCommandName(token)
+  }
+  return null
+}
+
+function hasStaticEntrypoint(
+  cwd: string,
+  workspaceRoot: string,
+  additionalPaths: string[] | undefined,
+): boolean {
+  if (STATIC_ENTRYPOINTS.some(file => existsSync(resolve(cwd, file)))) return true
+  if (!additionalPaths?.length) return false
+
+  const cwdResolved = resolve(cwd)
+  for (const rel of additionalPaths) {
+    if (!STATIC_ENTRYPOINTS.includes(basename(rel))) continue
+    const abs = resolve(workspaceRoot, rel)
+    if (abs === cwdResolved + sep + basename(rel) || abs.startsWith(cwdResolved + sep)) return true
+  }
+  return false
+}
+
 function inferCommandKind(tokens: string[]): ValidationCommandKind {
+  const executable = normalizeExecutableName(tokens[0] ?? '')
+  if (isBootstrapInvocation(executable, tokens)) return 'run'
+
   const text = tokens.join(' ').toLowerCase()
   if (/\b(?:test|pytest|vitest|jest|ctest|rspec)\b/.test(text)) return 'test'
   if (/\b(?:lint|eslint|ruff|clippy|staticcheck|golangci-lint|rubocop|semgrep)\b/.test(text)) return 'lint'

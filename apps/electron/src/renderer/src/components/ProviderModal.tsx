@@ -185,7 +185,7 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
                     {models.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
                 )
-                : <input type="text" value={form.model} onChange={set('model')} placeholder="Clique em Detectar" style={{ ...FIELD, flex: 1 }} />
+                : <input type="text" value={form.model} onChange={set('model')} placeholder="Click Detect" style={{ ...FIELD, flex: 1 }} />
               }
               {canDetect && (
                 <button
@@ -212,7 +212,7 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
                       type="text"
                       value={form.model}
                       onChange={set('model')}
-                      placeholder="Cole o ID exato da API (ex: gemini-3.1-pro)"
+                      placeholder="Paste the exact API ID (for example: gemini-3.1-pro)"
                       style={{ ...FIELD, borderColor: !form.model ? 'var(--amber)' : undefined }}
                       autoFocus
                     />
@@ -232,14 +232,14 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
               </div>
             </div>
           ) : (
-            <input type="text" value={form.model} onChange={set('model')} placeholder="nome exato do modelo (obrigatorio)" style={FIELD} />
+            <input type="text" value={form.model} onChange={set('model')} placeholder="exact model name (required)" style={FIELD} />
           )}
           {detectError && <p style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{detectError}</p>}
           {models.length > 1 && <p style={{ fontSize: 11, color: 'var(--teal)', marginTop: 4 }}>{models.length} modelos detectados</p>}
         </Field>
 
-        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', paddingTop: 12 }}>
-          <Field label="Max. iteracoes">
+        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', paddingTop: 12, flexWrap: 'wrap' }}>
+          <Field label="Max iterations">
             <input
               type="number"
               min={1}
@@ -249,9 +249,16 @@ export function ProviderModal({ settings, onSave, onClose }: Props): React.React
               style={{ ...FIELD, width: 88 }}
             />
           </Field>
+          <Field label="Command permissions">
+            <select value={form.permissionMode ?? 'auto-review'} onChange={set('permissionMode')} style={{ ...FIELD, width: 180 }}>
+              <option value="auto-review">Auto-review safe commands</option>
+              <option value="ask">Ask before commands</option>
+              <option value="full-access">Full access</option>
+            </select>
+          </Field>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', color: 'var(--text-2)', fontSize: 13, paddingBottom: 2 }}>
             <input type="checkbox" checked={form.autoApply} onChange={set('autoApply')} />
-            Auto-aplicar (score maior ou igual a 90)
+            Auto-apply when score is 90+
           </label>
         </div>
 

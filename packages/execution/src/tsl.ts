@@ -176,8 +176,8 @@ function isVagueInput(input: string): boolean {
 }
 
 function vagueSuggestions(project: TaskStructuringProject): string[] {
-  const file = project.affectedFiles[0] ? ` em ${project.affectedFiles[0]}` : ''
-  return [`Descreva o objetivo concreto${file} e como validar o resultado.`]
+  const file = project.affectedFiles[0] ? ` in ${project.affectedFiles[0]}` : ''
+  return [`Describe the concrete objective${file} and how to validate the result.`]
 }
 
 function invalid(reason: string, suggestions: string[]): TaskStructuringResult {

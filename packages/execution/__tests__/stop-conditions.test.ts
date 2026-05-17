@@ -64,6 +64,15 @@ describe('shouldStop', () => {
     expect(shouldStop(state, undefined, { timeoutMs: 120_000 })).toBe('timeout')
   })
 
+  it('permite uma tentativa de repair quando reject ainda tem iteracoes disponiveis mesmo apos timeout', () => {
+    const state = makeState({
+      currentIteration: 1,
+      maxIterations: 3,
+      startedAt: new Date(Date.now() - 130_000).toISOString(),
+    })
+    expect(shouldStop(state, makeDecision('reject'), { timeoutMs: 120_000 })).toBeNull()
+  })
+
   it('deve respeitar timeoutMs customizado (0ms = timeout imediato)', () => {
     const state = makeState({ startedAt: new Date(Date.now() - 10).toISOString() })
     expect(shouldStop(state, undefined, { timeoutMs: 1 })).toBe('timeout')

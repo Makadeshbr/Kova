@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import type { ExecutionEvent, ExecutionState, HarnessError, LayerResult, ReviewFinding } from '../types'
 import type { SessionUsage } from '../App'
+import { ServerSessionCard } from './ServerSessionCard'
 
 interface Props {
   executionState: ExecutionState | null
@@ -23,8 +24,9 @@ const PHASES: Array<{ key: string; label: string; events: ExecutionEvent['type']
   { key: 'apply', label: 'Apply', events: ['apply_started', 'apply_completed'] },
 ]
 
-const LAYER_ORDER = ['build', 'typecheck', 'tests', 'rules', 'security', 'lint']
+const LAYER_ORDER = ['completion', 'build', 'typecheck', 'tests', 'rules', 'security', 'lint']
 const LAYER_LABEL: Record<string, string> = {
+  completion: 'Completion',
   build: 'Build',
   typecheck: 'Typecheck',
   tests: 'Tests',
@@ -40,6 +42,11 @@ const STATUS_COPY: Record<string, string> = {
   validating: 'Validating',
   deciding: 'Deciding',
   applying: 'Applying',
+  repairing: 'Repairing',
+  awaiting_approval: 'Approval',
+  server_starting: 'Server',
+  server_ready: 'Server Ready',
+  blocked: 'Blocked',
   completed: 'Completed',
   failed: 'Failed',
   paused: 'Review',
@@ -507,6 +514,7 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
         )}
 
         {(tab === 'timeline' || tab === 'events') && <ContextEvidenceCard sessionUsage={sessionUsage} />}
+        {(tab === 'timeline' || tab === 'run') && <ServerSessionCard events={events} />}
 
         {tab === 'timeline' && (
           <section className="kova-panel-section">
@@ -605,9 +613,40 @@ export function HarnessDashboard({ executionState, events, sessionUsage, isThink
       </div>
 
       <div className="kova-run-actions">
+        {isPaused && changes.length > 0 && uxMode === 'Task' && (
+          <div style={{
+            padding: '12px 14px',
+            background: 'var(--yellow-dim)',
+            border: '1px solid var(--yellow)',
+            borderRadius: 6,
+            marginBottom: 10,
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--yellow)', marginBottom: 4 }}>
+              {changes.length} file{changes.length === 1 ? '' : 's'} ready to apply
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.4 }}>
+              {decision?.reason ?? 'Review and apply to write these files to disk.'}
+            </div>
+          </div>
+        )}
         {needsRepair && onRepair && <button className="primary repair" onClick={onRepair}>Fix failures</button>}
+        {isPaused && uxMode === 'Task' && (
+          <button
+            className="primary"
+            onClick={onApply}
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              padding: '10px 16px',
+              background: 'var(--teal)',
+              color: 'var(--bg-0)',
+              width: '100%',
+            }}
+          >
+            Apply {changes.length > 0 ? `${changes.length} file${changes.length === 1 ? '' : 's'}` : 'changes'} to disk
+          </button>
+        )}
         {onViewDiff && uxMode === 'Task' && <button className="secondary" onClick={onViewDiff}>Review files</button>}
-        {isPaused && uxMode === 'Task' && <button className="primary" onClick={onApply}>Apply changes</button>}
         {isRunning && (
           <div className="kova-action-row">
             {uxMode === 'Task' && <button className="secondary" onClick={onPause}>Pause</button>}

@@ -524,7 +524,7 @@ describe('EngineManager — abort state cleanup', () => {
 })
 
 describe('EngineManager - provider rate limit', () => {
-  it('classifica 429 como provider_rate_limited, encerra stream e reverte escrita parcial', async () => {
+  it('classifica 429 como provider_rate_limited e encerra stream sem rodar validação', async () => {
     const provider: AgentProvider = {
       capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
       generate: vi.fn().mockResolvedValue({ thought: '', changes: [], tokensUsed: 1 } as LLMResponse),
@@ -542,7 +542,11 @@ describe('EngineManager - provider rate limit', () => {
     expect(events.some(e => e.type === 'provider_error' && e.providerError === 'provider_rate_limited')).toBe(true)
     expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
     expect(chatMessages.join('\n')).toContain('Rate limit reached')
-    expect(existsSync(join(projectRoot, 'task_manager.py'))).toBe(false)
+    // Claude Code parity: brand-new streamed creates stay on disk after a
+    // mid-iteration error so the user can inspect what the agent produced
+    // before the failure. Validation/proof_pack must NOT fire — the iteration
+    // never completed, so we never made any quality claims about the file.
+    expect(existsSync(join(projectRoot, 'task_manager.py'))).toBe(true)
     expect(events.some(e => e.type === 'validation_completed')).toBe(false)
     expect(events.some(e => e.type === 'proof_pack')).toBe(false)
   })
@@ -631,6 +635,31 @@ describe('EngineManager - history continuity (FIX-001)', () => {
     const messagesPassedToAgent = calls[0][0] as AgentMessage[]
     const allContent = messagesPassedToAgent.map(m => m.content).join('\n')
     expect(allContent).toContain('It is a calculator')
+  })
+
+  it('chat follow-up after applied changes does not deny workspace access', async () => {
+    const provider = makeMockProvider({ emitTokens: ['Ainda nao consigo criar arquivos.'] })
+    const [manager, { events }] = makeManager(provider)
+
+    const history: AgentMessage[] = [
+      { role: 'user', content: 'crie uma landing page' },
+      {
+        role: 'assistant',
+        content: [
+          'Task complete: Changes applied successfully.',
+          'Files changed: index.html (created), css/style.css (created), js/main.js (created)',
+          'Decision: apply; risk: low',
+        ].join('\n'),
+      },
+    ]
+
+    await manager.sendMessage('devo testar agora?', history, makeParams(projectRoot))
+
+    expect(vi.mocked(provider.runAgentLoop)).not.toHaveBeenCalled()
+    const answer = events.filter(e => e.type === 'token').map(e => e.token).join('')
+    expect(answer).toContain('agora e a hora certa de testar')
+    expect(answer).toContain('index.html')
+    expect(answer).not.toContain('nao consigo criar')
   })
 })
 

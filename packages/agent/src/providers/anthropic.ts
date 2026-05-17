@@ -1,8 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { AgentMessage } from '@kova/shared'
+import { formatTextAttachment } from '@kova/shared'
 import type { LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions, ProviderCapabilities, ProviderUsageReport } from './provider'
 import type { KovaTool } from '../tools'
 import { normalizeProviderError } from './errors'
+import { detectCapabilities } from './model-catalog'
 import {
   withCachedSystem,
   withCachedTools,
@@ -29,7 +31,14 @@ export class AnthropicProvider implements AgentProvider {
 
   capabilities(): ProviderCapabilities {
     // FIX-014: explicit prompt caching is wired up via cache_control breakpoints.
-    return { supportsToolCalls: true, contextTokenLimit: 180_000, supportsPromptCaching: true }
+    // Vision capability is per-model — Claude 3.5+ accept images, legacy haiku 3.5 does not.
+    const detected = detectCapabilities(this.defaultModel)
+    return {
+      supportsToolCalls: true,
+      contextTokenLimit: 180_000,
+      supportsPromptCaching: true,
+      supportsVision: detected.supportsVision ?? false,
+    }
   }
 
   // Single-turn — used for task structuring (no tools)
@@ -38,7 +47,7 @@ export class AnthropicProvider implements AgentProvider {
     // FIX-014: cache the system prompt + the prior history. Single-shot calls
     // still benefit when the same system+history shape repeats (task structuring).
     const cachedSystem = withCachedSystem(options.system)
-    const cachedMessages = withHistoryCacheBreakpoint(messages.map(m => ({ role: m.role, content: m.content })))
+    const cachedMessages = withHistoryCacheBreakpoint(toAnthropicMessages(messages))
 
     let response: Anthropic.Messages.Message
     try {
@@ -66,7 +75,7 @@ export class AnthropicProvider implements AgentProvider {
     const anthropicTools = withCachedTools(tools.map(toAnthropicTool))
 
     if (!tools.length) {
-      const baseHistory = messages.map(m => ({ role: m.role, content: m.content }))
+      const baseHistory = toAnthropicMessages(messages)
       const cachedHistory = withHistoryCacheBreakpoint(baseHistory)
 
       if (!onToken) return this.generate(messages, { system, model: options.model, maxTokens: options.maxTokens })
@@ -90,9 +99,10 @@ export class AnthropicProvider implements AgentProvider {
       return { thought, changes: [], tokensUsed: response.usage.input_tokens + response.usage.output_tokens }
     }
 
-    const history: Anthropic.Messages.MessageParam[] = messages.map(m => ({ role: m.role, content: m.content }))
+    const history: Anthropic.Messages.MessageParam[] = toAnthropicMessages(messages)
     let thought = ''
     let tokensUsed = 0
+    let completedNaturally = false
 
     for (let turn = 0; turn < maxTurns; turn++) {
       if (signal?.aborted) break
@@ -143,7 +153,10 @@ export class AnthropicProvider implements AgentProvider {
       if (turnText.trim()) thought += (thought ? '\n' : '') + turnText.trim()
 
       history.push({ role: 'assistant', content: response.content })
-      if (response.stop_reason !== 'tool_use') break
+      if (response.stop_reason !== 'tool_use') {
+        completedNaturally = true
+        break
+      }
 
       const toolResults: Anthropic.Messages.ToolResultBlockParam[] = []
       for (const block of response.content) {
@@ -157,7 +170,14 @@ export class AnthropicProvider implements AgentProvider {
       history.push({ role: 'user', content: toolResults })
     }
 
-    return { thought, changes: executor.getChanges(), tokensUsed }
+    const maxTurnsReached = !completedNaturally && !signal?.aborted
+    return {
+      thought,
+      changes: executor.getChanges(),
+      tokensUsed,
+      maxTurnsReached,
+      incompleteReason: maxTurnsReached ? `Agent reached maxTurns (${maxTurns}) before a final response.` : undefined,
+    }
   }
 }
 
@@ -168,6 +188,41 @@ function toAnthropicTool(tool: KovaTool): Anthropic.Tool {
     input_schema: tool.inputSchema as Anthropic.Tool['input_schema'],
   }
 }
+
+/**
+ * Convert Kova AgentMessage[] to Anthropic MessageParam[]. When a user message
+ * carries attachments, expand `content` into a multi-block array with image
+ * blocks (for image attachments) and a trailing text block. Assistant turns
+ * and attachment-free user turns keep the simpler string content form.
+ *
+ * Non-image attachments (PDF, text files) are inlined as text excerpts so they
+ * still reach the model even on calls that don't accept document blocks.
+ */
+function toAnthropicMessages(messages: AgentMessage[]): Anthropic.Messages.MessageParam[] {
+  return messages.map(m => {
+    if (m.role !== 'user' || !m.attachments?.length) {
+      return { role: m.role, content: m.content }
+    }
+    const blocks: Anthropic.Messages.ContentBlockParam[] = []
+    for (const att of m.attachments) {
+      if (att.kind === 'image') {
+        blocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: att.mimeType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+            data: att.base64,
+          },
+        })
+      } else {
+        blocks.push({ type: 'text', text: formatTextAttachment(att) })
+      }
+    }
+    blocks.push({ type: 'text', text: m.content })
+    return { role: 'user', content: blocks }
+  })
+}
+
 
 /**
  * FIX-014: surface cache hit / miss counters to the caller. Called once per

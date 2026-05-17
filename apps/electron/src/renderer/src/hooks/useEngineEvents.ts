@@ -1,12 +1,19 @@
 import { useEffect } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { AppState, ChatMessage } from '../app-state'
+import type { StructuredAgentMessage } from '@kova/shared'
 import { structuredMessageToHistoryText } from '../../../main/history-utils'
+import { createChatMessageId } from '../lib/message-ids'
 
 type SetState = React.Dispatch<React.SetStateAction<AppState>>
 
 const _EMPTY_REASONING: AppState['reasoning'] = {
   active: false, text: '', startedAt: null, endedAt: null,
+}
+
+export function historyTextForStreamEnd(streamingText: string, structured?: StructuredAgentMessage): string {
+  if (structured) return structuredMessageToHistoryText(structured)
+  return streamingText.trim()
 }
 
 /**
@@ -46,7 +53,7 @@ export function useEngineEvents(setState: SetState): void {
       window.kova.onTaskStructured((task: TaskDefinition) => setState(prev => ({ ...prev, task }))),
       window.kova.onError((msg: string) => setState(prev => ({
         ...prev, isThinking: false, reasoning: _EMPTY_REASONING,
-        messages: [...prev.messages, { id: Date.now().toString(), role: 'assistant' as const, content: msg, isTask: false }],
+        messages: [...prev.messages, { id: createChatMessageId('assistant'), role: 'assistant' as const, content: msg, isTask: false }],
       }))),
       window.kova.onModelDetected((model: string) => setState(prev => ({ ...prev, activeModel: model, modelConnected: true }))),
       window.kova.onChatResponse((msg: string) => setState(prev => {
@@ -56,7 +63,7 @@ export function useEngineEvents(setState: SetState): void {
         }
         return {
           ...prev, isThinking: false, reasoning: _EMPTY_REASONING,
-          messages: [...prev.messages, { id: Date.now().toString(), role: 'assistant' as const, content: msg, isTask: false }],
+          messages: [...prev.messages, { id: createChatMessageId('assistant'), role: 'assistant' as const, content: msg, isTask: false }],
         }
       })),
       window.kova.onExecutionEvent((event: ExecutionEvent) => setState(prev => {
@@ -66,6 +73,8 @@ export function useEngineEvents(setState: SetState): void {
             sessionUsage: {
               contextTokens: event.context.tokensUsed,
               completionTokens: prev.sessionUsage.completionTokens,
+              cacheReadInputTokens: prev.sessionUsage.cacheReadInputTokens ?? 0,
+              cacheCreationInputTokens: prev.sessionUsage.cacheCreationInputTokens ?? 0,
               contextFiles: event.context.files,
               selectedFiles: event.context.selectedFiles ?? [],
               blockedFiles: event.context.blockedFiles ?? [],
@@ -78,11 +87,18 @@ export function useEngineEvents(setState: SetState): void {
           }
         }
         if (event.type === 'token_usage') {
+          const usageEvent = event as typeof event & {
+            usage?: { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
+            cacheReadInputTokens?: number
+            cacheCreationInputTokens?: number
+          }
           return {
             ...prev,
             sessionUsage: {
               ...prev.sessionUsage,
               completionTokens: prev.sessionUsage.completionTokens + (event.tokensUsed ?? 0),
+              cacheReadInputTokens: (prev.sessionUsage.cacheReadInputTokens ?? 0) + (usageEvent.cacheReadInputTokens ?? usageEvent.usage?.cacheReadInputTokens ?? 0),
+              cacheCreationInputTokens: (prev.sessionUsage.cacheCreationInputTokens ?? 0) + (usageEvent.cacheCreationInputTokens ?? usageEvent.usage?.cacheCreationInputTokens ?? 0),
             },
             executionEvents: [...prev.executionEvents, event].slice(-200),
           }
@@ -144,11 +160,10 @@ export function useEngineEvents(setState: SetState): void {
           }
         }
         if (event.type === 'stream_end') {
-          const text = prev.streamingText.trim()
           const structured = event.structuredMessage
-          const historyText = text || (structured ? structuredMessageToHistoryText(structured) : '')
+          const historyText = historyTextForStreamEnd(prev.streamingText, structured)
           const assistantMsg: ChatMessage = {
-            id: Date.now().toString(), role: 'assistant', content: historyText, isTask: !!structured, structured,
+            id: createChatMessageId('assistant'), role: 'assistant', content: historyText, isTask: !!structured, structured,
           }
           const newMessages = historyText || structured
             ? [...prev.messages, assistantMsg]

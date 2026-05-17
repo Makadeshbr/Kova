@@ -1,11 +1,42 @@
-import React, { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
+import React, { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent, type DragEvent, type ClipboardEvent } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { ChatMessage, ChatMode, QueuedMessage, ReasoningState, SessionUsage } from '../App'
-import type { AgentResultMessage, Todo } from '@kova/shared'
+import type { AgentResultMessage, Attachment, Todo } from '@kova/shared'
 import { FileCard } from './FileCard'
 import { ActivityFeed } from './ActivityFeed'
 import { TodoListCard } from './TodoListCard'
 import { getValidationConfidenceCopy } from '../lib/validation-confidence-copy'
+import { contextualStatusLabel } from '../lib/status-context'
+import { shouldRenderFloatingResultCard } from '../lib/chat-ordering'
+
+// Per-attachment cap (10 MB) and per-message cap (50 MB total). Enforced
+// renderer-side AND main-side so a malicious renderer can't bypass the limit.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024
+
+function classifyAttachment(mimeType: string): Attachment['kind'] {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('text/') || mimeType === 'application/json') return 'text'
+  return 'document'
+}
+
+async function fileToAttachment(file: File): Promise<Attachment> {
+  const buf = await file.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)))
+  }
+  const base64 = btoa(binary)
+  return {
+    kind: classifyAttachment(file.type || 'application/octet-stream'),
+    name: file.name || 'unnamed',
+    mimeType: file.type || 'application/octet-stream',
+    sizeBytes: file.size,
+    base64,
+  }
+}
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -19,7 +50,9 @@ interface Props {
   reasoning: ReasoningState
   events: ExecutionEvent[]
   projectRoot: string | null
-  onSend: (text: string, modeOverride?: ChatMode) => void
+  onSend: (text: string, modeOverride?: ChatMode, attachments?: Attachment[]) => void
+  /** Vision capability of the active model — gates image attachment + shows hint. */
+  supportsVision?: boolean
   onOpenFolder: () => void
   queuedMessages: QueuedMessage[]
   activeMode: ChatMode
@@ -29,6 +62,55 @@ interface Props {
   todos: Todo[]
   onModeChange: (mode: ChatMode) => void
   onClearQueue: () => void
+}
+
+// ─── Attachment chip ──────────────────────────────────────────────────────────
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRemove: () => void }): React.ReactElement {
+  const isImage = attachment.kind === 'image'
+  const dataUrl = isImage ? `data:${attachment.mimeType};base64,${attachment.base64}` : null
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '6px 10px 6px 6px',
+      background: 'var(--bg-3)', border: '1px solid var(--border)',
+      borderRadius: 8, fontSize: 11, color: 'var(--text-2)',
+      maxWidth: 240,
+    }}>
+      {dataUrl ? (
+        <img src={dataUrl} alt={attachment.name} style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }} />
+      ) : (
+        <span className="material-symbols-outlined" style={{ fontSize: 18, color: 'var(--text-3)' }}>
+          {attachment.kind === 'text' ? 'description' : 'attach_file'}
+        </span>
+      )}
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+          {attachment.name}
+        </div>
+        <div style={{ color: 'var(--text-3)', fontSize: 10 }}>{formatBytes(attachment.sizeBytes)}</div>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove attachment"
+        style={{
+          width: 18, height: 18, borderRadius: 4,
+          background: 'transparent', border: 'none', color: 'var(--text-3)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, cursor: 'pointer',
+        }}
+      >
+        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>close</span>
+      </button>
+    </div>
+  )
 }
 
 // ─── Slash command palette ────────────────────────────────────────────────────
@@ -566,11 +648,10 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
   const parts = [
     created  > 0 && `+${created} created`,
     modified > 0 && `~${modified} modified`,
-    deleted  > 0 && `−${deleted} deleted`,
+    deleted  > 0 && `-${deleted} deleted`,
   ].filter(Boolean) as string[]
 
   const statusColor = status === 'completed' ? 'var(--teal)' : status === 'paused' ? 'var(--yellow)' : 'var(--red)'
-  const statusIcon  = status === 'completed' ? '✓' : status === 'paused' ? '⏸' : '✗'
   const statusLabel = status === 'completed' ? 'Applied'
     : status === 'paused' ? 'Awaiting review'
     : decision.reason || 'Repair needed'
@@ -579,27 +660,55 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
   const failedLayers = harnessResult.layers.filter(l => !l.passed && !l.skipped)
   const scoreColor   = score >= 90 ? 'var(--teal)' : score >= 70 ? 'var(--yellow)' : 'var(--red)'
   const validationCopy = getValidationConfidenceCopy(harnessResult.validationConfidence)
+  const statusTitle = status === 'completed' ? 'Changes ready' : status === 'paused' ? 'Review required' : 'Repair needed'
+  const statusMark = status === 'completed' ? 'OK' : status === 'paused' ? '!' : 'x'
+  const summaryText = parts.length > 0 ? parts.join(' / ') : 'No file changes'
+  const repairHint = status === 'failed' && failedLayers.length > 0
+    ? `Kova is using ${failedLayers.map(layer => layer.name).join(', ')} output as repair context.`
+    : null
 
   return (
     <div className="animate-fade-in" style={{ marginBottom: 16 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: '2px 12px 12px 12px', overflow: 'hidden' }}>
-        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border)', background: 'var(--bg-1)' }}>
-          <span style={{ color: statusColor, fontSize: 14, fontWeight: 700, flexShrink: 0 }}>{statusIcon}</span>
-          <span style={{ color: 'var(--text-1)', fontSize: 13, fontWeight: 600 }}>{parts.join('  ')}</span>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-1)' }}>
+        <div style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid var(--border)' }}>
+          <span style={{
+            width: 26,
+            height: 26,
+            borderRadius: 8,
+            display: 'grid',
+            placeItems: 'center',
+            background: status === 'completed' ? 'var(--teal-dim)' : status === 'paused' ? 'var(--yellow-dim)' : 'var(--red-dim)',
+            color: statusColor,
+            fontSize: 11,
+            fontWeight: 800,
+            fontFamily: 'var(--font-mono)',
+            flexShrink: 0,
+          }}>
+            {statusMark}
+          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--text-1)', fontSize: 13.5, fontWeight: 700 }}>{statusTitle}</span>
+              <span style={{ color: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>{summaryText}</span>
+            </div>
+            <div style={{ color: 'var(--text-3)', fontSize: 11.5, lineHeight: 1.45, marginTop: 2 }}>
+              {statusLabel}
+            </div>
+          </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
             {iters > 1 && (
               <span style={{ fontSize: 10, color: 'var(--yellow)', background: 'var(--yellow-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
-                {iters}×
+                iter {iters}
               </span>
             )}
             {passedLayers.map(l => (
               <span key={l.name} style={{ fontSize: 10, color: 'var(--teal)', background: 'var(--teal-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
-                {l.name} ✓
+                {l.name} ok
               </span>
             ))}
             {failedLayers.map(l => (
               <span key={l.name} style={{ fontSize: 10, color: 'var(--red)', background: 'var(--red-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
-                {l.name} ✗
+                {l.name} failed
               </span>
             ))}
             {harnessResult.layers.length > 0 && (
@@ -613,14 +722,16 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
             {executionState.iterationHistory.map((rec, i) => {
               const s = rec.harnessResult.score
               const c = s >= 90 ? 'var(--teal)' : s >= 70 ? 'var(--yellow)' : 'var(--red)'
-              return <span key={i} style={{ color: i === iters - 1 ? c : 'var(--text-3)' }}>{i + 1}:{s}{i < iters - 1 ? ' →' : ''}</span>
+              return <span key={i} style={{ color: i === iters - 1 ? c : 'var(--text-3)' }}>{i + 1}:{s}{i < iters - 1 ? ' ->' : ''}</span>
             })}
           </div>
         )}
 
         {status !== 'completed' && (
-          <div style={{ padding: '4px 14px', borderBottom: '1px solid var(--border)', fontSize: 11, color: statusColor }}>
-            {statusLabel}
+          <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', fontSize: 11.5, color: statusColor, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', background: status === 'failed' ? 'rgba(226,75,74,0.045)' : 'transparent' }}>
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: statusColor, flexShrink: 0 }} />
+            <span>{status === 'failed' ? 'Repair context' : statusLabel}</span>
+            {repairHint && <span style={{ color: 'var(--text-3)' }}>{repairHint}</span>}
           </div>
         )}
 
@@ -636,12 +747,12 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
             gap: 8,
             alignItems: 'flex-start',
           }}>
-            <span style={{ fontSize: 13, lineHeight: 1, flexShrink: 0, marginTop: 1 }}>ⓘ</span>
+            <span style={{ fontSize: 11, lineHeight: 1.2, flexShrink: 0, marginTop: 1, fontWeight: 800 }}>i</span>
             <span>{validationCopy.text}</span>
           </div>
         )}
 
-        <div style={{ padding: '6px 10px', background: 'var(--bg-2)' }}>
+        <div style={{ padding: '8px 10px', background: 'var(--bg-2)' }}>
           {changes.map((change, i) => (
             <FileCard key={i} change={change} defaultOpen={changes.length === 1} />
           ))}
@@ -666,11 +777,90 @@ export function ChatArea({
   messages, executionState, isThinking, isRunning,
   streamingText, reasoning, events, projectRoot, onSend, onOpenFolder,
   queuedMessages, activeMode, sessionUsage, activeModel, todos, onModeChange, onClearQueue,
+  supportsVision,
 }: Props): React.ReactElement {
   const [value, setValue]           = useState('')
   const [showSlash, setShowSlash]   = useState(false)
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const addFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return
+    const currentTotal = attachments.reduce((sum, a) => sum + a.sizeBytes, 0)
+    let runningTotal = currentTotal
+    const added: Attachment[] = []
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachmentError(`${file.name}: max 10 MB per file`)
+        continue
+      }
+      if (runningTotal + file.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+        setAttachmentError(`Total exceeds 50 MB — drop some attachments`)
+        break
+      }
+      const isImage = (file.type || '').startsWith('image/')
+      if (isImage && supportsVision === false) {
+        setAttachmentError(`${activeModel ?? 'Active model'} does not support images. Switch to a vision model.`)
+        continue
+      }
+      runningTotal += file.size
+      added.push(await fileToAttachment(file))
+    }
+    if (added.length > 0) {
+      setAttachments(prev => [...prev, ...added])
+      setAttachmentError(null)
+    }
+  }, [attachments, supportsVision, activeModel])
+
+  const removeAttachment = useCallback((index: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index))
+    setAttachmentError(null)
+  }, [])
+
+  const onPickFiles = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return
+    addFiles(Array.from(e.target.files))
+    e.target.value = ''
+  }, [addFiles])
+
+  const onDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setIsDragging(false)
+    if (!e.dataTransfer?.files?.length) return
+    addFiles(Array.from(e.dataTransfer.files))
+  }, [addFiles])
+
+  const onDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    if (!isDragging) setIsDragging(true)
+  }, [isDragging])
+
+  const onDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
+    // Only clear when leaving the composer entirely — dragLeave fires on every child.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+    setIsDragging(false)
+  }, [])
+
+  const onPaste = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const files: File[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file') {
+        const file = item.getAsFile()
+        if (file) files.push(file)
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault()
+      addFiles(files)
+    }
+  }, [addFiles])
 
   // Auto-scroll
   useEffect(() => {
@@ -693,16 +883,19 @@ export function ChatArea({
 
   const submit = useCallback(() => {
     const t = value.trim()
-    if (!t || !projectRoot) return
+    // Allow sending with attachments but no text (e.g. "what's in this screenshot?")
+    if ((!t && attachments.length === 0) || !projectRoot) return
     // The slash command parsing happens canonically inside handleSend (parseUserInput).
     // We still update the pinned-mode pill visually so subsequent messages without a
     // slash prefix continue in the same mode. This setState is for UI state only —
     // the dispatch decision is owned by handleSend.
     if (/^\/plan(\s|$)/i.test(t)) onModeChange('plan')
     else if (/^\/review(\s|$)/i.test(t)) onModeChange('review')
-    onSend(t)
+    onSend(t, undefined, attachments.length > 0 ? attachments : undefined)
     setValue('')
-  }, [value, projectRoot, onSend, onModeChange])
+    setAttachments([])
+    setAttachmentError(null)
+  }, [value, attachments, projectRoot, onSend, onModeChange])
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() }
@@ -723,6 +916,14 @@ export function ChatArea({
   const hasResult = !!lastIter && lastIter.changes.length > 0
   const isActive  = !!executionState && !['completed', 'failed', 'paused'].includes(executionState.status)
   const showLive  = (isRunning || isThinking || reasoning.active) && !hasResult
+  const hasStructuredTaskResult = messages.some(msg => msg.structured?.kind === 'agent_result')
+  const showTodoCard = todos.length > 0 && (isActive || isRunning || isThinking || reasoning.active)
+  const showResultCard = shouldRenderFloatingResultCard({
+    hasResult,
+    showLive,
+    hasStructuredTaskResult,
+    lastMessageRole: messages.at(-1)?.role,
+  })
 
   const totalTokens = sessionUsage.contextTokens + sessionUsage.completionTokens
   const contextPct  = sessionUsage.maxContextTokens
@@ -773,8 +974,8 @@ export function ChatArea({
           </div>
         )}
 
-        {/* FIX-018: multi-step plan card. Hidden when the agent has not used todo_write. */}
-        <TodoListCard todos={todos} />
+        {/* FIX-018: multi-step plan card. Hidden when no active agent run owns it. */}
+        {showTodoCard && <TodoListCard todos={todos} />}
 
         {messages.map(msg =>
           msg.role === 'user'
@@ -782,7 +983,7 @@ export function ChatArea({
             : <AssistantBubble key={msg.id} msg={msg} />
         )}
 
-        {hasResult && !showLive && <TaskResultCard executionState={executionState!} />}
+        {showResultCard && <TaskResultCard executionState={executionState!} />}
 
         {showLive && (
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
@@ -808,10 +1009,7 @@ export function ChatArea({
               {isActive && (
                 <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span className="kova-shimmer-text" style={{ fontSize: 12, fontWeight: 500 }}>
-                    {executionState!.status === 'validating' ? 'Validating...'
-                     : executionState!.status === 'applying' ? 'Applying...'
-                     : executionState!.status === 'deciding' ? 'Deciding...'
-                     : 'Processing...'}
+                    {contextualStatusLabel(executionState!.status, events)}
                   </span>
                 </div>
               )}
@@ -868,22 +1066,64 @@ export function ChatArea({
             <SlashPalette query={value.trimStart()} onSelect={selectSlashCommand} />
           )}
 
-          <div style={{
-            border: '1px solid var(--border)', borderRadius: 12,
-            background: 'var(--bg-2)', overflow: 'hidden',
-            transition: 'border-color 0.15s',
-          }}
-            onFocus={() => {/* could highlight border */}}
+          {/* Hidden file input — driven by the + button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,text/*,application/pdf,application/json"
+            onChange={onPickFiles}
+            style={{ display: 'none' }}
+          />
+
+          <div
+            style={{
+              border: `1px solid ${isDragging ? 'var(--cyan)' : 'var(--border)'}`,
+              borderRadius: 12,
+              background: isDragging ? 'var(--cyan-dim)' : 'var(--bg-2)',
+              overflow: 'hidden',
+              transition: 'border-color 0.15s, background 0.15s',
+            }}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
           >
+            {/* Attachment thumbnails strip */}
+            {attachments.length > 0 && (
+              <div style={{
+                display: 'flex', gap: 8, padding: '10px 12px 0', flexWrap: 'wrap',
+                borderBottom: '1px solid var(--border)',
+                paddingBottom: 10,
+              }}>
+                {attachments.map((att, idx) => (
+                  <AttachmentChip key={`${att.name}-${idx}`} attachment={att} onRemove={() => removeAttachment(idx)} />
+                ))}
+              </div>
+            )}
+
+            {attachmentError && (
+              <div style={{
+                padding: '6px 14px',
+                fontSize: 11,
+                color: 'var(--red)',
+                background: 'var(--red-dim)',
+                borderBottom: '1px solid var(--border)',
+              }}>
+                {attachmentError}
+              </div>
+            )}
+
             <textarea
               ref={textareaRef}
               value={value}
               onChange={e => setValue(e.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               disabled={!projectRoot}
               placeholder={
                 !projectRoot ? 'Open a project to get started...'
                 : isRunning || isThinking ? 'Message will be queued...'
+                : isDragging ? 'Drop files here...'
                 : 'Ask, analyze, or request code changes. Use @file or /plan, /review'
               }
               rows={1}
@@ -897,6 +1137,25 @@ export function ChatArea({
 
             {/* Bottom toolbar */}
             <div style={{ display: 'flex', alignItems: 'center', padding: '6px 10px 8px', gap: 6 }}>
+              {/* Attach button */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!projectRoot}
+                title={supportsVision === false ? 'Active model does not support images — text/PDF only' : 'Attach files or images (drag-drop or paste also works)'}
+                style={{
+                  width: 28, height: 28, borderRadius: 8,
+                  background: 'transparent', border: '1px solid var(--border)',
+                  color: 'var(--text-3)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0, cursor: projectRoot ? 'pointer' : 'not-allowed',
+                  transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+                }}
+                onMouseEnter={e => { if (projectRoot) { e.currentTarget.style.borderColor = 'var(--cyan)'; e.currentTarget.style.color = 'var(--cyan)' } }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-3)' }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>add</span>
+              </button>
+
               {/* Mode pills */}
               {(['plan', 'review'] as const).map(mode => (
                 <button
@@ -931,14 +1190,14 @@ export function ChatArea({
 
               <div style={{ flex: 1 }} />
 
-              {/* Send button */}
+              {/* Send button — enabled when there's text OR at least one attachment */}
               <button
                 onClick={submit}
-                disabled={!value.trim() || !projectRoot}
+                disabled={(!value.trim() && attachments.length === 0) || !projectRoot}
                 style={{
                   width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-                  background: value.trim() && projectRoot ? 'var(--cyan)' : 'var(--bg-active)',
-                  color: value.trim() && projectRoot ? '#000' : 'var(--text-3)',
+                  background: (value.trim() || attachments.length > 0) && projectRoot ? 'var(--cyan)' : 'var(--bg-active)',
+                  color: (value.trim() || attachments.length > 0) && projectRoot ? '#000' : 'var(--text-3)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   transition: 'background 0.15s, color 0.15s',
                   border: 'none',

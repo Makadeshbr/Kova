@@ -209,19 +209,20 @@ async function runRipgrep(
     let buffer = ''
     const collected: string[] = []
     let truncated = false
-    let settled = false
+    let pendingResult: RgRun | null | undefined
+    let closeRequested = false
 
-    const settle = (result: RgRun | null) => {
-      if (settled) return
-      settled = true
+    const requestClose = (result: RgRun | null) => {
+      if (closeRequested) return
+      closeRequested = true
+      pendingResult = result
       try { child.kill() } catch { /* already gone */ }
-      resolvePromise(result)
     }
 
-    const timeoutId = setTimeout(() => settle(toRun(collected, truncated)), RIPGREP_TIMEOUT_MS)
+    const timeoutId = setTimeout(() => requestClose(toRun(collected, truncated)), RIPGREP_TIMEOUT_MS)
     if (signal) {
-      if (signal.aborted) { clearTimeout(timeoutId); settle(null); return }
-      signal.addEventListener('abort', () => { clearTimeout(timeoutId); settle(null) }, { once: true })
+      if (signal.aborted) { clearTimeout(timeoutId); requestClose(null) }
+      signal.addEventListener('abort', () => { clearTimeout(timeoutId); requestClose(null) }, { once: true })
     }
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -230,19 +231,26 @@ async function runRipgrep(
       while ((nl = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, nl)
         buffer = buffer.slice(nl + 1)
-        if (collected.length >= headLimit) { truncated = true; settle(toRun(collected, true)); return }
+        if (collected.length >= headLimit) { truncated = true; requestClose(toRun(collected, true)); return }
         if (line) collected.push(normaliseSep(line, projectRoot))
       }
     })
 
-    child.on('error', () => { clearTimeout(timeoutId); settle(null) })
+    child.on('error', () => {
+      clearTimeout(timeoutId)
+      resolvePromise(pendingResult ?? null)
+    })
 
     child.on('close', (code) => {
       clearTimeout(timeoutId)
+      if (pendingResult !== undefined) {
+        resolvePromise(pendingResult)
+        return
+      }
       // ripgrep exit codes: 0 = matches, 1 = no matches, 2 = error
-      if (code === 2) { settle(null); return }
+      if (code === 2) { resolvePromise(null); return }
       if (buffer && collected.length < headLimit) collected.push(normaliseSep(buffer, projectRoot))
-      settle(toRun(collected, truncated))
+      resolvePromise(toRun(collected, truncated))
     })
   })
 }

@@ -9,6 +9,7 @@ import {
   assertTrustedIpcSender,
   mergeSettingsForSave,
   optionalNumber,
+  sanitizeAttachments,
   sanitizeDiffReviewSelection,
   sanitizeHistory,
   sanitizeSession,
@@ -30,6 +31,7 @@ export interface KovaSettings {
   compatibleUrl: string
   model: string
   autoApply: boolean
+  permissionMode: 'auto-review' | 'ask' | 'full-access'
   maxIterations: number
   // Fallback provider — kicks in when primary fails with rate-limit / model-not-found / unavailable
   fallbackProvider?: string
@@ -55,6 +57,7 @@ const DEFAULT_SETTINGS: KovaSettings = {
   compatibleUrl: 'http://localhost:1234/v1',
   model: '',
   autoApply: true,
+  permissionMode: 'auto-review',
   maxIterations: 5,
   nvidiaEnableThinking: true,
 }
@@ -109,13 +112,14 @@ export function registerIpcHandlers(win: BrowserWindow, manager: EngineManager):
     return folder
   })
 
-  ipcMain.handle('kova:send-message', async (event, message: string, history: { role: string; content: string }[], params: StartTaskParams) => {
+  ipcMain.handle('kova:send-message', async (event, message: string, history: { role: string; content: string }[], params: StartTaskParams, attachments?: unknown) => {
     assertTrustedIpcSender(event)
     const safeMessage = stringField(message, 'message', 80_000)
     const safeHistory = sanitizeHistory(history)
     const safeParams = sanitizeStartTaskParams(params)
+    const safeAttachments = sanitizeAttachments(attachments)
     if (safeParams.projectRoot) updateProjectScope(safeParams.projectRoot)
-    await manager.sendMessage(safeMessage, safeHistory as never, safeParams)
+    await manager.sendMessage(safeMessage, safeHistory as never, safeParams, safeAttachments)
   })
 
   ipcMain.handle('kova:detect-model', async (event, url: string): Promise<string | null> => {

@@ -64,11 +64,11 @@ export function createReasoningEmitter(
     start: () => {
       if (active) return
       active = true
-      emit({ type: 'reasoning_start', message: 'Raciocinando...' })
+      emit({ type: 'reasoning_start', message: 'Reasoning...' })
     },
     delta: (delta: string) => {
       if (!delta) return
-      if (!active) { active = true; emit({ type: 'reasoning_start', message: 'Raciocinando...' }) }
+      if (!active) { active = true; emit({ type: 'reasoning_start', message: 'Reasoning...' }) }
       emit({ type: 'reasoning_delta', reasoning: delta })
     },
     end: () => {

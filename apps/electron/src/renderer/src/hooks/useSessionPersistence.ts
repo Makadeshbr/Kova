@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { ChatMessage, SessionUsage } from '../app-state'
+import type { Todo } from '@kova/shared'
 
 /**
  * Autosaves the current session to disk whenever the message list or
@@ -15,11 +16,12 @@ export function useSessionPersistence(opts: {
   sessionUsage: SessionUsage
   executionState: ExecutionState | null
   executionEvents: ExecutionEvent[]
+  todos: Todo[]
   onSessionIdCreated: (id: string) => void
 }): void {
   const {
     projectRoot, messages, isThinking, sessionId,
-    task, sessionUsage, executionState, executionEvents, onSessionIdCreated,
+    task, sessionUsage, executionState, executionEvents, todos, onSessionIdCreated,
   } = opts
 
   // Keep a stable ref to the callback to avoid re-running the effect
@@ -34,8 +36,8 @@ export function useSessionPersistence(opts: {
     const title = messages.find(m => m.role === 'user')?.content.slice(0, 30) || 'New Session'
     const session = {
       id, title, updatedAt: new Date().toISOString(),
-      messages, task, sessionUsage, executionState, events: executionEvents,
+      messages, task, sessionUsage, executionState, events: executionEvents, todos,
     }
     window.kova.saveSession(projectRoot, session).catch(console.error)
-  }, [messages, isThinking, executionState, sessionUsage, projectRoot, sessionId, task, executionEvents])
+  }, [messages, isThinking, executionState, sessionUsage, projectRoot, sessionId, task, executionEvents, todos])
 }

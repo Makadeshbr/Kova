@@ -41,6 +41,16 @@ export interface DecisionContext {
   contract?: ExecutionContract
 }
 
+// Decision thresholds. Single source of truth — UI and engine both read these.
+export const AUTO_APPLY_THRESHOLD = 90
+export const SUGGEST_THRESHOLD = 70
+// Cap for "partial" confidence (some harness layers ran). Prevents auto-apply
+// purely from passing layers when others (build/tests) were skipped.
+const PARTIAL_CONFIDENCE_CAP = 85
+// Score floor when the harness reports no validation ran. Within the suggest
+// band so the user sees the patch but apply requires explicit click.
+const NO_VALIDATION_FLOOR = 75
+
 export function decide(
   result: HarnessResult,
   history: IterationRecord[],
@@ -51,11 +61,12 @@ export function decide(
   // Note: validationConfidence is set by the harness pipeline — not present for the no-changes
   // case from ExecutionEngine (which intentionally uses score:100 to signal "nothing to review").
   const rawScore = result.validationConfidence === 'none' || hasNoRealValidation(result)
-    ? 75
+    ? NO_VALIDATION_FLOOR
     : calculateScore(result)
-  const score = result.validationConfidence === 'partial' && rawScore > 0
-    ? Math.min(rawScore, 85)
+  const cappedScore = result.validationConfidence === 'partial' && rawScore > 0
+    ? Math.min(rawScore, PARTIAL_CONFIDENCE_CAP)
     : rawScore
+  const score = cappedScore
   const feedback = buildFeedback(result)
 
   // Contract violations for agent-fixable issues (stack mismatch, scope, max files)
@@ -135,15 +146,15 @@ export function decide(
     return { decision: 'reject', score, reason: getHardFailReason(result), feedback, reviewGate }
   }
 
-  if (score >= 90) {
+  if (score >= AUTO_APPLY_THRESHOLD) {
     return { decision: 'auto_apply', score, reason: 'Senior-quality patch confirmed', feedback, reviewGate }
   }
 
-  if (score >= 70) {
+  if (score >= SUGGEST_THRESHOLD) {
     return { decision: 'suggest', score, reason: 'Acceptable quality; review recommended', feedback, reviewGate }
   }
 
-  return { decision: 'reject', score, reason: `Score ${score} below threshold 70`, feedback, reviewGate }
+  return { decision: 'reject', score, reason: `Score ${score} below threshold ${SUGGEST_THRESHOLD}`, feedback, reviewGate }
 }
 
 function hasNoRealValidation(result: HarnessResult): boolean {
@@ -154,7 +165,7 @@ function hasNoRealValidation(result: HarnessResult): boolean {
 
 // Agent-fixable contract violations → 'reject' so agent retries with correct files.
 // safe_zone and forbidden_path are intentionally excluded: they need human review.
-const FIXABLE_CONTRACT_RULES = new Set(['stack_mismatch', 'allowed_paths', 'max_files_changed'])
+const FIXABLE_CONTRACT_RULES = new Set(['stack_mismatch', 'allowed_paths', 'max_files_changed', 'missing_required_path'])
 
 function firstContractViolationLayer(result: HarnessResult): HarnessResult['layers'][number] | null {
   return result.layers.find(layer =>
@@ -167,7 +178,7 @@ function firstContractViolationLayer(result: HarnessResult): HarnessResult['laye
 
 function firstFailedValidationLayer(result: HarnessResult): HarnessResult['layers'][number] | null {
   return result.layers.find(layer =>
-    ['build', 'typecheck', 'tests', 'lint'].includes(layer.name)
+    ['completion', 'build', 'typecheck', 'tests', 'lint'].includes(layer.name)
     && !layer.skipped
     && !layer.passed
   ) ?? null

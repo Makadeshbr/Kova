@@ -27,6 +27,13 @@ export function runReviewGate(input: ReviewGateInput): ReviewGateResult {
 
 function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
   const findings: ReviewFinding[] = []
+  // Claude Code parity for scaffolding: when every change creates a brand-new
+  // file, drop the scope/safe-zone checks. The agent is materializing a
+  // project that doesn't exist yet — there is no "existing scope" to honour.
+  // Credential paths and generated paths are still hard-blocked because those
+  // are safety invariants, not scope policy.
+  const isScaffolding = input.changes.length > 0
+    && input.changes.every(change => change.type === 'create' && !change.before)
 
   for (const change of input.changes) {
     if (matchesAny(change.path, GENERATED_PATHS)) {
@@ -35,7 +42,7 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `${change.path} parece arquivo gerado e nao deve ser editado manualmente`,
+        message: `${change.path} looks generated and must not be edited manually`,
       })
     }
 
@@ -45,7 +52,7 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `${change.path} altera dependencias ou lockfile; exige aprovacao explicita`,
+        message: `${change.path} changes dependencies or a lockfile; explicit approval is required`,
       })
     }
 
@@ -55,11 +62,11 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `${change.path} e arquivo de credenciais — criacao e modificacao bloqueadas; edite manualmente`,
+        message: `${change.path} is a credentials file - creation and modification are blocked; edit it manually`,
       })
     }
 
-    if (input.contract && !matchesAny(change.path, input.contract.allowedPaths)) {
+    if (!isScaffolding && input.contract && !matchesAny(change.path, input.contract.allowedPaths)) {
       findings.push({
         category: 'scope',
         severity: 'high',
@@ -75,7 +82,7 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `${change.path} e safe zone e precisa revisao humana`,
+        message: `${change.path} is a safe zone and requires human review`,
       })
     }
   }
@@ -97,8 +104,8 @@ function riskPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
     category: 'tests',
     severity: 'medium',
     blocking: false,
-    message: 'Contrato espera teste para mudanca de comportamento, mas nenhum arquivo de teste foi alterado',
-    suggestion: 'Adicione teste ou registre justificativa tecnica.',
+    message: 'The contract expects tests for behavior changes, but no test file was changed',
+    suggestion: 'Add a test or record a technical justification.',
   }]
 
   if (input.changes.some(change => semanticApiFindings(change).some(finding => finding.blocking))) {
@@ -106,8 +113,8 @@ function riskPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
       category: 'quality',
       severity: 'high',
       blocking: true,
-      message: 'API publica mudou sem teste ou migracao detectada; exige revisao humana.',
-      suggestion: 'Adicione teste de compatibilidade, mantenha a API antiga ou documente a migracao.',
+      message: 'Public API changed without a detected test or migration; human review is required.',
+      suggestion: 'Add a compatibility test, keep the old API, or document the migration.',
     })
   }
 
@@ -148,8 +155,8 @@ function semanticApiFindings(change: FileChange): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `API publica removida: ${symbol}. Breaking changes exigem revisao humana explicita.`,
-        suggestion: 'Mantenha compatibilidade, adicione adaptador/deprecacao, ou registre uma migracao clara.',
+        message: `Public API removed: ${symbol}. Breaking changes require explicit human review.`,
+        suggestion: 'Keep compatibility, add an adapter/deprecation path, or record a clear migration.',
       })
     }
   }
@@ -163,8 +170,8 @@ function semanticApiFindings(change: FileChange): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `Assinatura publica alterada: ${name} passou de ${beforeFn.requiredParams} para ${afterFn.requiredParams} parametro(s) obrigatorio(s).`,
-        suggestion: 'Preserve a assinatura antiga ou torne novos parametros opcionais.',
+        message: `Public signature changed: ${name} went from ${beforeFn.requiredParams} to ${afterFn.requiredParams} required parameter(s).`,
+        suggestion: 'Preserve the old signature or make new parameters optional.',
       })
     }
     if (beforeFn.returnType && afterFn.returnType && beforeFn.returnType !== afterFn.returnType) {
@@ -173,8 +180,8 @@ function semanticApiFindings(change: FileChange): ReviewFinding[] {
         severity: 'high',
         blocking: true,
         file: change.path,
-        message: `Retorno publico alterado: ${name} mudou de ${beforeFn.returnType} para ${afterFn.returnType}.`,
-        suggestion: 'Preserve o tipo de retorno ou registre uma migracao.',
+        message: `Public return type changed: ${name} changed from ${beforeFn.returnType} to ${afterFn.returnType}.`,
+        suggestion: 'Preserve the return type or record a migration.',
       })
     }
   }
@@ -189,8 +196,8 @@ function semanticApiFindings(change: FileChange): ReviewFinding[] {
           severity: 'high',
           blocking: true,
           file: change.path,
-          message: `Propriedade publica removida: ${iface}.${prop}.`,
-          suggestion: 'Mantenha o campo como opcional/deprecated ou documente a migracao.',
+          message: `Public property removed: ${iface}.${prop}.`,
+          suggestion: 'Keep the field optional/deprecated or document the migration.',
         })
       }
     }
@@ -325,7 +332,7 @@ function extractGoPublicApi(content: string): PublicApi {
   return api
 }
 
-// ─── Python ──────────────────────────────────────────────────────────────────
+// Python
 
 function extractPythonPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -348,11 +355,11 @@ function countPythonParams(raw: string): number {
     .length
 }
 
-// ─── Rust ─────────────────────────────────────────────────────────────────────
+// Rust
 
 function extractRustPublicApi(content: string): PublicApi {
   const api = emptyApi()
-  // pub fn only (bare pub — pub(crate)/pub(super) are module-scoped, not truly public)
+  // pub fn only (bare pub - pub(crate)/pub(super) are module-scoped, not truly public)
   for (const match of content.matchAll(/^pub\s+(?:async\s+)?fn\s+([A-Za-z][A-Za-z0-9_]*)\s*(?:<[^(]*>)?\s*\(([^)]*)\)/gm)) {
     const name = match[1]
     api.symbols.add(name)
@@ -375,7 +382,7 @@ function countRustParams(raw: string): number {
     .length
 }
 
-// ─── Java ─────────────────────────────────────────────────────────────────────
+// Java
 
 function extractJavaPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -383,7 +390,7 @@ function extractJavaPublicApi(content: string): PublicApi {
   for (const match of content.matchAll(/^\s*public\s+(?:\w+\s+)*(?:class|interface|enum|record)\s+([A-Za-z][A-Za-z0-9_]*)/gm)) {
     api.symbols.add(match[1])
   }
-  // public methods: heuristic — detect name for removal tracking
+  // public methods: heuristic - detect name for removal tracking
   // Matches: public [modifiers]* ReturnType methodName(
   for (const match of content.matchAll(/^\s*public\s+(?:(?:static|final|abstract|synchronized|default|native)\s+)*(?!class\b|interface\b|enum\b|record\b)\S+\s+([a-z][A-Za-z0-9_]*)\s*\(/gm)) {
     api.symbols.add(match[1])
@@ -391,7 +398,7 @@ function extractJavaPublicApi(content: string): PublicApi {
   return api
 }
 
-// ─── Kotlin ───────────────────────────────────────────────────────────────────
+// Kotlin
 
 function extractKotlinPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -406,7 +413,7 @@ function extractKotlinPublicApi(content: string): PublicApi {
   return api
 }
 
-// ─── Ruby ─────────────────────────────────────────────────────────────────────
+// Ruby
 
 function extractRubyPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -436,7 +443,7 @@ function countRubyParams(raw: string): number {
     .length
 }
 
-// ─── PHP ──────────────────────────────────────────────────────────────────────
+// PHP
 
 function extractPhpPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -464,7 +471,7 @@ function countPhpParams(raw: string): number {
     .length
 }
 
-// ─── Swift ────────────────────────────────────────────────────────────────────
+// Swift
 
 function extractSwiftPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -482,11 +489,11 @@ function extractSwiftPublicApi(content: string): PublicApi {
 }
 
 function countSwiftParams(raw: string): number {
-  // Swift params: "label name: Type = default" — optional if has "= default"
+  // Swift params: "label name: Type = default" - optional if has "= default"
   return splitParams(raw).map(p => p.trim()).filter(p => p && !p.includes('=')).length
 }
 
-// ─── Dart ─────────────────────────────────────────────────────────────────────
+// Dart
 
 function extractDartPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -494,7 +501,7 @@ function extractDartPublicApi(content: string): PublicApi {
   for (const match of content.matchAll(/^(?:abstract\s+|sealed\s+|base\s+|interface\s+|final\s+|mixin\s+)*(?:class|mixin|enum|extension type)\s+([A-Za-z][A-Za-z0-9_]*)/gm)) {
     if (!match[1].startsWith('_')) api.symbols.add(match[1])
   }
-  // Top-level public functions — start at column 0 with return type + name
+  // Top-level public functions - start at column 0 with return type + name
   for (const match of content.matchAll(/^(?!_)(?:[A-Za-z][A-Za-z0-9_<>?,\s]*)\s+([A-Za-z][A-Za-z0-9_]*)\s*(?:<[^(]*>)?\s*\(([^)]*)\)\s*(?:async\s*)?\{/gm)) {
     const name = match[1]
     if (name.startsWith('_') || /^(?:class|abstract|sealed|void|if|for|while|return|import|export)$/.test(name)) continue
@@ -510,7 +517,7 @@ function countDartParams(raw: string): number {
   return splitParams(withoutOptional).map(p => p.trim()).filter(p => p && !p.includes('=')).length
 }
 
-// ─── C# ───────────────────────────────────────────────────────────────────────
+// C#
 
 function extractCSharpPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -518,7 +525,7 @@ function extractCSharpPublicApi(content: string): PublicApi {
   for (const match of content.matchAll(/^\s*public\s+(?:\w+\s+)*(?:class|interface|struct|enum|record)\s+([A-Za-z][A-Za-z0-9_]*)/gm)) {
     api.symbols.add(match[1])
   }
-  // Public methods and properties — detect by name before '(' or '{'
+  // Public methods and properties - detect by name before '(' or '{'
   for (const match of content.matchAll(/^\s*public\s+(?:(?:static|virtual|abstract|override|sealed|async|new|extern|readonly|partial)\s+)*(?!class\b|interface\b|struct\b|enum\b|record\b)\S[\w<>\[\],\s]*\s+([A-Za-z][A-Za-z0-9_]*)\s*(?:<[^(]*>)?\s*\(([^)]*)\)/gm)) {
     const name = match[1]
     api.symbols.add(name)
@@ -533,7 +540,7 @@ function countCSharpParams(raw: string): number {
     .length
 }
 
-// ─── C / C++ ──────────────────────────────────────────────────────────────────
+// C / C++
 
 function extractCCppPublicApi(content: string): PublicApi {
   const api = emptyApi()
@@ -559,7 +566,7 @@ function countCParams(raw: string): number {
   return splitParams(trimmed).filter(p => p.trim() && p.trim() !== '...').length
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
 
 function emptyApi(): PublicApi {
   return { symbols: new Set(), functions: new Map(), interfaces: new Map() }
