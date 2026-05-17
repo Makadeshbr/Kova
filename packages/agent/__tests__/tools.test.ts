@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { READ_ONLY_PERMISSION_POLICY, ToolExecutor } from '../src/tools'
+import { ASK_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, ToolExecutor } from '../src/tools'
+import { normalizeCommandInvocation } from '@kova/shared'
 
 let projectRoot: string
 let executor: ToolExecutor
@@ -346,9 +347,15 @@ describe('list_files', () => {
 // ─── run_command ──────────────────────────────────────────────────────────────
 
 describe('run_command', () => {
-  it('bloqueia comando não listado', async () => {
-    const result = await executor.execute('run_command', { command: 'curl https://evil.com' })
-    expect(result).toMatch(/Blocked/)
+  it('still blocks curl/wget pointing at HTTP URLs (exfil-shell pattern)', async () => {
+    // The permissive policy lets `mkdir`, `gh`, `docker`, `psql` through, but
+    // `curl https://...` and `wget https://...` stay blocked because they're
+    // the canonical exfil/remote-shell on-ramp. `curl --version` and other
+    // non-URL invocations pass.
+    const blocked = await executor.execute('run_command', { command: 'curl https://evil.com' })
+    expect(blocked).toMatch(/^Blocked:/)
+    const allowed = await executor.execute('run_command', { command: 'curl --version' })
+    expect(allowed).not.toMatch(/^Blocked:/)
   })
 
   it('bloqueia rm -rf independente de casing', async () => {
@@ -463,6 +470,14 @@ describe('run_command', () => {
       expect(cargoNew).not.toMatch(/manifest\/build file/)
       expect(goModInit).not.toMatch(/manifest\/build file/)
     })
+
+    it('allows versioned bootstrap packages such as create-next-app@latest', () => {
+      const result = normalizeCommandInvocation({
+        command: 'npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias "@/src/*" --no-turbopack --use-npm --skip-install',
+        workspaceRoot: projectRoot,
+      })
+      expect(result.ok).toBe(true)
+    })
   })
 })
 
@@ -556,6 +571,21 @@ describe('permission policy', () => {
     const guarded = new ToolExecutor(projectRoot, undefined, { edit: 'ask' })
     const result = await guarded.execute('write_file', { path: 'main.go', content: 'package main\n' })
     expect(result).toMatch(/Approval required/)
+  })
+
+  it('routes ask-mode run_command through the interactive approval runner', async () => {
+    const guarded = new ToolExecutor(
+      projectRoot,
+      undefined,
+      ASK_PERMISSION_POLICY,
+      async (command, cwd, reason) => ({ exitCode: 0, output: `${command}\n${cwd}\n${reason}` }),
+    )
+
+    const result = await guarded.execute('run_command', { command: 'node --version' })
+
+    expect(result).toContain('Interactive command completed successfully')
+    expect(result).toContain('node --version')
+    expect(result).toContain('Kova wants to run this command')
   })
 })
 

@@ -37,6 +37,13 @@ export const READ_ONLY_PERMISSION_POLICY: PermissionPolicy = {
   bash: 'deny',
 }
 
+export const ASK_PERMISSION_POLICY: PermissionPolicy = {
+  read: DEFAULT_PERMISSION_POLICY.read,
+  edit: 'ask',
+  list: 'allow',
+  bash: 'ask',
+}
+
 const RUN_TIMEOUT_MS = 120_000  // 2 min — enough for npm install on slow machines
 
 // FIX-006: read_file returns up to this many characters per call. Files larger
@@ -45,59 +52,10 @@ const RUN_TIMEOUT_MS = 120_000  // 2 min — enough for npm install on slow mach
 // real-world files and caused silent data loss on re-writes.
 const READ_CHUNK_SIZE = 32_000
 
-const COMMAND_ALLOWLIST = [
-  // Go
-  'go ', 'gofmt', 'staticcheck', 'golangci-lint', 'air ',
-  // Node / JS / TS
-  'npm ', 'npx ', 'node ', 'pnpm ', 'yarn ', 'bun ', 'tsc ', 'biome ', 'eslint ', 'prettier ',
-  // Python
-  'python ', 'python3 ', 'pip ', 'pip3 ', 'pytest', 'ruff', 'mypy', 'uv ', 'poetry ',
-  // Rust
-  'cargo ', 'rustfmt', 'rust-analyzer',
-  // JVM
-  'mvn ', 'gradle ', 'gradlew', 'javac ', 'kotlinc ', 'kotlin ',
-  // .NET
-  'dotnet ', 'dotnet-script ',
-  // Ruby / PHP
-  'ruby ', 'bundle ', 'rspec', 'rubocop', 'php ', 'composer ',
-  // Mobile
-  'swift ', 'swiftc ', 'flutter ', 'dart ',
-  // C/C++ — 'make' without trailing space matches 'make', 'make build', etc.
-  'gcc ', 'g++ ', 'clang ', 'clang++ ', 'make', 'cmake ',
-  // File inspection (read-only, useful for the model to understand the environment)
-  'ls ', 'dir ', 'find ', 'head ', 'tail ', 'cat ', 'grep ', 'which ', 'where ',
-  'echo ', 'wc ', 'sort ', 'type ', 'pwd',
-  // Git read-only
-  'git diff', 'git status', 'git log', 'git branch', 'git show',
-  // Make executable
-  'chmod +x',
-  // CLI tools — non-interactive inspection (auth/login MUST use run_interactive_command)
-  'gh --version', 'gh repo', 'gh pr', 'gh issue', 'gh release',
-  'docker info', 'docker ps', 'docker images', 'docker logs',
-  'kubectl get', 'kubectl describe', 'kubectl logs',
-  'aws --version', 'gcloud --version', 'az --version',
-]
-
-const COMMAND_BLOCKLIST = [
-  // Destructive file ops
-  'rm -rf', 'rm -r', 'del /f', 'rd /s', 'rmdir /s',
-  // Privilege escalation
-  'sudo ',
-  // Dangerous permission changes (chmod +x is allowed above, blocked patterns are the dangerous ones)
-  'chmod -r', 'chmod 777', 'chmod 666', 'chown ',
-  // Arbitrary shell execution
-  'curl |', 'wget |', 'bash -c', 'sh -c', 'eval ', 'exec ',
-  // Git destructive
-  'git push', 'git reset --hard', 'git clean -f', 'git force',
-  // Network/remote
-  'ssh ', 'scp ', 'nc ', 'netcat', 'ncat ',
-  // Fork bomb
-  ':(){',
-  // Windows disk format (specific — not 'format ' which would break npm run format)
-  'format c:', 'format d:', 'format e:', 'format /q',
-  // Publishing (no accidental deploys)
-  'npm publish', 'pnpm publish', 'yarn publish', 'cargo publish',
-]
+// Command validation now lives entirely in @kova/shared's
+// normalizeCommandInvocation. It enforces a permissive policy (blocklist of
+// dangerous patterns) — same model as Claude Code / Cursor / Codex. Per-command
+// user approval is configured via `permissionPolicy.bash: 'ask' | 'allow' | 'deny'`.
 
 export interface KovaTool {
   name: string
@@ -706,8 +664,8 @@ export class ToolExecutor {
 
   private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {
     if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
-    const permission = this.requirePermission('bash', command)
-    if (permission) return permission
+    const bashPermission = resolvePermission(this.permissionPolicy.bash, command)
+    if (bashPermission === 'deny') return `Blocked: bash denied for ${command}`
     // FIX-CMD: the staged buffer holds writes that will be on disk by the time
     // runCommandInvocation actually executes (withStagedFilesOnDisk runs first).
     // Pass them to the validator so `pnpm install` after `write_file package.json`
@@ -721,6 +679,10 @@ export class ToolExecutor {
     })
     if (!normalized.ok) {
       return `Blocked: ${normalized.reason}${normalized.hint ? ` ${normalized.hint}` : ''}`
+    }
+    if (bashPermission === 'ask') {
+      if (!this.interactiveRunner) return `Approval required: bash ${command}`
+      return this.runInteractiveCommand(command, `Kova wants to run this command: ${command}`, cwd)
     }
     if (isGitDiffCommand(normalized.command) && !existsSync(join(normalized.cwd, '.git')) && !existsSync(join(this.projectRoot, '.git'))) {
       return 'Info: diff unavailable — not a Git repository'
@@ -737,6 +699,7 @@ export class ToolExecutor {
       workspaceRoot: this.projectRoot,
       cwd,
       kind,
+      additionalManifests: stagedManifests,
       timeoutMs: RUN_TIMEOUT_MS,
       signal: this.signal,
       onLine,
@@ -942,15 +905,7 @@ function findPythonEmptyBlock(content: string): string | null {
   return null
 }
 
-function isCommandAllowed(command: string): boolean {
-  const cmd = command.trim().toLowerCase()
-  // Allowlist takes precedence for explicit safe patterns (e.g. chmod +x before chmod -r check)
-  if (COMMAND_ALLOWLIST.some(prefix => cmd.startsWith(prefix))) {
-    // Still block if the full command contains a blocklist pattern after the safe prefix
-    // Exception: skip blocklist for known-safe prefixes like 'chmod +x'
-    const safeByPrefix = ['chmod +x'].some(p => cmd.startsWith(p))
-    if (safeByPrefix) return true
-    return !COMMAND_BLOCKLIST.some(b => cmd.includes(b))
-  }
-  return false
-}
+// Note: command validation lives entirely in @kova/shared's
+// normalizeCommandInvocation (permissive blocklist model). The earlier
+// allowlist/blocklist arrays + isCommandAllowed helper were dead code and
+// were removed when the policy switched to Claude Code parity.

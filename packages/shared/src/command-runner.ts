@@ -62,42 +62,62 @@ export interface CommandRunResult {
   timedOut: boolean
 }
 
+/**
+ * Patterns that are dangerous regardless of context — they always block.
+ * Matches the security model of Claude Code / Cursor / Codex: a permissive
+ * blocklist plus an approval gate (`permissionPolicy.bash`) for the user.
+ *
+ * Adding to this list is the only safety control that survives the agent
+ * deciding to run something off-piste. Everything NOT matching here is
+ * allowed at this layer — UI-side approval still applies.
+ */
 const DANGEROUS_PATTERNS = [
+  // Destructive filesystem ops
   /\brm\s+-rf\b/i,
   /\brm\s+-r\b/i,
   /\bdel\s+\/f\b/i,
   /\brd\s+\/s\b/i,
   /\brmdir\s+\/s\b/i,
+  // Privilege escalation
   /\bsudo\b/i,
+  /\brunas\b/i,
+  // Permission destruction
   /\bchmod\s+(?:-r|777|666)\b/i,
   /\bchown\b/i,
-  /\b(?:bash|sh)\s+-c\b/i,
+  // Arbitrary shell execution
+  /\b(?:bash|sh|zsh|fish|pwsh|powershell)\s+-c\b/i,
   /\beval\b/i,
   /\bexec\b/i,
+  // Git destructive
   /\bgit\s+push\b/i,
   /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\s+-f\b/i,
-  /\b(?:ssh|scp|nc|netcat|ncat)\b/i,
+  /\bgit\s+clean\s+-f/i,
+  /\bgit\s+force-/i,
+  // Remote shell / exfiltration
+  /\b(?:ssh|scp|nc|netcat|ncat|telnet)\b/i,
+  /\b(?:curl|wget)\s+https?:\/\//i,
+  // Fork bomb
   /:\(\)\{/,
+  // Publishing without approval (deploys)
   /\b(?:npm|pnpm|yarn|cargo)\s+publish\b/i,
+  // Raw disk / filesystem-destroy
+  /\bdd\s+if=/i,
+  /\bmkfs(?:\.\w+)?\b/i,
+  /\bformat\s+[a-z]:/i,
+  /\bdiskpart\b/i,
+  /\bfdisk\b/i,
+  // Power state
+  /\bshutdown\b/i,
+  /\breboot\b/i,
+  /\bhalt\b/i,
+  /\bpoweroff\b/i,
+  // Credential / auth destruction
+  /\bnpm\s+logout\b/i,
+  /\bgh\s+auth\s+logout\b/i,
 ]
 
-const ALLOWED_EXECUTABLES = new Set([
-  'go', 'gofmt', 'staticcheck', 'golangci-lint',
-  'npm', 'npx', 'node', 'pnpm', 'yarn', 'bun', 'tsc', 'biome', 'eslint', 'prettier',
-  'python', 'python3', 'pip', 'pip3', 'pytest', 'ruff', 'mypy', 'uv', 'poetry',
-  'cargo', 'rustfmt',
-  'mvn', 'gradle', 'gradlew', 'javac', 'kotlinc', 'kotlin',
-  'dotnet', 'dotnet-script',
-  'ruby', 'bundle', 'rspec', 'rubocop', 'php', 'composer',
-  'swift', 'swiftc', 'flutter', 'dart',
-  'gcc', 'g++', 'clang', 'clang++', 'make', 'cmake', 'ctest',
-  'semgrep',
-  'ls', 'dir', 'find', 'head', 'tail', 'cat', 'grep', 'which', 'where', 'echo',
-  'wc', 'sort', 'type', 'pwd', 'git', 'chmod',
-])
-
 const WINDOWS_CMD_SHIMS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'bun'])
+const WINDOWS_SHELL_BUILTINS = new Set(['dir', 'type', 'echo'])
 const MANIFEST_REQUIRED = new Set(['go', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'cargo', 'mvn', 'gradle', 'gradlew', 'dotnet', 'composer', 'bundle', 'poetry', 'uv', 'flutter'])
 const PROJECT_MANIFESTS = [
   'package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py', 'setup.cfg',
@@ -145,17 +165,16 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
   if (!parsed.ok) return block(parsed.reason)
   if (parsed.tokens.length === 0) return block('Empty command.')
 
-  const executable = normalizeExecutableName(parsed.tokens[0])
-  if (!ALLOWED_EXECUTABLES.has(executable)) {
-    return block(`Command "${parsed.tokens[0]}" is not in the safe allowlist.`, 'Use build, test, lint, typecheck, format, or read-only commands.')
+  if (isInteractiveCommand(parsed.tokens)) {
+    return block('Interactive command blocked.', 'Use run_interactive_command so the user can approve and interact with it.')
   }
 
-  if (executable === 'git' && !isAllowedGitCommand(parsed.tokens)) {
-    return block('Git command blocked. Only diff/status/log/branch/show are allowed.')
-  }
-  if (executable === 'chmod' && parsed.tokens[1] !== '+x') {
-    return block('chmod blocked. Only chmod +x is allowed.')
-  }
+  const executable = normalizeExecutableName(parsed.tokens[0])
+
+  // PERMISSIVE POLICY (Claude Code / Cursor / Codex parity): any binary is
+  // allowed unless it matches a DANGEROUS_PATTERN. The runtime approval gate
+  // (`permissionPolicy.bash`) is the user-facing safety control — set it to
+  // 'ask' to require per-command approval.
 
   const manifestError = validateManifestRequirement(
     executable, parsed.tokens, cwd, workspaceRoot, input.additionalManifests,
@@ -464,7 +483,24 @@ function executableForPlatform(value: string): string {
   return value
 }
 
+function isInteractiveCommand(tokens: string[]): boolean {
+  const exe = normalizeExecutableName(tokens[0])
+  const sub = (tokens[1] ?? '').toLowerCase()
+  const third = (tokens[2] ?? '').toLowerCase()
+  if (exe === 'gh' && sub === 'auth' && ['login', 'refresh'].includes(third)) return true
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(exe) && ['login', 'adduser'].includes(sub)) return true
+  if (['docker', 'vercel', 'netlify', 'railway', 'fly', 'gcloud', 'aws', 'az'].includes(exe) && sub === 'login') return true
+  return false
+}
+
 function prepareExecFile(executable: string, args: string[]): { executable: string; args: string[] } {
+  if (process.platform === 'win32' && WINDOWS_SHELL_BUILTINS.has(normalizeExecutableName(executable))) {
+    const command = [executable, ...args.map(quoteCmdArg)].join(' ')
+    return {
+      executable: process.env.ComSpec ?? 'cmd.exe',
+      args: ['/d', '/s', '/c', command],
+    }
+  }
   if (process.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable)) {
     return { executable, args }
   }
@@ -478,10 +514,6 @@ function prepareExecFile(executable: string, args: string[]): { executable: stri
 function quoteCmdArg(value: string): string {
   if (!/[\s&()^=;!'+,`~[\]{}]/.test(value)) return value
   return `"${value.replace(/"/g, '\\"')}"`
-}
-
-function isAllowedGitCommand(tokens: string[]): boolean {
-  return ['diff', 'status', 'log', 'branch', 'show'].includes((tokens[1] ?? '').toLowerCase())
 }
 
 /**
@@ -510,7 +542,7 @@ const BOOTSTRAP_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 function isBootstrapInvocation(executable: string, tokens: string[]): boolean {
   const subs = BOOTSTRAP_SUBCOMMANDS[executable]
   if (!subs) return false
-  const sub = (tokens[1] ?? '').toLowerCase()
+  const sub = packageCommandName(tokens[1] ?? '')
   if (!subs.has(sub)) return false
   // `go mod init` requires a second-level subcommand check — `go mod tidy`
   // operates on an EXISTING manifest, so don't bypass for that case.
@@ -518,6 +550,15 @@ function isBootstrapInvocation(executable: string, tokens: string[]): boolean {
     return (tokens[2] ?? '').toLowerCase() === 'init'
   }
   return true
+}
+
+function packageCommandName(token: string): string {
+  const value = token.toLowerCase()
+  if (value.startsWith('@')) {
+    const secondAt = value.indexOf('@', 1)
+    return secondAt === -1 ? value : value.slice(0, secondAt)
+  }
+  return value.replace(/@[^/]+$/, '')
 }
 
 function validateManifestRequirement(

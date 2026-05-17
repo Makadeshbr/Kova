@@ -41,17 +41,37 @@ executor.getChanges()          // retorna mudanças acumuladas
 | read_file | path | Lê arquivo (registra FileChange type='modify' only se escreveu antes) |
 | delete_file | path | Remove arquivo |
 | list_files | dir? | Lista diretório |
-| run_command | command | Executa comando da allowlist |
+| run_command | command | Executa comando arbitrário (política permissiva — bloqueia só padrões perigosos). |
 
 **Ordem de preferência para alterar código existente:** `edit_file` (1ª escolha) → `write_file` (rewrite completo) → `delete_file` (remover).
 
 ### READ_ONLY_TOOLS
 `read_file`, `list_files`, `grep_codebase`, `glob_files` e `todo_write`. Usar em modos `plan` e `review`.
 
-### Allowlist de comandos run_command
-go, npm/npx, python/pip, cargo, mvn/gradle, dotnet, ruby/gem/rake, composer, swift, flutter, dart, gcc/g++, tsc, git (status/log/diff apenas), ls/find/head/tail, biome/eslint/prettier
+### Política de comandos `run_command` — permissiva (blocklist)
+Qualquer binário roda **a menos que** o comando case com um `DANGEROUS_PATTERNS` em `@kova/shared/command-runner.ts`. Mesmo modelo do Claude Code, Cursor e Codex. A camada de aprovação do usuário (`permissionPolicy.bash: 'allow' | 'ask' | 'deny'`) é o controle primário de segurança.
 
-**Bloqueados**: rm -rf, sudo, chmod, curl|bash, wget|bash, bash -c, eval, git push/reset/clean, ssh, scp, powershell iex, format, del /f
+**O que SEMPRE bloqueia (DANGEROUS_PATTERNS):**
+- Filesystem destrutivo: `rm -rf`, `rm -r`, `del /f`, `rd /s`, `rmdir /s`
+- Privilégio: `sudo`, `runas`
+- Permission wipe: `chmod -R`, `chmod 777`, `chmod 666`, `chown`
+- Shell arbitrário: `bash|sh|zsh|fish|pwsh|powershell -c`, `eval`, `exec`
+- Git destrutivo: `git push`, `git reset --hard`, `git clean -f`, `git force-`
+- Remote shell / exfil: `ssh`, `scp`, `nc`, `netcat`, `ncat`, `telnet`
+- Network fetch suspect: `curl https?://`, `wget https?://` (use libs do projeto, não shell raw)
+- Fork bomb: `:(){`
+- Publish: `npm|pnpm|yarn|cargo publish`
+- Disco raw: `dd if=`, `mkfs.*`, `format c:`, `diskpart`, `fdisk`
+- Power state: `shutdown`, `reboot`, `halt`, `poweroff`
+- Auth wipe: `npm logout`, `gh auth logout`
+- Composição de shell: pipes, `>`, `<`, `&&`, `||`, `;`, `&` (use cwd estruturado em vez de `cd app && cmd`)
+
+**Interativos** (precisam TTY) bloqueados em `run_command` — agente deve usar `run_interactive_command`:
+- `gh auth login`, `gh auth refresh`
+- `npm/pnpm/yarn/bun login`, `npm/pnpm/yarn/bun adduser`
+- `docker login`, `vercel login`, `netlify login`, `railway login`, `fly login`, `gcloud login`, `aws login`, `az login`
+
+**Manifest gate** (FIX-CMD): comandos manifest-required (npm, pnpm, cargo, go, etc.) precisam de manifest no cwd, OU subcomando bootstrap (`init`, `new`, `create`, `mod init`, `archetype:generate`), OU manifesto no staged buffer da iteração atual.
 
 ## Providers
 
