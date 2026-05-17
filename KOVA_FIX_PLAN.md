@@ -32,6 +32,7 @@
 | FIX-020 | 🟡 Médio | ⬜ | Staging por `cpSync` recursivo — overhead de segundos por harness |
 | FIX-021 | 🟡 Médio | ⬜ | Sem `multi_edit` — N edits no mesmo arquivo viram N tool calls |
 | FIX-022 | 🟢 Baixo | ⬜ | Sem prefix caching no provider OpenAI-compat (DeepSeek/Grok) |
+| PROVIDER-CATALOG | 🟠 Alto | ✅ | Catálogo unificado de modelos 2026 — Gemini 3.x, Kimi K2.6, DeepSeek V3.2/R1, Grok 4, GPT-5.x |
 
 ---
 
@@ -640,6 +641,82 @@ Bundle CJS do `@kova/agent` caiu de 75.09 KB → 73.65 KB (-1.44 KB de string li
 - Segunda chamada DeepSeek mesma sessão tem `prompt_cache_hit_tokens > 0`.
 - Sem campo volátil no system prompt.
 - Testes: ordem canônica preservada, sem random/timestamp injetado, capability reportada correta para modelo deepseek/grok.
+
+---
+
+### PROVIDER-CATALOG — Catálogo unificado de modelos 2026 ✅
+
+**Problema:** Os IDs de modelos viviam em **3 fontes de verdade diferentes**:
+1. `apps/electron/src/renderer/src/provider-config.ts` — `KNOWN_MODELS`, `DEFAULT_MODELS` (UI dropdown).
+2. `apps/electron/src/main/provider-resolver.ts` — `PRESET_URLS`, `PRESET_MODELS` (resolução em runtime).
+3. `packages/agent/src/providers/openai-compatible.ts` — regex inline em `capabilities()` (detecção de tool calls + context window).
+
+Resultado: os defaults estavam desatualizados (`gemini-2.5-flash`, `kimi-k2.5`, `deepseek-v4-flash`, `gpt-4.1`), o capability matcher não reconhecia Gemini 3.x / Kimi K2.6 / Grok / GPT-5 (caía para fallback de 8k tokens, sem tool calls), e adicionar um novo provider exigia editar 3 arquivos sem garantia de sync.
+
+**Fix aplicado:**
+
+**1. Novo módulo central `packages/agent/src/providers/model-catalog.ts`** (~220 linhas, zero side effects):
+- `ProviderId` união: `'anthropic' | 'openai' | 'gemini' | 'kimi' | 'deepseek' | 'xai' | 'openrouter' | 'nvidia' | 'ollama' | 'lmstudio' | 'openai-compatible'`.
+- `ModelInfo { id, label, contextTokens, supportsToolCalls, supportsThinking?, notes? }`.
+- `ProviderDefaults { label, baseUrl, defaultModel, apiKeyHint?, local? }`.
+- `MODEL_CATALOG: Record<ProviderId, ModelInfo[]>` — IDs **search-confirmed 2026**:
+  - Anthropic: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` + legacy.
+  - OpenAI: `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.2-codex` + legacy `gpt-4.1`/`gpt-4o`.
+  - Gemini: `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, `gemini-3.1-flash-lite` + legacy 2.5.
+  - Kimi: `kimi-k2.6`, `kimi-k2.6-thinking`, `kimi-k2.5`, `kimi-k2`.
+  - DeepSeek: `deepseek-chat` (V3.2), `deepseek-reasoner` (R1).
+  - xAI (novo provider): `grok-4`, `grok-4.1`, `grok-4-fast-reasoning`, `grok-4-fast-non-reasoning`, `grok-code-fast-1`.
+  - OpenRouter: agregador com IDs prefixados `vendor/model`.
+- `PROVIDER_DEFAULTS` com baseUrls oficiais, defaultModels que **devem existir no catálogo** (validado por teste), hints para obter API key.
+- **`detectCapabilities(modelId)`** — matcher por regex top-to-bottom para cada família (Claude, Gemini 3, Kimi K2, DeepSeek, Grok 4, GPT-5, GPT-4.1, GPT-4o, Llama 3.x, Qwen 2.5, Mistral large). Fallback conservador para IDs desconhecidos: `{ supportsToolCalls: false, contextTokenLimit: 8_000 }`. Apenas Claude tem `supportsPromptCaching: true` (cache_control é único da Anthropic; outros provedores fazem cache automático transparente).
+- Helpers: `findProvider`, `findModel`, `listProviderIds`.
+- Exports adicionados em `packages/agent/src/index.ts`.
+
+**2. Refactor: 1 fonte de verdade, 3 consumidores:**
+- `OpenAICompatibleProvider.capabilities()` passa de regex inline para `detectCapabilities(this.options.model)`. Bundle DTS subiu de 12.66 → 15.81 KB (catálogo + tipos exportados).
+- `apps/electron/src/main/provider-resolver.ts`:
+  - `PRESET_URLS` agora deriva de `PROVIDER_DEFAULTS.<id>.baseUrl`. Adiciona `xai` (faltava).
+  - `PRESET_MODELS` deriva de `PROVIDER_DEFAULTS.<id>.defaultModel`. Adiciona xAI.
+  - `INVALID_MODEL_VALUES` inclui `xai/XAI/grok/Grok` (anti-flag para o caso do usuário digitar o provider name como modelo).
+  - `resolveFallbackApiKey` ganha branch `xai → settings.xaiKey`.
+- `apps/electron/src/renderer/src/provider-config.ts`: reescrito como **thin layer** que importa `MODEL_CATALOG` + `PROVIDER_DEFAULTS` de `@kova/agent`. `KNOWN_MODELS` agora é gerado via `Object.fromEntries` do catálogo. `DEFAULT_MODELS` e `HINTS` derivam de `PROVIDER_DEFAULTS`. `PROVIDERS` array ganha entrada xAI. `API_KEY_CONFIG` ganha entrada `xai → xaiKey`.
+
+**3. xAI end-to-end:**
+- `KovaSettings.xaiKey: string` adicionado em `apps/electron/src/main/ipc-handlers.ts` (interface + DEFAULT_SETTINGS).
+- `apps/electron/src/main/ipc-security.ts` `mergeSettingsForSave` agora sanitiza `xaiKey` (max 4_000 chars).
+- Fixtures de teste atualizados em `apps/electron/__tests__/ipc-security.test.ts` e `provider-fallback-e2e.test.ts`.
+
+**4. Cleanup pré-existente:**
+- `packages/memory/__tests__/learning-gate.test.ts`: asserção PT remanescente (`'sem cobertura'`) atualizada para EN (`'test coverage'`) — leftover do FIX-004 que veio à tona quando o build do catalog forçou nova execução.
+
+**Evidência:**
+- **TDD red phase**: módulo `model-catalog.ts` inexistente quebrou os 43 testes do helper. Implementação seguiu.
+- **43 testes novos** em `packages/agent/__tests__/model-catalog.test.ts`:
+  - Completeness: cada `ProviderId` tem entry, modelos cloud têm ≥1 item, todos têm `{id, label, contextTokens, supportsToolCalls}`.
+  - 2026 IDs (search-confirmed): Gemini 3.x, Kimi K2.6/thinking, DeepSeek chat/reasoner, Grok 4/4.1/fast/code, Claude 4.x, GPT-5.x.
+  - `PROVIDER_DEFAULTS.xai.baseUrl === 'https://api.x.ai/v1'`, Gemini é OpenAI-compat (`/openai`), Kimi é `api.moonshot.ai/v1`.
+  - **`defaultModel` de cada cloud provider DEVE existir em `MODEL_CATALOG[id]`** — invariante crítico que pega "default model fantasma".
+  - `detectCapabilities`: tool calls para Claude/Gemini 3/Kimi K2/DeepSeek/Grok 4/GPT-5/GPT-4/Llama 3.x/Qwen 2.5/Mistral large. Conservative `false` para modelo desconhecido.
+  - Context windows: Gemini ≥1M, Kimi ≥200k, Claude ≥180k, DeepSeek ≥128k, Grok ≥128k. Unknown → 8k.
+  - `supportsPromptCaching: true` só para Claude. Falsy para Gemini/Kimi/DeepSeek/Grok/OpenAI (cache deles é automático, transparente, fora do contrato Kova).
+  - Lookup helpers: `findModel/findProvider` retornam undefined para IDs inválidos.
+- **433/433** testes em `@kova/agent` (vs 390 antes — +43 novos, 0 regressões).
+- **Zero regressão downstream**: `pnpm -r test` verde em todos os 14 packages, **1240 testes total** (vs 1197 antes — +43 catalog).
+- Build limpo: `tsup` ESM/CJS/DTS. Bundle DTS 12.66 → 15.81 KB (+3.15 KB do catálogo + tipos exportados); CJS estável (catálogo é principalmente tipos + dados literais).
+
+**Cobertura adversarial:**
+- Modelo desconhecido (`unknown-tiny-model-7b`) → fallback conservador (sem tools, 8k context) ao invés de assumir capabilities.
+- `findProvider('not-a-provider')` → undefined sem crash.
+- `findModel('gemini', 'gemini-7-superdupermega')` (modelo que não existe) → undefined.
+- Default model fantasma — invariante de teste garante que `PROVIDER_DEFAULTS.<id>.defaultModel` está em `MODEL_CATALOG[id]`.
+- xAI baseUrl auditável e lockado: `https://api.x.ai/v1`.
+- Regex matcher ordenado top-to-bottom: Claude → Gemini → Kimi → DeepSeek → Grok → GPT-5 → GPT-4.1 → GPT-4o → o-series → OSS — evita falso-match (ex: `gpt-4o` casando regex de `gpt-4.1`).
+- Telemetria de cache continua exclusiva da Anthropic (`supportsPromptCaching: true` só lá); providers OpenAI-compat reservam essa flag para o FIX-022 futuro.
+
+**Migração do usuário:**
+- Usuários com `defaultProvider: 'gemini'` + `model: 'gemini-2.5-flash'` continuam funcionando (modelo está no catálogo como legacy).
+- Usuários com `model: ''` (vazio, usa default) passam a usar os 2026 defaults automaticamente: Gemini 3 Flash em vez de 2.5 Flash, Kimi K2.6 em vez de K2.5, DeepSeek Chat em vez de V4-Flash.
+- Adicionando xAI: usuário precisa configurar `xaiKey` em Settings (novo campo).
 
 ---
 

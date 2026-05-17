@@ -6,35 +6,46 @@
  * Extracted from engine-manager.ts so provider concerns can be tested and changed in
  * isolation from session orchestration.
  */
-import { AnthropicProvider, OpenAICompatibleProvider, isRecoverableProviderError } from '@kova/agent'
-import type { AgentProvider } from '@kova/agent'
+import { AnthropicProvider, OpenAICompatibleProvider, isRecoverableProviderError, PROVIDER_DEFAULTS } from '@kova/agent'
+import type { AgentProvider, ProviderId } from '@kova/agent'
 import type { StartTaskParams } from './engine-manager'
 import { getSettingsInternal } from './ipc-handlers'
 
+/**
+ * Base URLs and default models are sourced from the shared @kova/agent catalog
+ * so the renderer dropdown, capability detection, and provider resolution all
+ * agree on the same 2026 IDs. Env vars still override for NVIDIA/Ollama where
+ * users self-host on non-default ports.
+ */
 export const PRESET_URLS: Record<string, string> = {
-  openai:     'https://api.openai.com/v1',
-  deepseek:   'https://api.deepseek.com',
-  openrouter: 'https://openrouter.ai/api/v1',
-  kimi:       'https://api.moonshot.ai/v1',
-  gemini:     'https://generativelanguage.googleapis.com/v1beta/openai',
-  nvidia:     process.env.NVIDIA_BASE_URL ?? 'https://integrate.api.nvidia.com/v1',
-  ollama:     process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1',
-  lmstudio:   'http://localhost:1234/v1',
+  openai:     PROVIDER_DEFAULTS.openai.baseUrl,
+  deepseek:   PROVIDER_DEFAULTS.deepseek.baseUrl,
+  openrouter: PROVIDER_DEFAULTS.openrouter.baseUrl,
+  kimi:       PROVIDER_DEFAULTS.kimi.baseUrl,
+  gemini:     PROVIDER_DEFAULTS.gemini.baseUrl,
+  xai:        PROVIDER_DEFAULTS.xai.baseUrl,
+  nvidia:     process.env.NVIDIA_BASE_URL ?? PROVIDER_DEFAULTS.nvidia.baseUrl,
+  ollama:     process.env.OLLAMA_BASE_URL ?? PROVIDER_DEFAULTS.ollama.baseUrl,
+  lmstudio:   PROVIDER_DEFAULTS.lmstudio.baseUrl,
 }
 
 export const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio', 'openai-compatible'])
 
 export const PRESET_MODELS: Record<string, string> = {
-  openai: 'gpt-4.1', deepseek: 'deepseek-v4-flash',
-  kimi: 'kimi-k2.5', gemini: 'gemini-2.5-flash',
-  openrouter: 'anthropic/claude-sonnet-4.5',
-  nvidia: 'moonshotai/kimi-k2.6',
+  openai:     PROVIDER_DEFAULTS.openai.defaultModel,
+  deepseek:   PROVIDER_DEFAULTS.deepseek.defaultModel,
+  kimi:       PROVIDER_DEFAULTS.kimi.defaultModel,
+  gemini:     PROVIDER_DEFAULTS.gemini.defaultModel,
+  xai:        PROVIDER_DEFAULTS.xai.defaultModel,
+  openrouter: PROVIDER_DEFAULTS.openrouter.defaultModel,
+  nvidia:     PROVIDER_DEFAULTS.nvidia.defaultModel,
 }
 
 export const INVALID_MODEL_VALUES = new Set([
   'deepseek', 'DeepSeek', 'openai', 'OpenAI', 'anthropic', 'Anthropic',
   'gemini', 'Gemini', 'kimi', 'Kimi', 'ollama', 'Ollama',
-  'openrouter', 'OpenRouter', 'default', 'modelo', 'model', '',
+  'openrouter', 'OpenRouter', 'xai', 'XAI', 'grok', 'Grok',
+  'default', 'modelo', 'model', '',
 ])
 
 export interface ProviderResolution {
@@ -180,6 +191,7 @@ function resolveFallbackApiKey(
     : fallbackProvider === 'openrouter' ? settings.openrouterKey
     : fallbackProvider === 'kimi' ? settings.kimiKey
     : fallbackProvider === 'gemini' ? settings.geminiKey
+    : fallbackProvider === 'xai' ? settings.xaiKey
     : fallbackProvider === 'openai-compatible' ? settings.openaiCompatibleKey
     : ''
 }

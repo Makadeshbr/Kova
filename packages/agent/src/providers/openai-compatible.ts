@@ -3,6 +3,7 @@ import type { GenerateOptions, LLMResponse, AgentProvider, AgentLoopOptions, Pro
 import type { KovaTool } from '../tools'
 import { extractChangesFromXml, extractChangesFromTools, extractChangesFromText, type OpenAIToolCall } from './openai-text-parser'
 import { normalizeProviderError } from './errors'
+import { detectCapabilities } from './model-catalog'
 
 export interface OpenAICompatibleProviderOptions {
   apiKey?: string
@@ -44,13 +45,12 @@ interface ReasoningCallbacks {
 export class OpenAICompatibleProvider implements AgentProvider {
   constructor(private readonly options: OpenAICompatibleProviderOptions) {}
 
-  // Local/compatible models vary widely — conservative defaults
+  // Capabilities are derived from the model ID via the shared catalog, which
+  // covers every search-confirmed 2026 family (Gemini 3.x, Kimi K2.x, DeepSeek
+  // V3.2/R1, Grok 4, GPT-5.x, Claude 4.x) and falls back to conservative 8k
+  // no-tools defaults for unknown IDs.
   capabilities(): ProviderCapabilities {
-    const model = this.options.model.toLowerCase()
-    // Larger models generally support tool calls reliably
-    const likelySupportsTools = /gpt-4|claude|gemini|qwen2\.5|mistral-large|llama-3\.[12]/.test(model)
-    const contextLimit = /128k|200k|1m/.test(model) ? 100_000 : 8_000
-    return { supportsToolCalls: likelySupportsTools, contextTokenLimit: contextLimit }
+    return detectCapabilities(this.options.model)
   }
 
   // Single-turn — used for task structuring

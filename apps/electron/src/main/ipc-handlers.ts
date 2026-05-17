@@ -24,6 +24,7 @@ export interface KovaSettings {
   openrouterKey: string
   kimiKey: string
   geminiKey: string
+  xaiKey: string
   openaiCompatibleKey: string
   ollamaUrl: string
   compatibleUrl: string
@@ -48,6 +49,7 @@ const DEFAULT_SETTINGS: KovaSettings = {
   openrouterKey: '',
   kimiKey: '',
   geminiKey: '',
+  xaiKey: '',
   openaiCompatibleKey: '',
   ollamaUrl: 'http://localhost:11434/v1',
   compatibleUrl: 'http://localhost:1234/v1',

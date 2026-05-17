@@ -6,6 +6,10 @@ export type { OpenAICompatibleProviderOptions } from './providers/openai-compati
 export { KovaProviderError, normalizeProviderError, isRecoverableProviderError } from './providers/errors'
 export type { NormalizedProviderError, ProviderErrorCode } from './providers/errors'
 export type { LLMProvider, LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions } from './providers/provider'
+export {
+  MODEL_CATALOG, PROVIDER_DEFAULTS, detectCapabilities, findModel, findProvider, listProviderIds,
+} from './providers/model-catalog'
+export type { ProviderId, ModelInfo, ProviderDefaults, DetectedCapabilities } from './providers/model-catalog'
 export { MODE_PROMPTS } from './modes'
 export type { KovaTool, PermissionAction, PermissionKey, PermissionPolicy, PermissionRule, InteractiveRunner } from './tools'
 export { AGENT_TOOLS, DEFAULT_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'

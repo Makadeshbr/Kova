@@ -63,6 +63,7 @@ export function mergeSettingsForSave(incoming: unknown, existing: Partial<KovaSe
     openrouterKey: optionalString(settings.openrouterKey, 4_000) ?? '',
     kimiKey: optionalString(settings.kimiKey, 4_000) ?? '',
     geminiKey: optionalString(settings.geminiKey, 4_000) ?? '',
+    xaiKey: optionalString(settings.xaiKey, 4_000) ?? '',
     openaiCompatibleKey: optionalString(settings.openaiCompatibleKey, 4_000) ?? '',
     ollamaUrl: optionalString(settings.ollamaUrl, 2_000) ?? 'http://localhost:11434/v1',
     compatibleUrl: optionalString(settings.compatibleUrl, 2_000) ?? 'http://localhost:1234/v1',

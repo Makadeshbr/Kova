@@ -1,4 +1,13 @@
+/**
+ * Renderer-side provider configuration.
+ *
+ * The model lists, default models, and base URLs come from the shared
+ * @kova/agent catalog so the dropdown, capability detection, and provider
+ * resolution all agree on the same 2026 IDs. UI-only concerns (labels,
+ * placeholders, hints) live here.
+ */
 import type { KovaSettings } from './types'
+import { MODEL_CATALOG, PROVIDER_DEFAULTS, type ProviderId } from '@kova/agent'
 
 export interface ProviderDef {
   value: string
@@ -8,114 +17,64 @@ export interface ProviderDef {
 }
 
 export const PROVIDERS: ProviderDef[] = [
-  { value: 'lmstudio', label: 'LM Studio', description: 'Local OpenAI-compatible server', local: true },
-  { value: 'ollama', label: 'Ollama', description: 'Local Ollama server', local: true },
-  { value: 'anthropic', label: 'Anthropic Claude', description: 'Claude API models', local: false },
-  { value: 'openai', label: 'OpenAI', description: 'OpenAI API models', local: false },
-  { value: 'deepseek', label: 'DeepSeek', description: 'DeepSeek API models', local: false },
-  { value: 'gemini', label: 'Google Gemini', description: 'Gemini OpenAI-compatible endpoint', local: false },
-  { value: 'openrouter', label: 'OpenRouter', description: 'Router for Claude, GPT, Gemini and OSS models', local: false },
-  { value: 'kimi', label: 'Kimi Moonshot', description: 'Moonshot Kimi models', local: false },
-  { value: 'nvidia', label: 'NVIDIA Kimi K2.6', description: 'NVIDIA hosted Kimi endpoint', local: false },
-  { value: 'openai-compatible', label: 'OpenAI Compatible', description: 'Custom compatible endpoint', local: false },
+  { value: 'lmstudio',          label: 'LM Studio',         description: 'Local OpenAI-compatible server', local: true },
+  { value: 'ollama',            label: 'Ollama',            description: 'Local Ollama server',             local: true },
+  { value: 'anthropic',         label: 'Anthropic Claude',  description: 'Claude API models',               local: false },
+  { value: 'openai',            label: 'OpenAI',            description: 'OpenAI API models',               local: false },
+  { value: 'gemini',            label: 'Google Gemini',     description: 'Gemini OpenAI-compatible endpoint', local: false },
+  { value: 'deepseek',          label: 'DeepSeek',          description: 'DeepSeek API models',             local: false },
+  { value: 'kimi',              label: 'Kimi (Moonshot)',   description: 'Moonshot Kimi K2.x models',       local: false },
+  { value: 'xai',               label: 'xAI (Grok)',        description: 'Grok 4 family',                   local: false },
+  { value: 'openrouter',        label: 'OpenRouter',        description: 'Router for Claude, GPT, Gemini and OSS models', local: false },
+  { value: 'nvidia',            label: 'NVIDIA Kimi K2.6',  description: 'NVIDIA hosted Kimi endpoint',     local: false },
+  { value: 'openai-compatible', label: 'OpenAI Compatible', description: 'Custom compatible endpoint',      local: false },
 ]
 
 export const HINTS: Record<string, string> = {
-  lmstudio: 'Abra LM Studio > Local Server > carregue um modelo > Start Server.',
-  ollama: 'Instale Ollama (ollama.ai) e rode: ollama pull qwen2.5-coder:7b',
-  anthropic: 'Acesse console.anthropic.com > API Keys. Selecione o modelo no dropdown.',
-  openai: 'Acesse platform.openai.com > API Keys. Selecione o modelo no dropdown.',
-  deepseek: 'Acesse platform.deepseek.com > API Keys. Modelos: deepseek-v4-flash ou deepseek-v4-pro.',
-  gemini: 'Acesse aistudio.google.com > Get API Key. Usa endpoint OpenAI-compatible do Google.',
-  openrouter: 'Acesse openrouter.ai. Suporta Claude, GPT, Gemini, Llama e outros modelos.',
-  kimi: 'Acesse platform.moonshot.ai > API Keys.',
-  nvidia: 'Acesse build.nvidia.com > Moonshot Kimi K2.6 > Get API Key.',
-  'openai-compatible': 'Qualquer API compativel com OpenAI: Groq, Together, Fireworks, LM Studio remoto. Informe URL e modelo.',
+  lmstudio:           'Abra LM Studio > Local Server > carregue um modelo > Start Server.',
+  ollama:             'Instale Ollama (ollama.ai) e rode: ollama pull qwen2.5-coder:7b',
+  anthropic:          `${PROVIDER_DEFAULTS.anthropic.apiKeyHint}. Selecione o modelo no dropdown.`,
+  openai:             `${PROVIDER_DEFAULTS.openai.apiKeyHint}. GPT-5.x recomendado.`,
+  deepseek:           `${PROVIDER_DEFAULTS.deepseek.apiKeyHint}. Modelos: deepseek-chat (V3.2) ou deepseek-reasoner (R1).`,
+  gemini:             `${PROVIDER_DEFAULTS.gemini.apiKeyHint}. Usa o endpoint OpenAI-compatible do Google.`,
+  openrouter:         `${PROVIDER_DEFAULTS.openrouter.apiKeyHint}. Suporta Claude, GPT, Gemini, Llama e outros modelos.`,
+  kimi:               `${PROVIDER_DEFAULTS.kimi.apiKeyHint}.`,
+  xai:                `${PROVIDER_DEFAULTS.xai.apiKeyHint}. Grok 4 e variantes fast/code.`,
+  nvidia:             `${PROVIDER_DEFAULTS.nvidia.apiKeyHint}.`,
+  'openai-compatible':'Qualquer API compativel com OpenAI: Groq, Together, Fireworks, LM Studio remoto. Informe URL e modelo.',
 }
 
 export const API_KEY_CONFIG: Record<string, { label: string; placeholder: string; key: keyof KovaSettings }> = {
-  anthropic: { label: 'Anthropic API Key', placeholder: 'sk-ant-api03-...', key: 'anthropicKey' },
-  openai: { label: 'OpenAI API Key', placeholder: 'sk-proj-...', key: 'openaiKey' },
-  deepseek: { label: 'DeepSeek API Key', placeholder: 'sk-...', key: 'deepseekKey' },
-  gemini: { label: 'Google Gemini API Key', placeholder: 'AIza...', key: 'geminiKey' },
-  openrouter: { label: 'OpenRouter API Key', placeholder: 'sk-or-v1-...', key: 'openrouterKey' },
-  kimi: { label: 'Kimi / Moonshot Key', placeholder: 'sk-...', key: 'kimiKey' },
-  nvidia: { label: 'NVIDIA API Key', placeholder: 'nvapi-...', key: 'nvidiaKey' },
-  'openai-compatible': { label: 'API Key (opcional)', placeholder: 'deixe vazio se nao precisar', key: 'openaiCompatibleKey' },
+  anthropic:          { label: 'Anthropic API Key',     placeholder: 'sk-ant-api03-...', key: 'anthropicKey' },
+  openai:             { label: 'OpenAI API Key',        placeholder: 'sk-proj-...',      key: 'openaiKey' },
+  deepseek:           { label: 'DeepSeek API Key',      placeholder: 'sk-...',           key: 'deepseekKey' },
+  gemini:             { label: 'Google Gemini API Key', placeholder: 'AIza...',          key: 'geminiKey' },
+  openrouter:         { label: 'OpenRouter API Key',    placeholder: 'sk-or-v1-...',     key: 'openrouterKey' },
+  kimi:               { label: 'Kimi / Moonshot Key',   placeholder: 'sk-...',           key: 'kimiKey' },
+  xai:                { label: 'xAI API Key',           placeholder: 'xai-...',          key: 'xaiKey' },
+  nvidia:             { label: 'NVIDIA API Key',        placeholder: 'nvapi-...',        key: 'nvidiaKey' },
+  'openai-compatible':{ label: 'API Key (optional)',    placeholder: 'leave empty when not required', key: 'openaiCompatibleKey' },
 }
 
+// Default model per provider, sourced from the @kova/agent catalog so the
+// renderer stays in sync with provider-resolver.ts and the capability matcher.
 export const DEFAULT_MODELS: Record<string, string> = {
-  anthropic: 'claude-sonnet-4-6',
-  openai: 'gpt-4.1',
-  deepseek: 'deepseek-v4-flash',
-  gemini: 'gemini-2.5-flash',
-  openrouter: 'anthropic/claude-sonnet-4.5',
-  kimi: 'kimi-k2.5',
-  nvidia: 'moonshotai/kimi-k2.6',
+  anthropic:  PROVIDER_DEFAULTS.anthropic.defaultModel,
+  openai:     PROVIDER_DEFAULTS.openai.defaultModel,
+  deepseek:   PROVIDER_DEFAULTS.deepseek.defaultModel,
+  gemini:     PROVIDER_DEFAULTS.gemini.defaultModel,
+  openrouter: PROVIDER_DEFAULTS.openrouter.defaultModel,
+  kimi:       PROVIDER_DEFAULTS.kimi.defaultModel,
+  xai:        PROVIDER_DEFAULTS.xai.defaultModel,
+  nvidia:     PROVIDER_DEFAULTS.nvidia.defaultModel,
 }
 
-// Model IDs from the current local provider snapshot. For unlisted models,
-// switch to custom model and paste the exact API ID from the provider docs.
-export const KNOWN_MODELS: Record<string, string[]> = {
-  anthropic: [
-    'claude-opus-4-7',
-    'claude-sonnet-4-6',
-    'claude-haiku-4-5-20251001',
-    'claude-3-5-sonnet-20241022',
-    'claude-3-5-haiku-20241022',
-    'claude-3-opus-20240229',
-  ],
-  openai: [
-    'gpt-4.1',
-    'gpt-4.1-mini',
-    'gpt-4.1-nano',
-    'gpt-4o',
-    'gpt-4o-mini',
-    'o3',
-    'o3-mini',
-    'o4-mini',
-    'o1',
-    'o1-mini',
-  ],
-  deepseek: [
-    'deepseek-v4-flash',
-    'deepseek-v4-pro',
-    'deepseek-chat',
-    'deepseek-coder',
-    'deepseek-r1',
-    'deepseek-r1-distill-qwen-32b',
-  ],
-  gemini: [
-    'gemini-2.5-pro',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite-preview-06-17',
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-thinking-exp-01-21',
-    'gemini-1.5-pro',
-    'gemini-1.5-flash',
-  ],
-  openrouter: [
-    'anthropic/claude-opus-4',
-    'anthropic/claude-sonnet-4.5',
-    'openai/gpt-4.1',
-    'openai/gpt-4o',
-    'openai/o3-mini',
-    'google/gemini-2.5-pro-preview',
-    'google/gemini-2.5-flash-preview-05-20',
-    'deepseek/deepseek-v4-flash',
-    'deepseek/deepseek-r1',
-    'meta-llama/llama-3.3-70b-instruct',
-    'mistralai/mistral-large-2407',
-    'qwen/qwen2.5-72b-instruct',
-    'x-ai/grok-2',
-  ],
-  kimi: [
-    'kimi-k2.5',
-    'moonshot-v1-8k',
-    'moonshot-v1-32k',
-    'moonshot-v1-128k',
-  ],
-  nvidia: [
-    'moonshotai/kimi-k2.6',
-  ],
-}
+// Model IDs surfaced in the dropdown per provider — derived from the catalog.
+// Users can still switch to "custom model" and paste any ID not listed here;
+// the OpenAICompatibleProvider's capability detection covers brand-new releases
+// via regex patterns in model-catalog.ts.
+export const KNOWN_MODELS: Record<string, string[]> = Object.fromEntries(
+  (Object.keys(MODEL_CATALOG) as ProviderId[])
+    .filter(id => MODEL_CATALOG[id].length > 0)
+    .map(id => [id, MODEL_CATALOG[id].map(m => m.id)])
+)

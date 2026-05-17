@@ -48,7 +48,7 @@ describe('Learning Gate - classifyLearning', () => {
     const result = classifyLearning(baseCandidate, createHarnessResult(true, ['build']))
     expect(result.classification).toBe('needs_review')
     expect(result.approved).toBe(false)
-    expect(result.reason).toContain('sem cobertura')
+    expect(result.reason).toContain('test coverage')
   })
 
   it('classifies as temporary_workaround when description mentions hack/fixme', () => {
