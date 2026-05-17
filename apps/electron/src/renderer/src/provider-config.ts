@@ -1,13 +1,17 @@
 /**
  * Renderer-side provider configuration.
  *
- * The model lists, default models, and base URLs come from the shared
- * @kova/agent catalog so the dropdown, capability detection, and provider
- * resolution all agree on the same 2026 IDs. UI-only concerns (labels,
- * placeholders, hints) live here.
+ * Self-contained on purpose: the Electron renderer cannot import the full
+ * `@kova/agent` package because its barrel pulls `tools.ts` → `node:fs` /
+ * `node:child_process`, which Vite cannot bundle for the browser.
+ *
+ * Source of truth for these IDs lives in
+ * `packages/agent/src/providers/model-catalog.ts`. A sync test
+ * (`apps/electron/__tests__/provider-config-sync.test.ts`) runs in Node and
+ * fails CI if the two drift apart, so DRY is enforced without coupling the
+ * renderer bundle to Node-only code.
  */
 import type { KovaSettings } from './types'
-import { MODEL_CATALOG, PROVIDER_DEFAULTS, type ProviderId } from '@kova/agent'
 
 export interface ProviderDef {
   value: string
@@ -33,14 +37,14 @@ export const PROVIDERS: ProviderDef[] = [
 export const HINTS: Record<string, string> = {
   lmstudio:           'Abra LM Studio > Local Server > carregue um modelo > Start Server.',
   ollama:             'Instale Ollama (ollama.ai) e rode: ollama pull qwen2.5-coder:7b',
-  anthropic:          `${PROVIDER_DEFAULTS.anthropic.apiKeyHint}. Selecione o modelo no dropdown.`,
-  openai:             `${PROVIDER_DEFAULTS.openai.apiKeyHint}. GPT-5.x recomendado.`,
-  deepseek:           `${PROVIDER_DEFAULTS.deepseek.apiKeyHint}. Modelos: deepseek-chat (V3.2) ou deepseek-reasoner (R1).`,
-  gemini:             `${PROVIDER_DEFAULTS.gemini.apiKeyHint}. Usa o endpoint OpenAI-compatible do Google.`,
-  openrouter:         `${PROVIDER_DEFAULTS.openrouter.apiKeyHint}. Suporta Claude, GPT, Gemini, Llama e outros modelos.`,
-  kimi:               `${PROVIDER_DEFAULTS.kimi.apiKeyHint}.`,
-  xai:                `${PROVIDER_DEFAULTS.xai.apiKeyHint}. Grok 4 e variantes fast/code.`,
-  nvidia:             `${PROVIDER_DEFAULTS.nvidia.apiKeyHint}.`,
+  anthropic:          'console.anthropic.com → API Keys. Selecione o modelo no dropdown.',
+  openai:             'platform.openai.com → API Keys. GPT-5.x recomendado.',
+  deepseek:           'platform.deepseek.com → API Keys. Modelos: deepseek-chat (V3.2) ou deepseek-reasoner (R1).',
+  gemini:             'aistudio.google.com → Get API Key. Usa o endpoint OpenAI-compatible do Google.',
+  openrouter:         'openrouter.ai → Keys. Suporta Claude, GPT, Gemini, Llama e outros modelos.',
+  kimi:               'platform.moonshot.ai → API Keys.',
+  xai:                'console.x.ai → API Keys. Grok 4 e variantes fast/code.',
+  nvidia:             'build.nvidia.com → Kimi K2.6 → Get API Key.',
   'openai-compatible':'Qualquer API compativel com OpenAI: Groq, Together, Fireworks, LM Studio remoto. Informe URL e modelo.',
 }
 
@@ -56,25 +60,80 @@ export const API_KEY_CONFIG: Record<string, { label: string; placeholder: string
   'openai-compatible':{ label: 'API Key (optional)',    placeholder: 'leave empty when not required', key: 'openaiCompatibleKey' },
 }
 
-// Default model per provider, sourced from the @kova/agent catalog so the
-// renderer stays in sync with provider-resolver.ts and the capability matcher.
+// Default model per provider — mirrors `PROVIDER_DEFAULTS[id].defaultModel`
+// from `@kova/agent/src/providers/model-catalog.ts`. Drift is caught by the
+// sync test.
 export const DEFAULT_MODELS: Record<string, string> = {
-  anthropic:  PROVIDER_DEFAULTS.anthropic.defaultModel,
-  openai:     PROVIDER_DEFAULTS.openai.defaultModel,
-  deepseek:   PROVIDER_DEFAULTS.deepseek.defaultModel,
-  gemini:     PROVIDER_DEFAULTS.gemini.defaultModel,
-  openrouter: PROVIDER_DEFAULTS.openrouter.defaultModel,
-  kimi:       PROVIDER_DEFAULTS.kimi.defaultModel,
-  xai:        PROVIDER_DEFAULTS.xai.defaultModel,
-  nvidia:     PROVIDER_DEFAULTS.nvidia.defaultModel,
+  anthropic:  'claude-sonnet-4-6',
+  openai:     'gpt-5.5',
+  deepseek:   'deepseek-chat',
+  gemini:     'gemini-3-flash-preview',
+  openrouter: 'anthropic/claude-sonnet-4-6',
+  kimi:       'kimi-k2.6',
+  xai:        'grok-4',
+  nvidia:     'moonshotai/kimi-k2.6',
 }
 
-// Model IDs surfaced in the dropdown per provider — derived from the catalog.
-// Users can still switch to "custom model" and paste any ID not listed here;
-// the OpenAICompatibleProvider's capability detection covers brand-new releases
-// via regex patterns in model-catalog.ts.
-export const KNOWN_MODELS: Record<string, string[]> = Object.fromEntries(
-  (Object.keys(MODEL_CATALOG) as ProviderId[])
-    .filter(id => MODEL_CATALOG[id].length > 0)
-    .map(id => [id, MODEL_CATALOG[id].map(m => m.id)])
-)
+// Model IDs surfaced in the dropdown per provider — mirrors
+// `MODEL_CATALOG[id].map(m => m.id)` from `@kova/agent`. Sync test enforces
+// equality so users can't switch to a model the agent doesn't know how to
+// instantiate.
+export const KNOWN_MODELS: Record<string, string[]> = {
+  anthropic: [
+    'claude-opus-4-7',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5-20251001',
+    'claude-3-5-sonnet-20241022',
+    'claude-3-5-haiku-20241022',
+  ],
+  openai: [
+    'gpt-5.5',
+    'gpt-5.5-pro',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-5.2-codex',
+    'gpt-4.1',
+    'gpt-4o',
+  ],
+  gemini: [
+    'gemini-3.1-pro-preview',
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite',
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+  ],
+  kimi: [
+    'kimi-k2.6',
+    'kimi-k2.6-thinking',
+    'kimi-k2.5',
+    'kimi-k2',
+  ],
+  deepseek: [
+    'deepseek-chat',
+    'deepseek-reasoner',
+  ],
+  xai: [
+    'grok-4',
+    'grok-4.1',
+    'grok-4-fast-reasoning',
+    'grok-4-fast-non-reasoning',
+    'grok-code-fast-1',
+  ],
+  openrouter: [
+    'anthropic/claude-opus-4-7',
+    'anthropic/claude-sonnet-4-6',
+    'openai/gpt-5.5',
+    'google/gemini-3.1-pro-preview',
+    'google/gemini-3-flash-preview',
+    'deepseek/deepseek-chat',
+    'deepseek/deepseek-reasoner',
+    'moonshotai/kimi-k2.6',
+    'x-ai/grok-4',
+    'meta-llama/llama-3.3-70b-instruct',
+    'qwen/qwen2.5-72b-instruct',
+  ],
+  nvidia: [
+    'moonshotai/kimi-k2.6',
+  ],
+}
