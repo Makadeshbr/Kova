@@ -70,4 +70,48 @@ describe('buildPatchTask', () => {
     expect(task.objective.length).toBeLessThanOrEqual(120)
     expect(task.objective).not.toContain('second line')
   })
+
+  /**
+   * Scaffolding bypass — landing/site/app/dockerfile creations don't need
+   * JSON structuring. Weak models (Kimi K2.x, DeepSeek V3) often fail the
+   * JSON contract on these, costing a round-trip and the repair retry.
+   * The agent has all the tools and prompt context it needs to build directly.
+   */
+  it('skips structuring entirely for scaffolding requests (no LLM call)', async () => {
+    const provider = mockProvider('this should not be called')
+    const task = await buildPatchTask(
+      'crie uma landing page para barbearia',
+      provider,
+      '/tmp/empty',
+      GenericAdapter,
+    )
+    expect(vi.mocked(provider.generate)).not.toHaveBeenCalled()
+    expect(task.objective).toBe('crie uma landing page para barbearia')
+  })
+
+  it('scaffolding bypass matches English verbs too', async () => {
+    const provider = mockProvider('unused')
+    await buildPatchTask('scaffold a next.js app with auth', provider, '/tmp/p', GenericAdapter)
+    expect(vi.mocked(provider.generate)).not.toHaveBeenCalled()
+  })
+
+  it('respects an externally provided abort signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const provider: AgentProvider = {
+      capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
+      generate: vi.fn().mockResolvedValue({ thought: 'never reached', changes: [], tokensUsed: 0 }),
+      runAgentLoop: vi.fn(),
+    }
+    // Non-scaffolding objective to force the structuring path.
+    const task = await buildPatchTask(
+      'corrija o bug em src/auth.ts',
+      provider,
+      '/tmp/project',
+      GenericAdapter,
+      { signal: controller.signal },
+    )
+    // The wrapped generate throws on aborted signal → buildPatchTask falls back.
+    expect(task.objective).toBe('corrija o bug em src/auth.ts')
+  })
 })

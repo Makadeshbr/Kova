@@ -114,8 +114,12 @@ export async function buildProvider(
   if (resolved && onModelDetected) onModelDetected(model)
 
   const usedFallback = !safeConfigured && !resolved && !!presetFallback
+  // Pass undefined when the key is missing — OpenAICompatibleProvider already
+  // skips the Authorization header when apiKey is falsy. Sending the provider
+  // NAME as a Bearer token used to mask a real "no key configured" state and
+  // produced confusing 401s in the logs of cloud providers.
   return {
-    provider: new OpenAICompatibleProvider({ apiKey: apiKey || providerName, baseUrl, model, extraBody }),
+    provider: new OpenAICompatibleProvider({ apiKey: apiKey || undefined, baseUrl, model, extraBody }),
     resolvedProvider: providerName,
     resolvedModel: model,
     fallback: usedFallback || (!!safeConfigured && resolved !== safeConfigured),

@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-BSMEalpM.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-BcIYtK7r.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
 function getDefaultExportFromCjs(x) {
   return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, "default") ? x["default"] : x;
 }
@@ -13002,6 +13002,7 @@ function ModelPicker({ settings, activeModel, onSelect, onOpenSettings, onClose,
     /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: onOpenSettings, className: "kova-model-settings", children: "Abrir configuracoes" })
   ] });
 }
+const kovaLogo = "" + new URL("Logo_Kova-BkEnlz01.png", import.meta.url).href;
 const STATUS_COLOR$1 = {
   structuring: "var(--amber)",
   planning: "var(--amber)",
@@ -13053,6 +13054,21 @@ function TitleBar({ projectRoot, status, settings, activeModel, modelConnected, 
       projectName ? projectName : "Abrir projeto"
     ] }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, flex: 1 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "img",
+        {
+          src: kovaLogo,
+          alt: "",
+          "aria-hidden": "true",
+          style: {
+            width: 24,
+            height: 24,
+            objectFit: "contain",
+            filter: "invert(1) brightness(0.92) drop-shadow(0 0 10px rgba(116, 211, 255, 0.22))",
+            opacity: 0.9
+          }
+        }
+      ),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 800, fontSize: 14, letterSpacing: "0.15em", color: "var(--cyan)" }, children: "KOVA" }),
       status && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
         width: 6,
@@ -15101,7 +15117,31 @@ function ChatArea({
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, overflow: "auto", padding: "24px 28px 12px", scrollbarWidth: "thin" }, children: [
       isEmpty && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 30, fontWeight: 800, color: "var(--amber)", letterSpacing: "0.12em" }, children: "KOVA" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          width: 82,
+          height: 82,
+          borderRadius: 18,
+          display: "grid",
+          placeItems: "center",
+          background: "linear-gradient(180deg, rgba(116, 211, 255, 0.10), rgba(9, 11, 13, 0.12))",
+          border: "1px solid rgba(116, 211, 255, 0.16)",
+          boxShadow: "0 18px 54px rgba(0, 0, 0, 0.34)"
+        }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "img",
+          {
+            src: kovaLogo,
+            alt: "",
+            "aria-hidden": "true",
+            style: {
+              width: 62,
+              height: 62,
+              objectFit: "contain",
+              filter: "invert(1) brightness(0.88) drop-shadow(0 0 18px rgba(116, 211, 255, 0.22))",
+              opacity: 0.92
+            }
+          }
+        ) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 24, fontWeight: 800, color: "var(--cyan)", letterSpacing: "0.12em" }, children: "KOVA" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { color: "var(--text-3)", fontSize: 13, textAlign: "center", lineHeight: 1.8, maxWidth: 340 }, children: projectRoot ? "Ask, analyze, or request to create and fix code." : "Open a project to get started." }),
         !projectRoot && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onOpenFolder, style: {
           marginTop: 8,
@@ -16675,7 +16715,7 @@ function ProviderModal({ settings, onSave, onClose }) {
     }
   );
 }
-const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-BSMEalpM.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
+const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-BcIYtK7r.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
 const EMPTY_REASONING = {
   active: false,
   text: "",
@@ -16702,6 +16742,45 @@ const EMPTY_USAGE = {
 };
 function normalizeSessionUsage(usage) {
   return { ...EMPTY_USAGE, ...usage ?? {} };
+}
+function appendServerExitEvent(events, task, session, exitCode) {
+  if (!task || !session || !looksLikeDevServerCommand(session.command)) return events;
+  const lastMatchingEvent = [...events].reverse().find((event) => event.serverSession?.sessionId === session.id);
+  if (lastMatchingEvent?.type === "server_failed") return events;
+  return [
+    ...events,
+    {
+      type: "server_failed",
+      taskId: task.id,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      message: `Dev server process exited with code ${exitCode}.`,
+      toolInput: { command: session.command },
+      serverSession: {
+        sessionId: session.id,
+        command: session.command,
+        cwd: session.cwd,
+        persistent: true,
+        ready: false,
+        diagnostics: [`process_exited:${exitCode}`]
+      }
+    }
+  ];
+}
+function looksLikeDevServerCommand(command) {
+  const normalized = command.trim().toLowerCase();
+  return [
+    /^npm(?:\.cmd)?\s+run\s+dev\b/,
+    /^pnpm(?:\.cmd)?\s+(?:run\s+)?dev\b/,
+    /^yarn(?:\.cmd)?\s+dev\b/,
+    /^bun(?:\.cmd)?\s+dev\b/,
+    /^(?:npx\s+)?vite(?:\s|$)/,
+    /^(?:npx\s+)?next\s+dev\b/,
+    /^(?:npx\s+)?astro\s+dev\b/,
+    /^(?:npx\s+)?remix\s+dev\b/,
+    /^webpack\s+serve\b/,
+    /^python\s+manage\.py\s+runserver\b/,
+    /^rails\s+(?:s|server)\b/
+  ].some((pattern) => pattern.test(normalized));
 }
 function App() {
   const [state, setState] = reactExports.useState({
@@ -16739,7 +16818,8 @@ function App() {
     const unsubExit = window.kova.onTerminalExit((id, exitCode) => {
       setState((prev) => ({
         ...prev,
-        terminalSessions: prev.terminalSessions.map((s) => s.id === id ? { ...s, exitCode } : s)
+        terminalSessions: prev.terminalSessions.map((s) => s.id === id ? { ...s, exitCode } : s),
+        executionEvents: appendServerExitEvent(prev.executionEvents, prev.task, prev.terminalSessions.find((s) => s.id === id), exitCode)
       }));
     });
     const unsubApproval = window.kova.onInteractiveRequest((id, command, reason) => {

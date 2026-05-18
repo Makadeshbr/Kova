@@ -44,6 +44,8 @@ function makeWebContents() {
   }
 }
 
+const reachableServerProbe = async (): Promise<boolean> => true
+
 describe('TerminalManager', () => {
   it('blocks interactive commands outside the allowlist before asking approval', async () => {
     const { pty } = makePty()
@@ -62,7 +64,7 @@ describe('TerminalManager', () => {
   it('permite aliases .cmd do Windows para comandos interativos aprovados', async () => {
     const { pty, processes } = makePty()
     const wc = makeWebContents()
-    const manager = new TerminalManager(pty as never)
+    const manager = new TerminalManager(pty as never, reachableServerProbe)
     manager.setWebContents(wc as never)
     manager.setProjectRoot(process.cwd())
 
@@ -118,7 +120,7 @@ describe('TerminalManager', () => {
   it('resolve servidor persistente quando fica pronto e mantem a sessao aberta', async () => {
     const { pty, processes } = makePty()
     const wc = makeWebContents()
-    const manager = new TerminalManager(pty as never)
+    const manager = new TerminalManager(pty as never, reachableServerProbe)
     manager.setWebContents(wc as never)
     manager.setProjectRoot(process.cwd())
 
@@ -158,6 +160,51 @@ describe('TerminalManager', () => {
     expect(processes[0].write).toHaveBeenCalledWith('abc')
     expect(processes[0].resize).toHaveBeenCalledWith(90, 24)
     expect(processes[0].kill).toHaveBeenCalledOnce()
+  })
+
+  it('on Windows, Ctrl+C stops persistent process trees instead of opening a stuck batch prompt', async () => {
+    if (process.platform !== 'win32') return
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never, reachableServerProbe)
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+
+    processes[0].dataHandler?.('VITE ready in 300 ms\nLocal: http://localhost:5173/\n')
+    await expect(promise).resolves.toMatchObject({ persistent: true, ready: true })
+
+    manager.writeInput(approval!.payload.id, '\x03')
+
+    expect(processes[0].write).not.toHaveBeenCalledWith('\x03')
+    expect(processes[0].kill).toHaveBeenCalledOnce()
+    expect(wc.sent.some(item => item.channel === 'kova:terminal-data' && String(item.payload.data).includes('interrupt received'))).toBe(true)
+  })
+
+  it('on Windows, answers to the batch termination prompt stop the persistent process tree', async () => {
+    if (process.platform !== 'win32') return
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never)
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+
+    processes[0].dataHandler?.('Deseja finalizar o arquivo em lotes (S/N)?')
+    manager.writeInput(approval!.payload.id, 's')
+
+    expect(processes[0].write).not.toHaveBeenCalledWith('s')
+    expect(processes[0].kill).toHaveBeenCalledOnce()
+    expect(wc.sent.some(item => item.channel === 'kova:terminal-data' && String(item.payload.data).includes('Windows batch termination confirmed'))).toBe(true)
+    await expect(promise).resolves.toMatchObject({ persistent: true, ready: false })
   })
 })
 
@@ -261,6 +308,8 @@ describe('TerminalManager — workspace path containment', () => {
 })
 
 describe('TerminalManager persistent server diagnostics', () => {
+  afterEach(() => vi.useRealTimers())
+
   it('extracts URL, port and readiness from dev server output', () => {
     expect(analyzePersistentOutput('VITE ready in 300 ms\nLocal: http://localhost:5173/\n')).toMatchObject({
       ready: true,
@@ -280,6 +329,62 @@ describe('TerminalManager persistent server diagnostics', () => {
     expect(analyzePersistentOutput('npm ERR! missing script: dev')).toMatchObject({
       diagnostics: expect.arrayContaining(['missing_script']),
     })
+  })
+
+  it('does not mark a persistent server ready when the detected URL is unreachable', async () => {
+    vi.useFakeTimers()
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never, async () => false)
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+
+    processes[0].dataHandler?.('VITE v5.4.21 ready in 1327 ms\nLocal: http://localhost:5174/\n')
+    await vi.advanceTimersByTimeAsync(10_500)
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: 0,
+      persistent: true,
+      ready: false,
+      url: 'http://localhost:5174/',
+      port: 5174,
+      diagnostics: expect.arrayContaining(['readiness_probe_failed']),
+    })
+  })
+
+  it('keeps probing until a detected dev-server URL becomes reachable', async () => {
+    vi.useFakeTimers()
+    let attempts = 0
+    const { pty, processes } = makePty()
+    const wc = makeWebContents()
+    const manager = new TerminalManager(pty as never, async () => {
+      attempts += 1
+      return attempts >= 2
+    })
+    manager.setWebContents(wc as never)
+    manager.setProjectRoot(process.cwd())
+
+    const promise = manager.runInteractive('npm run dev', process.cwd(), 'start dev server')
+    const approval = wc.sent.find(item => item.channel === 'kova:interactive-request')
+    manager.approveInteractive(approval!.payload.id, true)
+    await vi.waitFor(() => expect(pty.spawn).toHaveBeenCalledOnce())
+
+    processes[0].dataHandler?.('VITE v5.4.21 ready in 1327 ms\nLocal: http://localhost:5174/\n')
+    await vi.advanceTimersByTimeAsync(600)
+
+    await expect(promise).resolves.toMatchObject({
+      exitCode: 0,
+      persistent: true,
+      ready: true,
+      url: 'http://localhost:5174/',
+      port: 5174,
+    })
+    expect(attempts).toBeGreaterThanOrEqual(2)
   })
 })
 

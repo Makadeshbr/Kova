@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react'
 import type { KovaSettings } from '../types'
 import { ModelPicker } from './ModelPicker'
+import kovaLogo from '../assets/Logo_Kova.png'
 
 interface Props {
   projectRoot: string | null
@@ -64,6 +65,18 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
 
       {/* Center: Logo + status */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flex: 1 }}>
+        <img
+          src={kovaLogo}
+          alt=""
+          aria-hidden="true"
+          style={{
+            width: 24,
+            height: 24,
+            objectFit: 'contain',
+            filter: 'invert(1) brightness(0.92) drop-shadow(0 0 10px rgba(116, 211, 255, 0.22))',
+            opacity: 0.9,
+          }}
+        />
         <span style={{ fontWeight: 800, fontSize: 14, letterSpacing: '0.15em', color: 'var(--cyan)' }}>KOVA</span>
         {status && (
           <span style={{

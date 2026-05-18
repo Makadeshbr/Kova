@@ -288,7 +288,7 @@ export interface AgentResultMessage {
   proofPackRef?: string
 }
 
-export type CompletionRequirementKind = 'file' | 'command' | 'dev_server' | 'validation' | 'claim'
+export type CompletionRequirementKind = 'file' | 'command' | 'dev_server' | 'validation' | 'claim' | 'artifact_quality'
 
 export interface CompletionRequirement {
   id: string

@@ -130,10 +130,22 @@ export class OpenAICompatibleProvider implements AgentProvider {
 
       if (textContent) {
         const existingPaths = new Set(executor.getChanges().map(change => change.path))
+        // XML extraction is always allowed — `<kova_file path="...">` is an
+        // explicit "write this file" instruction in the text, used by older
+        // models without native tool calling.
+        //
+        // Bare code-block extraction (``` foo.ts ... ``` style) is dangerous
+        // for tool-capable models: they often include code blocks as EXAMPLES
+        // in explanations and we'd mistakenly write those as project files.
+        // Only enable it when the model has no tool support at all.
         const xmlChanges = extractChangesFromXml(textContent)
+        const allowBareBlocks =
+          !this.capabilities().supportsToolCalls &&
+          existingPaths.size === 0 &&
+          requestedPaths.size === 0
         const changes = xmlChanges.length > 0
           ? xmlChanges
-          : extractChangesFromText(textContent, { includeBareBlocks: existingPaths.size === 0 && requestedPaths.size === 0 })
+          : extractChangesFromText(textContent, { includeBareBlocks: allowBareBlocks })
         for (const c of changes) {
           if (c.type === 'delete' || existingPaths.has(c.path)) continue
           const input = { path: c.path, content: c.diff }

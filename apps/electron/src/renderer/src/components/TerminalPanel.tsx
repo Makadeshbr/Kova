@@ -45,6 +45,7 @@ function TerminalInstance({ sessionId, onClose }: { sessionId: string; onClose: 
     term.open(containerRef.current)
 
     try { fit.fit() } catch { /* ignore initial fit errors */ }
+    try { term.focus() } catch { /* ignore focus errors on detached terminals */ }
 
     termRef.current = term
     fitRef.current = fit
@@ -85,18 +86,28 @@ function TerminalInstance({ sessionId, onClose }: { sessionId: string; onClose: 
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>
-          Terminal
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>
+            Terminal
+          </span>
+          <span style={{ fontSize: 10, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
+            interactive PTY
+          </span>
+        </div>
         <button
           onClick={onClose}
           style={{ background: 'transparent', color: 'var(--text-3)', fontSize: 14, padding: '2px 6px' }}
-          title="Close terminal"
+          title="Stop terminal session"
+          aria-label="Stop terminal session"
         >
-          ✕
+          x
         </button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, overflow: 'hidden' }} />
+      <div
+        ref={containerRef}
+        onMouseDown={() => termRef.current?.focus()}
+        style={{ flex: 1, overflow: 'hidden' }}
+      />
     </div>
   )
 }

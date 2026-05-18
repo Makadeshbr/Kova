@@ -3,18 +3,33 @@ import type { PlanResultMessage } from '@kova/shared'
 export type KovaRunMode = 'chat' | 'plan' | 'patch' | 'review'
 
 export function chatOnlyPrompt(stack: string): string {
-  return `You are a senior software engineer helping with this project.
-Stack: ${stack}.
+  return `You are a senior software engineer answering questions about this project.
+Stack adapter: ${stack}.
 
-Rules:
-- Answer directly. Never introduce yourself, never list your capabilities, never say your name.
-- No emojis. No bullet-point capability lists. No "OBS:" disclaimers. No marketing phrases.
-- If the user says "oi", "hi", or similar — just reply naturally in one short sentence, like a colleague would.
-- If asked what you can do, answer briefly and concretely based on the project context.
+Behavior:
+- Answer directly. Never introduce yourself, list capabilities, or use emojis.
+- Reply in the same language the user writes in. Keep replies concise.
+- For greetings, reply naturally in one short sentence like a colleague would.
 - Use provided file context when present. If a file reference was denied, say why briefly.
-- You are running inside the Kova desktop app with project workspace access during implementation tasks. If conversation history says files were changed or applied, treat that as real workspace state. Never claim you cannot create or modify files after Kova already applied a task.
-- Do not resume older tasks unless the user explicitly asks.
-- Respond in the same language the user writes in.`
+- If conversation history says files were changed/applied, treat that as the real workspace state.
+
+Tools available in this mode (read-only — no file writes, no shell commands):
+- read_file — inspect a file before answering when the answer depends on its contents.
+- list_files — list a directory to orient the user.
+- grep_codebase — locate a symbol, usage, or pattern. ALWAYS prefer this over describing where something "should" be.
+- glob_files — list files matching a glob.
+
+How to use tools:
+- Use a tool when the user's question depends on actual code state. Don't guess.
+- Don't call tools for greetings, definitions, or general "how does X work" questions.
+- A short sentence before a tool call is fine. Avoid long monologues.
+
+When the user asks you to BUILD, CREATE, MODIFY, or RUN something:
+- You are in read-only mode and cannot do that here.
+- Briefly say so in one sentence and suggest they rephrase as a direct request
+  ("crie X", "adicione Y", "rode Z") — Kova will route that to the implementation engine.
+
+Do not resume older tasks unless the user explicitly asks.`
 }
 
 export function reviewOnlyPrompt(stack: string): string {
@@ -98,58 +113,248 @@ export function inferRunMode(message: string, explicit?: KovaRunMode): KovaRunMo
   return 'patch'
 }
 
+/**
+ * Mode routing — matches Claude Code / Cursor / Codex behaviour:
+ *
+ *   ENGINEERING SIGNAL WINS OVER QUESTION FORM.
+ *
+ * "Como criar uma landing page?" → patch (model gets tools, builds it)
+ * "Pode adicionar um endpoint X?"  → patch
+ * "O que é REST?"                  → chat   (pure curiosity, no deliverable)
+ * "Como funciona o git rebase?"    → chat   (pure curiosity)
+ * "Oi, tudo bem?"                  → chat   (greeting)
+ * "responde em portugues"          → chat   (meta-instruction)
+ *
+ * The decision is: if the message names something to BUILD/FIX/INSPECT
+ * (a deliverable + verb, or just an imperative), route to patch and let
+ * the agent decide via tools. Only fall to chat for pure conversational
+ * signals: greetings, affirmations, meta-instructions, and questions
+ * that contain no engineering deliverable.
+ */
 export function isConversationalMessage(message: string): boolean {
   const normalized = normalizeText(message)
+  if (!normalized) return false
 
-  // Exact short responses and greetings — always chat
-  const exact = new Set([
-    'oi', 'ola', 'opa', 'hello', 'hi', 'hey',
-    'bom dia', 'boa tarde', 'boa noite',
-    'obrigado', 'obrigada', 'thanks', 'valeu',
-    'entendi', 'ok', 'sim', 'nao', 'certo', 'perfeito', 'legal',
-    'nao entendi', 'pode repetir',
-  ])
-  if (exact.has(normalized)) return true
+  if (EXACT_CHAT_PHRASES.has(normalized)) return true
 
-  // Question starters — checked BEFORE engineering-task gate so that
-  // "Como posso testar?", "Pra que serve isso?", "O que aconteceu?" all
-  // route to chat instead of patch.
-  if (/^(como|o que|oque|pra que|para que|por que|porque|quando|onde|quem|qual|quais|me diz|me fala|me explica|what|how|why|when|where|who|which)\b/.test(normalized)) return true
+  // Meta-instructions about HOW to respond (language, tone, behavior).
+  // Never a code task even when phrased as an imperative.
+  if (META_INSTRUCTION_REGEX.test(normalized)) return true
 
-  // Explanation requests — also always chat
-  if (/^(explique|explica|explain|explica|descreva|describe|resuma|resume|me conte|conta|summarize)\b/.test(normalized)) return true
+  // Action verbs and repo paths are unambiguous engineering signals — always
+  // patch. Checked before the definitional gate so "what should I change in
+  // src/auth.ts?" routes to patch even though it starts with "what".
+  if (ACTION_VERB_REGEX.test(normalized)) return false
+  if (REPO_PATH_REGEX.test(normalized)) return false
 
-  // Meta-instructions about HOW to respond (language, tone, behavior) — NEVER a code task
-  // "responde em portugues", "fala em ingles", "respond in english", "use formal language", etc.
-  if (/^(responde|responda|me responde|fala|fale|me fala|escreve|escreva|answer|respond|reply|speak|write|talk)\s+(em|in|usando|using|com|de forma|de modo)\b/.test(normalized)) return true
-  if (/\b(em portugues|em ingles|em espanhol|in english|in portuguese|in spanish|in french|em frances)\b/.test(normalized)) return true
-  if (/^(seja|seja mais|aja como|se comporte|be more|be a|act as|use (formal|informal|simple|technical))\b/.test(normalized)) return true
-  if (/^(muda (o idioma|para|de idioma)|switch (language|to)|change (language|to))\b/.test(normalized)) return true
+  // Definitional questions ("o que é REST?", "what is OAuth?") are pure
+  // curiosity even when they name an engineering concept. They route to
+  // chat regardless of any deliverable noun that follows.
+  if (DEFINITIONAL_QUESTION_REGEX.test(normalized)) return true
 
-  // Messages ending with "?" are questions (user wants info, not action)
-  // UNLESS they start with a clear imperative verb.
-  if (normalized.endsWith('?')) {
-    const imperativeStart = /^(crie|adicione|corrija|implemente|altere|refatore|remova|delete|mova|atualize|configure|instale|execute|rode|gere|escreva|migre|cria|adiciona|corrige|implementa|fix|add|create|update|implement|remove|optimize|install|run|build|generate|write|migrate)\b/
-    if (!imperativeStart.test(normalized)) return true
-  }
+  // Named deliverable without action verb ("um componente novo",
+  // "an endpoint for payments") → patch. The model decides via tools.
+  if (DELIVERABLE_NOUN_REGEX.test(normalized)) return false
 
-  // Engineering task check: if it looks like a task, keep patch mode
-  if (looksLikeEngineeringTask(normalized)) return false
+  // Pure questions / explanation requests with no engineering signal → chat.
+  if (QUESTION_STARTER_REGEX.test(normalized)) return true
+  if (EXPLANATION_REQUEST_REGEX.test(normalized)) return true
+  if (normalized.endsWith('?')) return true
 
-  // Greeting prefix (e.g. "Oi, como vai?")
-  if (/^(oi|ola|opa|hello|hi|hey|bom dia|boa tarde|boa noite)([\s,!.?]|$)/.test(normalized)) return true
+  // Greeting prefix + short tail ("Oi, tudo bem?", "Hello there").
+  if (GREETING_PREFIX_REGEX.test(normalized) && normalized.length < 30) return true
 
-  // Short non-task messages
-  return normalized.length > 0 && normalized.length < 12
+  // Anything else short and unstructured.
+  return normalized.length < 12
 }
 
 function normalizeText(text: string): string {
   return text.trim().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
 }
 
-function looksLikeEngineeringTask(text: string): boolean {
-  return /(adicione|corrija|implemente|crie|altere|refatore|teste|valide|remova|delete|mova|renomeie|atualize|otimize|resolva|analise|verifique|configure|instale|execute|rode|builde|faca|faz|melhore|ajuste|arrume|mostre|liste|leia|escreva|gere|extraia|converta|migre|depure|debugue|fix|add|create|update|implement|refactor|remove|move|rename|optimize|resolve|analyze|verify|configure|install|run|build|generate|extract|convert|migrate|debug|deploy|test|write|read|show|list|edit|change|modify|check|review|apply|revert|rollback|merge|split|set|bug|erro|error|feature|endpoint|funcao|function|metodo|method|classe|class|modulo|module|arquivo|file|api|rota|route|pagina|page|componente|component|servico|service|banco|database|tabela|table|campo|field|coluna|indice|index|query|schema|model|controller|handler|middleware|hook|provider|adapter|factory|repository|entity|dto|interface|type|enum|const|var|import|export|package|depend|config|env|docker|ci|cd|pipeline|deploy|src\/|apps\/|packages\/|tests\/|spec\/|lib\/|cmd\/|internal\/|\.\w{1,5}$)/.test(text)
+const EXACT_CHAT_PHRASES = new Set([
+  'oi', 'ola', 'opa', 'hello', 'hi', 'hey', 'yo', 'eai', 'e ai',
+  'bom dia', 'boa tarde', 'boa noite', 'good morning', 'good afternoon', 'good evening',
+  'obrigado', 'obrigada', 'thanks', 'thank you', 'valeu',
+  'entendi', 'ok', 'okay', 'sim', 'nao', 'no', 'yes', 'certo', 'perfeito', 'legal',
+  'nao entendi', 'pode repetir', 'tudo bem', 'beleza',
+])
+
+// Language / tone / persona meta-instructions — never engineering work.
+const META_INSTRUCTION_REGEX = new RegExp([
+  // "responde em portugues", "answer in english"
+  `^(?:responde|responda|me responde|fala|fale|me fala|escreve|escreva|`,
+  `answer|respond|reply|speak|write|talk)\\s+(?:em|in|usando|using|com|de forma|de modo)\\b`,
+  '|',
+  // bare "em portugues" / "in english" anywhere
+  `\\b(?:em portugues|em ingles|em espanhol|em frances|em italiano|em alemao|`,
+  `in english|in portuguese|in spanish|in french|in italian|in german)\\b`,
+  '|',
+  // persona / tone changes
+  `^(?:seja|seja mais|aja como|se comporte|be more|be a|act as|`,
+  `use (?:formal|informal|simple|technical))\\b`,
+  '|',
+  // language switch
+  `^(?:muda (?:o idioma|para|de idioma)|switch (?:language|to)|change (?:language|to))\\b`,
+].join(''))
+
+// Pure question starters — only routed to chat when no engineering signal
+// is present (engineering check runs FIRST).
+const QUESTION_STARTER_REGEX =
+  /^(?:como|o que|oque|pra que|para que|por que|porque|quando|onde|quem|qual|quais|me diz|me fala|me explica|what|how|why|when|where|who|which)\b/
+
+// Definitional questions — "o que é X", "what is X", "para que serve X".
+// Pure curiosity even when X is a known engineering term (REST, OAuth, GraphQL).
+// Routed to chat so the model gives a concept explanation instead of trying
+// to scaffold a project around the noun.
+const DEFINITIONAL_QUESTION_REGEX =
+  /^(?:o que (?:e|eh)\b|que (?:e|eh)\b|what(?:'?s| is| are| does)\b|whats\b|para que serve\b|qual a (?:diferenca|definicao|funcao)\b)/
+
+const EXPLANATION_REQUEST_REGEX =
+  /^(?:explique|explica|explain|descreva|describe|resuma|resume|me conte|conta|summarize|tldr|tl;dr)\b/
+
+const GREETING_PREFIX_REGEX =
+  /^(?:oi|ola|opa|hello|hi|hey|bom dia|boa tarde|boa noite|good (?:morning|afternoon|evening))(?:[\s,!.?]|$)/
+
+/**
+ * Detects whether a message names an engineering deliverable OR an action verb
+ * a coding agent should perform. When true, the message is routed to patch
+ * (full tool access) regardless of question form.
+ *
+ * Catches three families:
+ *   1. Action verbs in imperative, infinitive, and 3rd-person present forms
+ *      (Portuguese + English): "crie / criar / cria / create".
+ *   2. Engineering deliverables: page, component, endpoint, function, …
+ *   3. Repo path/file shape: "src/foo.ts", "apps/electron/...", "main.go".
+ *
+ * Globally enterprise-shaped: not tied to a single stack. Covers TS/JS, Go,
+ * Python, Rust, Java, mobile (Swift/Kotlin/Dart), and infra (Docker/CI).
+ */
+export function looksLikeEngineeringTask(text: string): boolean {
+  const lowered = text.toLowerCase()
+  if (ACTION_VERB_REGEX.test(lowered)) return true
+  if (DELIVERABLE_NOUN_REGEX.test(lowered)) return true
+  if (REPO_PATH_REGEX.test(lowered)) return true
+  return false
 }
+
+// Action verbs — Portuguese (imperative + infinitive + present + 1st person
+// singular) + English. Stems use `[aeio]r?` so "crie", "cria", "crio", and
+// "criar" all match. False positives push to patch — the safer default for
+// an agent with tools — so the regex is intentionally permissive.
+const ACTION_VERB_REGEX = new RegExp(
+  '\\b(?:' + [
+    // pt-BR — write/create
+    'cri[aeio]r?', 'ger[aeio]r?', 'gere', 'gera', 'escrev[aeio]r?', 'escreve',
+    'adicion[aeio]r?', 'inclu[aio]r?',
+    // pt-BR — modify
+    'alter[aeio]r?', 'mud[aeio]r?', 'modific[aeio]r?', 'edit[aeio]r?',
+    'refator[aeio]r?', 'reescrev[aeio]r?', 'atualiz[aeio]r?',
+    // pt-BR — fix
+    'corrig[ieo]r?', 'corrij[ao]', 'consert[aeio]r?', 'resolv[aeio]r?', 'arrum[aeio]r?',
+    'ajust[aeio]r?', 'debug(?:a|o|ar|ue)', 'depur[aeio]r?',
+    // pt-BR — remove / move
+    'remov[aeio]r?', 'apag[aeio]r?', 'delet[aeio]r?', 'exclu[aio]r?',
+    'mov[aeio]r?', 'renome[aio]r?', 'extra[ieo]r?',
+    // pt-BR — run / install / build
+    'rod[aeio]r?', 'execut[aeio]r?', 'instal[aeio]r?', 'build', 'compil[aeio]r?',
+    'test[aeio]r?', 'valid[aeio]r?', 'verific[aeio]r?', 'check?[aeio]?r?', 'analis[aeio]r?',
+    'configur[aeio]r?', 'otimiz[aeio]r?', 'melhor[aeio]r?',
+    // pt-BR — show / list (read-with-intent)
+    'mostr[aeio]r?', 'list[aeio]r?', 'lei[aeio]r?', 'le[r]?', 'busc[aeio]r?', 'procur[aeio]r?',
+    // pt-BR — implement / do
+    'implement[aeio]r?', 'faze[r]?', 'fa[cç][aeio]r?', 'fa[cç]o',
+    // pt-BR — deploy / migrate / convert
+    'deploy[aeio]r?', 'migr[aeio]r?', 'migre', 'convert[aeio]r?',
+    // English
+    'create', 'creates', 'creating', 'created',
+    'add', 'adds', 'adding', 'added',
+    'fix', 'fixes', 'fixing', 'fixed',
+    'update', 'updates', 'updating', 'updated',
+    'implement', 'implements', 'implementing', 'implemented',
+    'refactor', 'refactors', 'refactoring', 'refactored',
+    'remove', 'removes', 'removing', 'removed',
+    'delete', 'deletes', 'deleting', 'deleted',
+    'move', 'moves', 'moving', 'moved',
+    'rename', 'renames', 'renaming', 'renamed',
+    'optimize', 'optimise', 'optimizes', 'optimising',
+    'install', 'installs', 'installing', 'installed',
+    'run', 'runs', 'running',
+    'build', 'builds', 'building', 'built',
+    'generate', 'generates', 'generating', 'generated',
+    'write', 'writes', 'writing', 'wrote',
+    'read', 'reads', 'reading',
+    'show', 'shows', 'list', 'lists', 'listing',
+    'edit', 'edits', 'editing',
+    'change', 'changes', 'changing', 'changed',
+    'modify', 'modifies', 'modifying', 'modified',
+    'review', 'apply', 'revert', 'rollback', 'merge', 'split',
+    'migrate', 'migrates', 'migrating', 'migrated',
+    'convert', 'converts', 'converting', 'converted',
+    'extract', 'extracts', 'extracting', 'extracted',
+    'deploy', 'deploys', 'deploying', 'deployed',
+    'test', 'tests', 'testing', 'tested',
+    'check', 'checks', 'checking', 'checked',
+    'verify', 'verifies', 'verifying', 'verified',
+    'analyze', 'analyse', 'analyzes', 'analysing',
+    'configure', 'configures', 'configuring', 'configured',
+    'debug', 'debugs', 'debugging', 'debugged',
+    'scaffold', 'scaffolds', 'scaffolding',
+    'bootstrap', 'bootstraps', 'bootstrapping',
+    'init', 'initialize', 'initialise', 'initializing',
+    'set up', 'setup', 'set-up',
+  ].join('|') + ')\\b',
+)
+
+// Engineering deliverables — when one of these is named, treat it as
+// a thing the agent should build / inspect / change.
+const DELIVERABLE_NOUN_REGEX = new RegExp(
+  '\\b(?:' + [
+    // pages / sites
+    'landing', 'site', 'website', 'pagina', 'page', 'home', 'homepage',
+    'frontend', 'backend', 'fullstack', 'app', 'webapp', 'mobile app',
+    // UI parts
+    'componente', 'component', 'modal', 'dialog', 'card', 'hero', 'cta',
+    'header', 'footer', 'nav', 'navbar', 'menu', 'sidebar', 'tab', 'tabs',
+    'botao', 'button', 'form', 'input', 'dropdown', 'select', 'tooltip',
+    'tabela', 'table', 'lista', 'list', 'grid', 'gallery', 'carousel',
+    'banner', 'badge', 'avatar', 'spinner', 'toast', 'snackbar', 'drawer',
+    // backend parts
+    'api', 'endpoint', 'rota', 'route', 'router', 'controller', 'handler',
+    'middleware', 'service', 'servico', 'worker', 'job', 'cron',
+    'queue', 'webhook', 'rpc', 'graphql', 'rest', 'grpc',
+    // data
+    'schema', 'model', 'entity', 'repository', 'dao', 'dto', 'migration',
+    'seed', 'tabela', 'table', 'campo', 'field', 'coluna', 'column',
+    'banco', 'database', 'index', 'indice', 'query', 'view', 'trigger',
+    // language constructs
+    'funcao', 'function', 'metodo', 'method', 'classe', 'class', 'modulo', 'module',
+    'interface', 'type', 'enum', 'trait', 'struct', 'protocol', 'mixin',
+    'hook', 'provider', 'adapter', 'factory',
+    // files / structure
+    'arquivo', 'file', 'pasta', 'folder', 'diretorio', 'directory',
+    'package', 'pacote', 'crate', 'gem',
+    // tests
+    'teste', 'test', 'spec', 'unit test', 'e2e', 'integration test',
+    // infra / tooling
+    'docker', 'dockerfile', 'kubernetes', 'k8s', 'helm', 'terraform',
+    'ci', 'cd', 'pipeline', 'workflow', 'github action', 'gitlab ci',
+    'monorepo', 'workspace', 'turborepo', 'nx',
+    // problems
+    'bug', 'erro', 'error', 'crash', 'memory leak', 'race condition',
+    'flaky', 'timeout', 'regressao', 'regression',
+    // features
+    'feature', 'funcionalidade', 'fluxo', 'flow', 'pipeline', 'integracao', 'integration',
+    'auth', 'login', 'signup', 'logout', 'session', 'oauth', 'sso',
+    'pagamento', 'payment', 'checkout', 'cart', 'carrinho',
+    'dashboard', 'admin', 'painel', 'profile', 'perfil', 'settings',
+    'config', 'env', 'envvar',
+  ].join('|') + ')\\b',
+)
+
+// Repo-shaped paths: "src/foo.ts", "apps/electron/...", "main.go", "Dockerfile".
+const REPO_PATH_REGEX =
+  /(?:\b(?:src|apps|packages|tests?|specs?|lib|cmd|internal|pkg|cmd|service|services|components?|pages|routes|app)\/|\b[A-Za-z0-9_-]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|html|json|md|mdx|yml|yaml|toml|go|py|rs|java|kt|kts|cs|rb|php|swift|dart|vue|svelte|sql|sh|bat|ps1|dockerfile)\b)/i
 
 export function parsePlanResult(text: string, originalObjective: string): PlanResultMessage | null {
   const xmlMatch = text.match(/<plan_result>([\s\S]*?)<\/plan_result>/i)

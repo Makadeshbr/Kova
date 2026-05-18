@@ -166,6 +166,82 @@ describe('OpenAICompatibleProvider', () => {
       expect(result.thought).toContain('Done.')
     })
 
+    // Anti-phantom-file regression: tool-capable models often include code
+    // blocks as EXAMPLES in explanations. Writing those to disk silently
+    // generates garbage files. Bare-block extraction must be gated by
+    // `capabilities().supportsToolCalls === false`.
+    it('does NOT extract bare code blocks when the model supports tool calls', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: [
+                'Sure, the gist is:',
+                '',
+                '```typescript',
+                'export function add(a: number, b: number) { return a + b }',
+                '```',
+                '',
+                'Use that pattern in your codebase.',
+              ].join('\n'),
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { total_tokens: 80 },
+        }),
+        text: async () => '',
+      } as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      // kimi-k2.6 matches a CAPABILITY_RULE with supportsToolCalls: true.
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'kimi-k2.6' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'explain how to add two numbers' }],
+        { system: 'be helpful', tools: AGENT_TOOLS, executor },
+      )
+
+      // Crucial: no phantom file created from the explanation code block.
+      expect(result.changes).toEqual([])
+      expect(executor.getChanges()).toEqual([])
+    })
+
+    it('DOES extract bare blocks for models without tool support (legacy fallback)', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: [
+                '```javascript',
+                '// utils.js',
+                'export const sum = (a, b) => a + b',
+                '```',
+              ].join('\n'),
+            },
+            finish_reason: 'stop',
+          }],
+          usage: { total_tokens: 50 },
+        }),
+        text: async () => '',
+      } as Response)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const executor = new ToolExecutor(projectRoot)
+      // Unknown model ID → detectCapabilities returns supportsToolCalls: false.
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'legacy-non-tool-model' })
+      const result = await provider.runAgentLoop(
+        [{ role: 'user', content: 'create utils.js with sum' }],
+        { system: 'be helpful', tools: AGENT_TOOLS, executor },
+      )
+
+      // For tool-less models, bare blocks are the only way to ship files.
+      expect(result.changes.length).toBeGreaterThan(0)
+    })
+
     it('ignora blocos genericos quando o pedido lista caminhos reais', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,

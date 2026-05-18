@@ -26,6 +26,8 @@ export interface TerminalSession {
   pty: import('@lydell/node-pty').IPty
   outputBuf: string
   exitCode: number | null
+  persistent: boolean
+  stopping: boolean
 }
 
 export interface InteractiveResult {
@@ -39,6 +41,8 @@ export interface InteractiveResult {
   cwd?: string
   diagnostics?: string[]
 }
+
+export type ServerReadinessProbe = (url: string) => Promise<boolean>
 
 const INTERACTIVE_ALLOWLIST = new Set([
   'gh', 'git', 'npm', 'npx', 'pnpm', 'yarn', 'bun',
@@ -67,7 +71,8 @@ const PERSISTENT_READY_PATTERNS = [
   /\bvite\b.*\bready\b/i,
 ]
 
-const PERSISTENT_START_GRACE_MS = 2_500
+const PERSISTENT_START_GRACE_MS = 10_000
+const WINDOWS_BATCH_TERMINATE_PROMPT = /(?:terminate batch job|finalizar o arquivo em lotes)\s*\([^)]*\)\?/i
 
 export class TerminalManager {
   private sessions = new Map<string, TerminalSession>()
@@ -78,7 +83,10 @@ export class TerminalManager {
     reject: (err: Error) => void
   }>()
 
-  constructor(private readonly ptyImpl = pty) {}
+  constructor(
+    private readonly ptyImpl = pty,
+    private readonly serverProbe: ServerReadinessProbe = defaultServerProbe,
+  ) {}
 
   setWebContents(wc: WebContents): void {
     this.webContents = wc
@@ -165,7 +173,21 @@ export class TerminalManager {
   }
 
   writeInput(id: string, data: string): void {
-    this.sessions.get(id)?.pty.write(data)
+    const session = this.sessions.get(id)
+    if (!session) return
+
+    if (session.persistent && process.platform === 'win32') {
+      if (data === '\x03') {
+        this.stopSession(session, 'interrupt')
+        return
+      }
+      if (WINDOWS_BATCH_TERMINATE_PROMPT.test(session.outputBuf) && /^[sSyY](?:\r|\n|\r\n)?$/.test(data)) {
+        this.stopSession(session, 'batch-confirm')
+        return
+      }
+    }
+
+    session.pty.write(data)
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -178,8 +200,7 @@ export class TerminalManager {
   kill(id: string): void {
     const session = this.sessions.get(id)
     if (session) {
-      this.killProcessTree(session)
-      this.sessions.delete(id)
+      this.stopSession(session, 'user')
     }
   }
 
@@ -224,13 +245,53 @@ export class TerminalManager {
 
       let outputBuf = ''
       let settled = false
+      let probing = false
       let readyTimer: NodeJS.Timeout | null = null
+      let retryTimer: NodeJS.Timeout | null = null
       const persistent = options.persistent === true
       const settle = (result: InteractiveResult): void => {
         if (settled) return
         settled = true
         if (readyTimer) clearTimeout(readyTimer)
+        if (retryTimer) clearTimeout(retryTimer)
         resolve(result)
+      }
+      const scheduleReadyRetry = (): void => {
+        if (settled || retryTimer) return
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          trySettlePersistentReady()
+        }, 500)
+        if (typeof retryTimer.unref === 'function') retryTimer.unref()
+      }
+      const trySettlePersistentReady = (): void => {
+        if (!persistent || probing || settled || !PERSISTENT_READY_PATTERNS.some(pattern => pattern.test(outputBuf))) return
+        probing = true
+        const meta = analyzePersistentOutput(outputBuf)
+        const probe = meta.url ? this.serverProbe(meta.url) : Promise.resolve(meta.ready)
+        probe
+          .then((isReachable) => {
+            probing = false
+            if (!isReachable || settled) {
+              if (!settled) scheduleReadyRetry()
+              return
+            }
+            settle({
+              exitCode: 0,
+              output: outputBuf,
+              sessionId: id,
+              persistent: true,
+              ready: true,
+              url: meta.url,
+              port: meta.port,
+              cwd,
+              diagnostics: meta.diagnostics,
+            })
+          })
+          .catch(() => {
+            probing = false
+            scheduleReadyRetry()
+          })
       }
 
       const ptyProcess = this.ptyImpl.spawn(shell, args, {
@@ -244,7 +305,7 @@ export class TerminalManager {
       })
 
       const session: TerminalSession = {
-        id, command, cwd, pty: ptyProcess, outputBuf, exitCode: null,
+        id, command, cwd, pty: ptyProcess, outputBuf, exitCode: null, persistent, stopping: false,
       }
       this.sessions.set(id, session)
 
@@ -257,11 +318,11 @@ export class TerminalManager {
             output: outputBuf || `Persistent command started in Kova terminal: ${command}`,
             sessionId: id,
             persistent: true,
-            ready: meta.ready,
+            ready: false,
             url: meta.url,
             port: meta.port,
             cwd,
-            diagnostics: meta.diagnostics,
+            diagnostics: meta.url ? [...meta.diagnostics, 'readiness_probe_failed'] : meta.diagnostics,
           })
         }, PERSISTENT_START_GRACE_MS)
         if (typeof readyTimer.unref === 'function') readyTimer.unref()
@@ -272,20 +333,7 @@ export class TerminalManager {
         if (outputBuf.length > 100_000) outputBuf = outputBuf.slice(-100_000)
         session.outputBuf = outputBuf
         this.webContents?.send('kova:terminal-data', { id, data })
-        if (persistent && PERSISTENT_READY_PATTERNS.some(pattern => pattern.test(outputBuf))) {
-          const meta = analyzePersistentOutput(outputBuf)
-          settle({
-            exitCode: 0,
-            output: outputBuf,
-            sessionId: id,
-            persistent: true,
-            ready: true,
-            url: meta.url,
-            port: meta.port,
-            cwd,
-            diagnostics: meta.diagnostics,
-          })
-        }
+        trySettlePersistentReady()
       })
 
       ptyProcess.onExit(({ exitCode }) => {
@@ -313,9 +361,42 @@ export class TerminalManager {
     }
     try { session.pty.kill() } catch { /* ignore */ }
   }
+
+  private stopSession(session: TerminalSession, reason: 'interrupt' | 'batch-confirm' | 'user'): void {
+    if (session.stopping) return
+    session.stopping = true
+    const label = reason === 'interrupt'
+      ? 'interrupt received'
+      : reason === 'batch-confirm'
+        ? 'Windows batch termination confirmed'
+        : 'stop requested'
+    this.webContents?.send('kova:terminal-data', {
+      id: session.id,
+      data: `\r\n[Kova] ${label}; stopping process tree...\r\n`,
+    })
+    this.killProcessTree(session)
+  }
 }
 
 export const terminalManager = new TerminalManager()
+
+async function defaultServerProbe(url: string): Promise<boolean> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1_500)
+  if (typeof timeout.unref === 'function') timeout.unref()
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    return response.status < 500
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
 export function analyzePersistentOutput(output: string): Omit<ServerSessionInfo, 'persistent' | 'command' | 'cwd'> {
   const url = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0]

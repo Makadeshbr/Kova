@@ -531,6 +531,61 @@ describe('ExecutionEngine — Contract enforcement', () => {
     expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
   })
 
+  /**
+   * Hallucination early-exit (FIX — anti-repair-loop):
+   * When iteration 0 produces zero changes AND zero tool calls, the model
+   * either refused the request or hallucinated something off-topic (e.g. the
+   * "Dear Client, your file is under review" reply). Repairing this re-feeds
+   * the same misunderstanding 5x. The engine must exit immediately, with a
+   * clear reason and exactly one iteration recorded.
+   */
+  it('exits immediately when iteration 0 has zero changes and zero tool calls (no repair loop)', async () => {
+    const agentExecute = vi.fn().mockResolvedValue({
+      mode: 'unified',
+      thought: 'Subject: Update Regarding Your File...',
+      changes: [],
+      tokensUsed: 50,
+    })
+    const deps = makeDeps({ agent: { execute: agentExecute } })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 5,   // generous — proves the early-exit, not the cap
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('feature-task', { type: 'feature' }))
+
+    expect(state.status).toBe('failed')
+    expect(state.iterationHistory.length).toBe(1)
+    expect(agentExecute).toHaveBeenCalledTimes(1)
+    const last = state.iterationHistory.at(-1)!
+    expect(last.decision.decision).toBe('reject')
+    expect(last.decision.reason).toMatch(/no file changes and called no tools/i)
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('still allows repair loop when iteration 0 made tool calls but no final changes', async () => {
+    // Distinguishes "model is genuinely trying but failing" from "model hallucinated".
+    // Tool calls are the signal that the model understood the request — repair is worth attempting.
+    let call = 0
+    const agentExecute = vi.fn().mockImplementation(async (_t: unknown, _c: unknown, _mode: string, options: { onToolCall?: (n: string, i: Record<string, unknown>) => void }) => {
+      call++
+      if (call === 1) {
+        // Simulate the agent calling a tool (read_file) but ultimately not writing.
+        options.onToolCall?.('read_file', { path: 'src/app.ts' })
+        return { mode: 'unified', thought: 'I inspected the file but could not decide', changes: [], tokensUsed: 20 }
+      }
+      return { mode: 'fix', thought: 'second try', changes: [{ path: 'src/app.ts', type: 'modify' as const, diff: 'const x = 2' }], tokensUsed: 20 }
+    })
+    const deps = makeDeps({ agent: { execute: agentExecute } })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 3, autoApply: true, skipPlan: true }))
+    const state = await engine.run(makeTask('feature-task', { type: 'feature' }))
+
+    // At least 2 iterations: first inspected but produced nothing, second wrote changes.
+    expect(agentExecute.mock.calls.length).toBeGreaterThanOrEqual(2)
+    // Final status depends on harness pass — important is that repair happened.
+    expect(state.iterationHistory.length).toBeGreaterThanOrEqual(2)
+  })
+
   it('rejects implementation when explicitly required files are missing', async () => {
     const deps = makeDeps({
       agent: {

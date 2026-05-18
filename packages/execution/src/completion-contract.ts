@@ -29,7 +29,7 @@ export function buildCompletionProof(
   const validationsRun = commandsRun.filter(isValidationCommand)
   const serverSessions = extractServerSessions(trace)
   const claims = extractClaims(thought)
-  const items = requirements.map(req => evaluateRequirement(req, { changedFiles, commandsRun, validationsRun, serverSessions, claims }))
+  const items = requirements.map(req => evaluateRequirement(req, { changedFiles, commandsRun, validationsRun, serverSessions, claims }, changes))
 
   return {
     requirements,
@@ -60,6 +60,14 @@ export function inferCompletionRequirements(objective: string, thought = ''): Co
   for (const command of extractRequestedCommands(objective)) {
     add(isDevServerCommand(command) ? 'dev_server' : 'command', command, `Requested command ${command}`, 'user_request')
   }
+  if (isFrontendCreationObjective(objective)) {
+    add(
+      'artifact_quality',
+      'frontend_landing_page',
+      'Frontend page must be complete, styled, responsive, and relevant to the requested product',
+      'contract',
+    )
+  }
   for (const claim of extractClaims(thought)) {
     if (/build|test|lint|typecheck|validat/i.test(claim)) add('validation', claim, `Claimed validation: ${claim}`, 'agent_claim')
     else if (/server|servidor|localhost|porta|port/i.test(claim)) add('dev_server', claim, `Claimed server: ${claim}`, 'agent_claim')
@@ -72,6 +80,7 @@ export function inferCompletionRequirements(objective: string, thought = ''): Co
 function evaluateRequirement(
   req: CompletionRequirement,
   proof: Pick<CompletionProof, 'changedFiles' | 'commandsRun' | 'validationsRun' | 'serverSessions' | 'claims'>,
+  changes: FileChange[],
 ): CompletionProofItem {
   if (req.kind === 'file') {
     const satisfied = proof.changedFiles.includes(normalizeProjectPath(req.value))
@@ -118,6 +127,18 @@ function evaluateRequirement(
       fixable: true,
       blocking: req.required,
       reason: ready ? undefined : `Dev server was requested or claimed but no ready persistent session was proven: ${req.value}`,
+    }
+  }
+
+  if (req.kind === 'artifact_quality') {
+    const quality = evaluateFrontendArtifactQuality(changes)
+    return {
+      requirementId: req.id,
+      satisfied: quality.passed,
+      evidence: quality.evidence,
+      fixable: true,
+      blocking: req.required,
+      reason: quality.passed ? undefined : quality.reason,
     }
   }
 
@@ -174,16 +195,144 @@ function parseServerSessionFromToolResult(result: string): ServerSessionInfo | n
   const sessionId = result.match(/\((term-[^)]+)\)/)?.[1]
   const url = result.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0]
   const port = url?.match(/:(\d+)/)?.[1]
+  const ready = parseReadyFlag(result)
+  const diagnostics = result.match(/\bdiagnostics=([^\n]+)/i)?.[1]
+    ?.split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
   return {
     sessionId,
     command: 'run_interactive_command',
     cwd: '',
     persistent: true,
-    ready: /ready|local:|localhost|127\.0\.0\.1/i.test(result),
+    ready,
     url,
     port: port ? Number(port) : undefined,
+    diagnostics,
   }
 }
+
+function parseReadyFlag(result: string): boolean {
+  const explicit = result.match(/\bready=(true|false)\b/i)?.[1]
+  if (explicit) return explicit.toLowerCase() === 'true'
+  return /\bready\b|\blocal:\s*https?:\/\/|localhost|127\.0\.0\.1/i.test(result)
+}
+
+function isFrontendCreationObjective(objective: string): boolean {
+  return /\b(?:landing|site|website|pagina|p[aá]gina|frontend|home page|homepage|hero)\b/i.test(objective)
+}
+
+/**
+ * Frontend artifact quality — stack-agnostic.
+ *
+ * The original heuristic required raw CSS signals (`@media`, `clamp()`,
+ * `minmax()`) to prove responsiveness. That rejected valid output from
+ * enterprise stacks: Tailwind, CSS-in-JS, framework components, container
+ * queries, etc. New rules detect responsive intent across CSS, Tailwind,
+ * styled-components, MUI/Chakra-style prop systems, AND raw CSS — matching
+ * what Claude Code / Cursor / Codex produce in practice.
+ *
+ * The check is intentionally permissive on form (any responsive evidence
+ * counts) but strict on substance (page structure + meaningful styling +
+ * real content). False positives are acceptable — the agent already
+ * produced something; the user reviews the diff.
+ */
+function evaluateFrontendArtifactQuality(
+  changes: FileChange[],
+): { passed: boolean; evidence?: string; reason?: string } {
+  const relevant = changes.filter(
+    change => /\.(?:html|css|scss|sass|less|js|jsx|ts|tsx|vue|svelte|astro|mjs)$/i.test(change.path)
+      && change.type !== 'delete',
+  )
+  if (relevant.length === 0) {
+    return { passed: false, reason: 'Frontend artifact produced no HTML/CSS/JS/TS files.' }
+  }
+
+  const content = relevant.map(change => change.diff ?? '').join('\n')
+  const lowered = content.toLowerCase()
+  const paths = relevant.map(change => change.path)
+
+  const hasStructure = relevant.some(
+    change => /\.(?:html|jsx|tsx|vue|svelte|astro)$/i.test(change.path),
+  )
+  const hasStyles = STYLING_SIGNAL_REGEX.test(content)
+  const semanticHits = (lowered.match(SEMANTIC_LANDING_REGEX) ?? []).length
+  const responsive = RESPONSIVE_SIGNAL_REGEX.test(content)
+  const interactiveOrCta = CTA_SIGNAL_REGEX.test(content)
+  const enoughSubstance = lowered.replace(/\s+/g, '').length >= 1200
+
+  const missing: string[] = []
+  if (!hasStructure) missing.push('page structure')
+  if (!hasStyles) missing.push('real styling')
+  if (semanticHits < 4) missing.push('semantic landing sections')
+  if (!responsive) missing.push('responsive layout')
+  if (!interactiveOrCta) missing.push('CTA/action affordance')
+  if (!enoughSubstance) missing.push('implementation substance')
+
+  return missing.length === 0
+    ? { passed: true, evidence: `frontend artifact quality proven in ${paths.join(', ')}` }
+    : { passed: false, reason: `Frontend artifact is too incomplete for a landing page: missing ${missing.join(', ')}.` }
+}
+
+// Styling evidence — raw CSS, Tailwind utilities, CSS-in-JS, framework props.
+// Any one of these is enough to consider the page "styled".
+const STYLING_SIGNAL_REGEX = new RegExp([
+  // raw CSS
+  '@media',
+  'display\\s*:\\s*(?:grid|flex)',
+  'grid-template',
+  'flex(?:-wrap|-direction|-grow|-shrink|-basis|-flow)',
+  'clamp\\(',
+  'minmax\\(',
+  'var\\(--',
+  'rem\\b',
+  'vh\\b',
+  'vw\\b',
+  // Tailwind / utility classes
+  'class(?:Name)?=["\'][^"\']*(?:flex|grid|md:|lg:|sm:|xl:|2xl:|container|p[xytrbl]?-|m[xytrbl]?-|gap-|space-[xy]-|w-|h-|text-|bg-|rounded|shadow)',
+  // CSS-in-JS / styled-components
+  'styled\\.',
+  '\\bcss`',
+  'sx=\\{',
+  // Tailwind-style className prop strings with multiple utilities
+].join('|'), 'i')
+
+// Responsive intent — broad coverage across stacks.
+const RESPONSIVE_SIGNAL_REGEX = new RegExp([
+  // raw CSS responsive
+  '@media',
+  '@container',
+  'clamp\\(',
+  'minmax\\(',
+  'grid-template',
+  'flex-wrap',
+  'container-type',
+  'aspect-ratio',
+  // Tailwind responsive prefixes
+  '\\b(?:sm|md|lg|xl|2xl):',
+  // fluid units
+  '\\bvw\\b',
+  '\\bvh\\b',
+  'svh\\b',
+  'dvh\\b',
+  // common responsive prop systems (Chakra/MUI/etc)
+  '\\b(?:useMediaQuery|useBreakpointValue|useResponsive)\\b',
+  // viewport meta tag
+  'name=["\']viewport["\']',
+].join('|'), 'i')
+
+// Semantic landing markers — content + sections + page primitives.
+const SEMANTIC_LANDING_REGEX =
+  /<(?:header|main|section|article|nav|footer|aside)\b|\bhero\b|\bcta\b|\bfeatures?\b|\bservices?\b|\bbenef[ií]cios?\b|\bdepoimentos?\b|\btestimonials?\b|\bpricing\b|\bfaq\b|\bcontact\b|\bcontato\b/g
+
+// CTA / action affordance.
+const CTA_SIGNAL_REGEX = new RegExp([
+  '<button\\b',
+  '<a\\s+[^>]*href',
+  'class(?:Name)?=["\'][^"\']*(?:cta|button|btn)',
+  '\\b(?:comece|explore|ver|jogar|comprar|saiba mais|cadastr|entrar|login|signup|sign up|get started|start|play|try (?:now|free)|contact)\\b',
+  '<(?:Button|CTA|Link)\\b', // React-component CTAs
+].join('|'), 'i')
 
 function isValidationCommand(command: string): boolean {
   return /\b(build|test|typecheck|tsc|lint|check)\b/i.test(command)

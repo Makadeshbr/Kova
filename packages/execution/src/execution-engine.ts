@@ -465,6 +465,16 @@ export class ExecutionEngine {
     // it to create/fix/refactor code and no files were changed.
     if (codeOutput.changes.length === 0) {
       const textOnlyAllowed = task.type === 'docs'
+      const isFirstIteration = this.state!.currentIteration === 0
+      // Hallucination signature: first iteration produced neither file changes
+      // NOR any tool inspections, AND the task is not docs. Repairing this
+      // produces 5x the same misunderstanding (history poisons each retry).
+      // Exit cleanly so the user sees one clear failure instead of a long loop.
+      const hallucinated =
+        isFirstIteration &&
+        !textOnlyAllowed &&
+        completionTrace.toolCalls.length === 0
+
       const emptyHarness = textOnlyAllowed
         ? buildTextOnlySuccessHarness(this.state!.currentIteration + 1)
         : buildMissingChangesHarness(this.state!.currentIteration + 1)
@@ -474,16 +484,40 @@ export class ExecutionEngine {
             reason: 'No file changes — text-only response',
             feedback: [],
           }
+        : hallucinated
+        ? {
+            decision: 'reject',
+            score: 0,
+            reason:
+              'Model produced no file changes and called no tools. The request may not have been understood, or the active model does not support tool calling. Try rephrasing as a concrete imperative ("crie X", "adicione Y") or switch to a tool-capable model in Settings.',
+            feedback: [],
+          }
         : {
             decision: 'reject',
             score: 0,
             reason: 'Implementation task produced no file changes',
             feedback: [],
           }
-      this.state = withIteration(this.state!, buildRecord(this.state!.currentIteration, codeOutput, emptyHarness, emptyDecision, context, iterStart))
+
+      this.state = withIteration(
+        this.state!,
+        buildRecord(this.state!.currentIteration, codeOutput, emptyHarness, emptyDecision, context, iterStart),
+      )
       this.emit()
+
       if (textOnlyAllowed) {
         this.state = withStatus(this.state!, 'completed')
+        this.emit()
+      } else if (hallucinated) {
+        // Force-fail before the loop can retry. shouldStop() returns 'aborted'
+        // when status === 'failed', which exits cleanly without rollback.
+        this.event({
+          type: 'agent_completed',
+          mode: 'unified',
+          message:
+            'Model produced no tool calls — request may have been misunderstood. Aborting before repair loop.',
+        })
+        this.state = withStatus(this.state!, 'failed')
         this.emit()
       }
       return emptyDecision
@@ -669,14 +703,20 @@ function serverSessionFromToolResult(result: string): ServerSessionInfo | undefi
   const sessionId = result.match(/\((term-[^)]+)\)/)?.[1]
   const url = result.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0]
   const port = url?.match(/:(\d+)/)?.[1]
+  const readyFlag = result.match(/\bready=(true|false)\b/i)?.[1]
+  const diagnostics = result.match(/\bdiagnostics=([^\n]+)/i)?.[1]
+    ?.split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
   return {
     sessionId,
     command: 'run_interactive_command',
     cwd: '',
     persistent: true,
-    ready: /ready|local:|localhost|127\.0\.0\.1/i.test(result),
+    ready: readyFlag ? readyFlag.toLowerCase() === 'true' : /\bready\b|\blocal:\s*https?:\/\/|localhost|127\.0\.0\.1/i.test(result),
     url,
     port: port ? Number(port) : undefined,
+    diagnostics,
   }
 }
 

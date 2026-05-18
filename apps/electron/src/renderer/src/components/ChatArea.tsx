@@ -8,6 +8,7 @@ import { TodoListCard } from './TodoListCard'
 import { getValidationConfidenceCopy } from '../lib/validation-confidence-copy'
 import { contextualStatusLabel } from '../lib/status-context'
 import { shouldRenderFloatingResultCard } from '../lib/chat-ordering'
+import kovaLogo from '../assets/Logo_Kova.png'
 
 // Per-attachment cap (10 MB) and per-message cap (50 MB total). Enforced
 // renderer-side AND main-side so a malicious renderer can't bypass the limit.
@@ -940,7 +941,30 @@ export function ChatArea({
 
         {isEmpty && (
           <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-            <div style={{ fontSize: 30, fontWeight: 800, color: 'var(--amber)', letterSpacing: '0.12em' }}>KOVA</div>
+            <div style={{
+              width: 82,
+              height: 82,
+              borderRadius: 18,
+              display: 'grid',
+              placeItems: 'center',
+              background: 'linear-gradient(180deg, rgba(116, 211, 255, 0.10), rgba(9, 11, 13, 0.12))',
+              border: '1px solid rgba(116, 211, 255, 0.16)',
+              boxShadow: '0 18px 54px rgba(0, 0, 0, 0.34)',
+            }}>
+              <img
+                src={kovaLogo}
+                alt=""
+                aria-hidden="true"
+                style={{
+                  width: 62,
+                  height: 62,
+                  objectFit: 'contain',
+                  filter: 'invert(1) brightness(0.88) drop-shadow(0 0 18px rgba(116, 211, 255, 0.22))',
+                  opacity: 0.92,
+                }}
+              />
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--cyan)', letterSpacing: '0.12em' }}>KOVA</div>
             <p style={{ color: 'var(--text-3)', fontSize: 13, textAlign: 'center', lineHeight: 1.8, maxWidth: 340 }}>
               {projectRoot
                 ? 'Ask, analyze, or request to create and fix code.'

@@ -212,6 +212,19 @@ export class EngineManager {
       return
     }
 
+    // Deterministic short-circuit — "devo testar agora?" after applied changes.
+    // Runs BEFORE mode inference so the deterministic reply fires regardless of
+    // whether the message phrasing would route to chat or patch. Avoids burning
+    // a provider call when we already know the answer from session state.
+    const deterministicReply = buildTestingFollowupReply(resolution.userContent, history)
+    if (deterministicReply) {
+      const tokens = estimateMessagesTokens([{ role: 'assistant', content: deterministicReply }])
+      this.emit({ type: 'token', token: deterministicReply })
+      this.emit({ type: 'token_usage', message: `${tokens} tokens`, tokensUsed: tokens })
+      this.emit({ type: 'stream_end' })
+      return
+    }
+
     let resolution2: ProviderResolution | null
     try {
       resolution2 = await this.providerFactory(params, this.onModelDetected ?? undefined)
@@ -269,7 +282,9 @@ export class EngineManager {
       await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments)
       return
     }
-    const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter)
+    const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter, {
+      signal: this.sessionAbort.signal,
+    })
     this.onStructured?.(task)
     // FIX-001: Patch mode receives history so the agent has memory of prior turns
     // ("now add X to the file you just created" requires knowing what was created).
@@ -305,13 +320,8 @@ export class EngineManager {
     let streamEndEmitted = false
     const reasoning = createReasoningEmitter((event) => this.emit(event))
     try {
-      const deterministicReply = buildTestingFollowupReply(userContent, history)
-      if (deterministicReply) {
-        const tokens = estimateMessagesTokens([{ role: 'assistant', content: deterministicReply }])
-        this.emit({ type: 'token', token: deterministicReply })
-        this.emit({ type: 'token_usage', message: `${tokens} tokens`, tokensUsed: tokens })
-        return
-      }
+      // Deterministic testing-followup reply is now handled at the top of
+      // sendMessageWithMode (works in all modes). No duplicate check here.
 
       let content = userContent
       if (params.includeProjectContext !== false && (history.length === 0 || !history.some(h => h.role === 'assistant'))) {
@@ -332,16 +342,32 @@ export class EngineManager {
       const messages: AgentMessage[] = [...history, { role: 'user', content, ...(attachments ? { attachments } : {}) }]
       reasoning.start()
       let usageReported = false
+      // Chat mode runs the agent with READ_ONLY_TOOLS so the model can grep,
+      // glob, and read files when the user's question depends on actual code
+      // state. Edit/bash are denied by READ_ONLY_PERMISSION_POLICY so the
+      // session remains side-effect-free. Without tools the model would refuse
+      // honestly ("I cannot inspect files") even when context promised access —
+      // a UX bug that surfaced as "ele me disse que não pode rodar comandos".
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
-        tools: [],
+        tools: READ_ONLY_TOOLS,
         executor: new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY),
-        maxTurns: 1,
+        maxTurns: 6,
         signal,
         onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: delta => reasoning.delta(delta),
         onReasoningEnd: () => reasoning.end(),
+        onToolCall: (name, input) => {
+          const preview = String(input.path ?? input.dir ?? input.pattern ?? name)
+          this.emit({ type: 'tool_call', toolName: name, toolInput: input, message: preview })
+        },
+        onToolResult: (name, result) => this.emit({
+          type: 'tool_result',
+          toolName: name,
+          message: result.slice(0, 2_000),
+          toolOutput: result.slice(0, 20_000),
+        }),
         onUsageReport: report => {
           usageReported = true
           this.emit(usageEventFromReport(report))

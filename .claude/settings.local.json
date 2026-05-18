@@ -122,7 +122,20 @@
       "WebFetch(domain:github.com)",
       "Bash(mkdir -p docs/archive)",
       "Bash(git mv *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(pnpm -F @kova/agent test --run --reporter=dot)",
+      "Bash(pnpm -F @kova/agent run test -- --run --reporter=dot)",
+      "Bash(pnpm -F kova-electron run test -- --run __tests__/session-prompts.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/session-prompts.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/session-prompts.test.ts __tests__/engine-manager.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/engine-manager.test.ts)",
+      "Bash(pnpm -F @kova/execution run test)",
+      "Bash(pnpm -F @kova/agent run test -- __tests__/openai-compatible.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/task-structurer.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/task-structurer.test.ts __tests__/engine-manager.test.ts)",
+      "Bash(pnpm -F @kova/electron run test -- __tests__/provider-resolver.test.ts __tests__/provider-fallback-e2e.test.ts)",
+      "Bash(pnpm -F @kova/execution run test -- __tests__/completion-contract.test.ts)",
+      "Bash(pnpm -F @kova/electron run build)"
     ]
   }
 }

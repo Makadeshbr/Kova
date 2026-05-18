@@ -131,10 +131,12 @@ const PERSISTENT_READY_PATTERNS = [
   /\bwebpack compiled\b/i,
   /\bvite\b.*\bready\b/i
 ];
-const PERSISTENT_START_GRACE_MS = 2500;
+const PERSISTENT_START_GRACE_MS = 1e4;
+const WINDOWS_BATCH_TERMINATE_PROMPT = /(?:terminate batch job|finalizar o arquivo em lotes)\s*\([^)]*\)\?/i;
 class TerminalManager {
-  constructor(ptyImpl = pty) {
+  constructor(ptyImpl = pty, serverProbe = defaultServerProbe) {
     this.ptyImpl = ptyImpl;
+    this.serverProbe = serverProbe;
   }
   sessions = /* @__PURE__ */ new Map();
   webContents = null;
@@ -209,7 +211,19 @@ class TerminalManager {
     });
   }
   writeInput(id, data) {
-    this.sessions.get(id)?.pty.write(data);
+    const session = this.sessions.get(id);
+    if (!session) return;
+    if (session.persistent && process.platform === "win32") {
+      if (data === "") {
+        this.stopSession(session, "interrupt");
+        return;
+      }
+      if (WINDOWS_BATCH_TERMINATE_PROMPT.test(session.outputBuf) && /^[sSyY](?:\r|\n|\r\n)?$/.test(data)) {
+        this.stopSession(session, "batch-confirm");
+        return;
+      }
+    }
+    session.pty.write(data);
   }
   resize(id, cols, rows) {
     const session = this.sessions.get(id);
@@ -223,8 +237,7 @@ class TerminalManager {
   kill(id) {
     const session = this.sessions.get(id);
     if (session) {
-      this.killProcessTree(session);
-      this.sessions.delete(id);
+      this.stopSession(session, "user");
     }
   }
   approveInteractive(id, approved) {
@@ -257,13 +270,51 @@ class TerminalManager {
       const args = process.platform === "win32" ? ["/c", command] : ["-c", command];
       let outputBuf = "";
       let settled = false;
+      let probing = false;
       let readyTimer = null;
+      let retryTimer = null;
       const persistent = options.persistent === true;
       const settle = (result) => {
         if (settled) return;
         settled = true;
         if (readyTimer) clearTimeout(readyTimer);
+        if (retryTimer) clearTimeout(retryTimer);
         resolve2(result);
+      };
+      const scheduleReadyRetry = () => {
+        if (settled || retryTimer) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          trySettlePersistentReady();
+        }, 500);
+        if (typeof retryTimer.unref === "function") retryTimer.unref();
+      };
+      const trySettlePersistentReady = () => {
+        if (!persistent || probing || settled || !PERSISTENT_READY_PATTERNS.some((pattern) => pattern.test(outputBuf))) return;
+        probing = true;
+        const meta = analyzePersistentOutput(outputBuf);
+        const probe = meta.url ? this.serverProbe(meta.url) : Promise.resolve(meta.ready);
+        probe.then((isReachable) => {
+          probing = false;
+          if (!isReachable || settled) {
+            if (!settled) scheduleReadyRetry();
+            return;
+          }
+          settle({
+            exitCode: 0,
+            output: outputBuf,
+            sessionId: id,
+            persistent: true,
+            ready: true,
+            url: meta.url,
+            port: meta.port,
+            cwd,
+            diagnostics: meta.diagnostics
+          });
+        }).catch(() => {
+          probing = false;
+          scheduleReadyRetry();
+        });
       };
       const ptyProcess = this.ptyImpl.spawn(shell, args, {
         name: "xterm-color",
@@ -280,7 +331,9 @@ class TerminalManager {
         cwd,
         pty: ptyProcess,
         outputBuf,
-        exitCode: null
+        exitCode: null,
+        persistent,
+        stopping: false
       };
       this.sessions.set(id, session);
       this.webContents?.send("kova:terminal-started", { id, command, cwd });
@@ -292,11 +345,11 @@ class TerminalManager {
             output: outputBuf || `Persistent command started in Kova terminal: ${command}`,
             sessionId: id,
             persistent: true,
-            ready: meta.ready,
+            ready: false,
             url: meta.url,
             port: meta.port,
             cwd,
-            diagnostics: meta.diagnostics
+            diagnostics: meta.url ? [...meta.diagnostics, "readiness_probe_failed"] : meta.diagnostics
           });
         }, PERSISTENT_START_GRACE_MS);
         if (typeof readyTimer.unref === "function") readyTimer.unref();
@@ -306,20 +359,7 @@ class TerminalManager {
         if (outputBuf.length > 1e5) outputBuf = outputBuf.slice(-1e5);
         session.outputBuf = outputBuf;
         this.webContents?.send("kova:terminal-data", { id, data });
-        if (persistent && PERSISTENT_READY_PATTERNS.some((pattern) => pattern.test(outputBuf))) {
-          const meta = analyzePersistentOutput(outputBuf);
-          settle({
-            exitCode: 0,
-            output: outputBuf,
-            sessionId: id,
-            persistent: true,
-            ready: true,
-            url: meta.url,
-            port: meta.port,
-            cwd,
-            diagnostics: meta.diagnostics
-          });
-        }
+        trySettlePersistentReady();
       });
       ptyProcess.onExit(({ exitCode }) => {
         session.exitCode = exitCode;
@@ -353,8 +393,37 @@ class TerminalManager {
     } catch {
     }
   }
+  stopSession(session, reason) {
+    if (session.stopping) return;
+    session.stopping = true;
+    const label = reason === "interrupt" ? "interrupt received" : reason === "batch-confirm" ? "Windows batch termination confirmed" : "stop requested";
+    this.webContents?.send("kova:terminal-data", {
+      id: session.id,
+      data: `\r
+[Kova] ${label}; stopping process tree...\r
+`
+    });
+    this.killProcessTree(session);
+  }
 }
 const terminalManager = new TerminalManager();
+async function defaultServerProbe(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  if (typeof timeout.unref === "function") timeout.unref();
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal
+    });
+    return response.status < 500;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function analyzePersistentOutput(output) {
   const url = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s]*/i)?.[0];
   const portMatch = url?.match(/:(\d+)/) ?? output.match(/\b(?:port|porta)\s+(\d{2,5})\b/i);
@@ -521,18 +590,33 @@ function deniedRefsMessage(resolution) {
   return `Cannot read ${files}. Environment files may contain secrets and are never attached to context. Use an example file like @.env.example if you want to share variable names without sensitive values.`;
 }
 function chatOnlyPrompt(stack) {
-  return `You are a senior software engineer helping with this project.
-Stack: ${stack}.
+  return `You are a senior software engineer answering questions about this project.
+Stack adapter: ${stack}.
 
-Rules:
-- Answer directly. Never introduce yourself, never list your capabilities, never say your name.
-- No emojis. No bullet-point capability lists. No "OBS:" disclaimers. No marketing phrases.
-- If the user says "oi", "hi", or similar — just reply naturally in one short sentence, like a colleague would.
-- If asked what you can do, answer briefly and concretely based on the project context.
+Behavior:
+- Answer directly. Never introduce yourself, list capabilities, or use emojis.
+- Reply in the same language the user writes in. Keep replies concise.
+- For greetings, reply naturally in one short sentence like a colleague would.
 - Use provided file context when present. If a file reference was denied, say why briefly.
-- You are running inside the Kova desktop app with project workspace access during implementation tasks. If conversation history says files were changed or applied, treat that as real workspace state. Never claim you cannot create or modify files after Kova already applied a task.
-- Do not resume older tasks unless the user explicitly asks.
-- Respond in the same language the user writes in.`;
+- If conversation history says files were changed/applied, treat that as the real workspace state.
+
+Tools available in this mode (read-only — no file writes, no shell commands):
+- read_file — inspect a file before answering when the answer depends on its contents.
+- list_files — list a directory to orient the user.
+- grep_codebase — locate a symbol, usage, or pattern. ALWAYS prefer this over describing where something "should" be.
+- glob_files — list files matching a glob.
+
+How to use tools:
+- Use a tool when the user's question depends on actual code state. Don't guess.
+- Don't call tools for greetings, definitions, or general "how does X work" questions.
+- A short sentence before a tool call is fine. Avoid long monologues.
+
+When the user asks you to BUILD, CREATE, MODIFY, or RUN something:
+- You are in read-only mode and cannot do that here.
+- Briefly say so in one sentence and suggest they rephrase as a direct request
+  ("crie X", "adicione Y", "rode Z") — Kova will route that to the implementation engine.
+
+Do not resume older tasks unless the user explicitly asks.`;
 }
 function reviewOnlyPrompt(stack) {
   return `You are Kova in Review Mode, a read-only senior code reviewer.
@@ -611,51 +695,482 @@ function inferRunMode(message, explicit) {
 }
 function isConversationalMessage(message) {
   const normalized = normalizeText(message);
-  const exact = /* @__PURE__ */ new Set([
-    "oi",
-    "ola",
-    "opa",
-    "hello",
-    "hi",
-    "hey",
-    "bom dia",
-    "boa tarde",
-    "boa noite",
-    "obrigado",
-    "obrigada",
-    "thanks",
-    "valeu",
-    "entendi",
-    "ok",
-    "sim",
-    "nao",
-    "certo",
-    "perfeito",
-    "legal",
-    "nao entendi",
-    "pode repetir"
-  ]);
-  if (exact.has(normalized)) return true;
-  if (/^(como|o que|oque|pra que|para que|por que|porque|quando|onde|quem|qual|quais|me diz|me fala|me explica|what|how|why|when|where|who|which)\b/.test(normalized)) return true;
-  if (/^(explique|explica|explain|explica|descreva|describe|resuma|resume|me conte|conta|summarize)\b/.test(normalized)) return true;
-  if (/^(responde|responda|me responde|fala|fale|me fala|escreve|escreva|answer|respond|reply|speak|write|talk)\s+(em|in|usando|using|com|de forma|de modo)\b/.test(normalized)) return true;
-  if (/\b(em portugues|em ingles|em espanhol|in english|in portuguese|in spanish|in french|em frances)\b/.test(normalized)) return true;
-  if (/^(seja|seja mais|aja como|se comporte|be more|be a|act as|use (formal|informal|simple|technical))\b/.test(normalized)) return true;
-  if (/^(muda (o idioma|para|de idioma)|switch (language|to)|change (language|to))\b/.test(normalized)) return true;
-  if (normalized.endsWith("?")) {
-    const imperativeStart = /^(crie|adicione|corrija|implemente|altere|refatore|remova|delete|mova|atualize|configure|instale|execute|rode|gere|escreva|migre|cria|adiciona|corrige|implementa|fix|add|create|update|implement|remove|optimize|install|run|build|generate|write|migrate)\b/;
-    if (!imperativeStart.test(normalized)) return true;
-  }
-  if (looksLikeEngineeringTask(normalized)) return false;
-  if (/^(oi|ola|opa|hello|hi|hey|bom dia|boa tarde|boa noite)([\s,!.?]|$)/.test(normalized)) return true;
-  return normalized.length > 0 && normalized.length < 12;
+  if (!normalized) return false;
+  if (EXACT_CHAT_PHRASES.has(normalized)) return true;
+  if (META_INSTRUCTION_REGEX.test(normalized)) return true;
+  if (ACTION_VERB_REGEX.test(normalized)) return false;
+  if (REPO_PATH_REGEX.test(normalized)) return false;
+  if (DEFINITIONAL_QUESTION_REGEX.test(normalized)) return true;
+  if (DELIVERABLE_NOUN_REGEX.test(normalized)) return false;
+  if (QUESTION_STARTER_REGEX.test(normalized)) return true;
+  if (EXPLANATION_REQUEST_REGEX.test(normalized)) return true;
+  if (normalized.endsWith("?")) return true;
+  if (GREETING_PREFIX_REGEX.test(normalized) && normalized.length < 30) return true;
+  return normalized.length < 12;
 }
 function normalizeText(text) {
   return text.trim().toLowerCase().normalize("NFD").replace(new RegExp("\\p{Diacritic}", "gu"), "");
 }
-function looksLikeEngineeringTask(text) {
-  return /(adicione|corrija|implemente|crie|altere|refatore|teste|valide|remova|delete|mova|renomeie|atualize|otimize|resolva|analise|verifique|configure|instale|execute|rode|builde|faca|faz|melhore|ajuste|arrume|mostre|liste|leia|escreva|gere|extraia|converta|migre|depure|debugue|fix|add|create|update|implement|refactor|remove|move|rename|optimize|resolve|analyze|verify|configure|install|run|build|generate|extract|convert|migrate|debug|deploy|test|write|read|show|list|edit|change|modify|check|review|apply|revert|rollback|merge|split|set|bug|erro|error|feature|endpoint|funcao|function|metodo|method|classe|class|modulo|module|arquivo|file|api|rota|route|pagina|page|componente|component|servico|service|banco|database|tabela|table|campo|field|coluna|indice|index|query|schema|model|controller|handler|middleware|hook|provider|adapter|factory|repository|entity|dto|interface|type|enum|const|var|import|export|package|depend|config|env|docker|ci|cd|pipeline|deploy|src\/|apps\/|packages\/|tests\/|spec\/|lib\/|cmd\/|internal\/|\.\w{1,5}$)/.test(text);
-}
+const EXACT_CHAT_PHRASES = /* @__PURE__ */ new Set([
+  "oi",
+  "ola",
+  "opa",
+  "hello",
+  "hi",
+  "hey",
+  "yo",
+  "eai",
+  "e ai",
+  "bom dia",
+  "boa tarde",
+  "boa noite",
+  "good morning",
+  "good afternoon",
+  "good evening",
+  "obrigado",
+  "obrigada",
+  "thanks",
+  "thank you",
+  "valeu",
+  "entendi",
+  "ok",
+  "okay",
+  "sim",
+  "nao",
+  "no",
+  "yes",
+  "certo",
+  "perfeito",
+  "legal",
+  "nao entendi",
+  "pode repetir",
+  "tudo bem",
+  "beleza"
+]);
+const META_INSTRUCTION_REGEX = new RegExp([
+  // "responde em portugues", "answer in english"
+  `^(?:responde|responda|me responde|fala|fale|me fala|escreve|escreva|`,
+  `answer|respond|reply|speak|write|talk)\\s+(?:em|in|usando|using|com|de forma|de modo)\\b`,
+  "|",
+  // bare "em portugues" / "in english" anywhere
+  `\\b(?:em portugues|em ingles|em espanhol|em frances|em italiano|em alemao|`,
+  `in english|in portuguese|in spanish|in french|in italian|in german)\\b`,
+  "|",
+  // persona / tone changes
+  `^(?:seja|seja mais|aja como|se comporte|be more|be a|act as|`,
+  `use (?:formal|informal|simple|technical))\\b`,
+  "|",
+  // language switch
+  `^(?:muda (?:o idioma|para|de idioma)|switch (?:language|to)|change (?:language|to))\\b`
+].join(""));
+const QUESTION_STARTER_REGEX = /^(?:como|o que|oque|pra que|para que|por que|porque|quando|onde|quem|qual|quais|me diz|me fala|me explica|what|how|why|when|where|who|which)\b/;
+const DEFINITIONAL_QUESTION_REGEX = /^(?:o que (?:e|eh)\b|que (?:e|eh)\b|what(?:'?s| is| are| does)\b|whats\b|para que serve\b|qual a (?:diferenca|definicao|funcao)\b)/;
+const EXPLANATION_REQUEST_REGEX = /^(?:explique|explica|explain|descreva|describe|resuma|resume|me conte|conta|summarize|tldr|tl;dr)\b/;
+const GREETING_PREFIX_REGEX = /^(?:oi|ola|opa|hello|hi|hey|bom dia|boa tarde|boa noite|good (?:morning|afternoon|evening))(?:[\s,!.?]|$)/;
+const ACTION_VERB_REGEX = new RegExp(
+  "\\b(?:" + [
+    // pt-BR — write/create
+    "cri[aeio]r?",
+    "ger[aeio]r?",
+    "gere",
+    "gera",
+    "escrev[aeio]r?",
+    "escreve",
+    "adicion[aeio]r?",
+    "inclu[aio]r?",
+    // pt-BR — modify
+    "alter[aeio]r?",
+    "mud[aeio]r?",
+    "modific[aeio]r?",
+    "edit[aeio]r?",
+    "refator[aeio]r?",
+    "reescrev[aeio]r?",
+    "atualiz[aeio]r?",
+    // pt-BR — fix
+    "corrig[ieo]r?",
+    "corrij[ao]",
+    "consert[aeio]r?",
+    "resolv[aeio]r?",
+    "arrum[aeio]r?",
+    "ajust[aeio]r?",
+    "debug(?:a|o|ar|ue)",
+    "depur[aeio]r?",
+    // pt-BR — remove / move
+    "remov[aeio]r?",
+    "apag[aeio]r?",
+    "delet[aeio]r?",
+    "exclu[aio]r?",
+    "mov[aeio]r?",
+    "renome[aio]r?",
+    "extra[ieo]r?",
+    // pt-BR — run / install / build
+    "rod[aeio]r?",
+    "execut[aeio]r?",
+    "instal[aeio]r?",
+    "build",
+    "compil[aeio]r?",
+    "test[aeio]r?",
+    "valid[aeio]r?",
+    "verific[aeio]r?",
+    "check?[aeio]?r?",
+    "analis[aeio]r?",
+    "configur[aeio]r?",
+    "otimiz[aeio]r?",
+    "melhor[aeio]r?",
+    // pt-BR — show / list (read-with-intent)
+    "mostr[aeio]r?",
+    "list[aeio]r?",
+    "lei[aeio]r?",
+    "le[r]?",
+    "busc[aeio]r?",
+    "procur[aeio]r?",
+    // pt-BR — implement / do
+    "implement[aeio]r?",
+    "faze[r]?",
+    "fa[cç][aeio]r?",
+    "fa[cç]o",
+    // pt-BR — deploy / migrate / convert
+    "deploy[aeio]r?",
+    "migr[aeio]r?",
+    "migre",
+    "convert[aeio]r?",
+    // English
+    "create",
+    "creates",
+    "creating",
+    "created",
+    "add",
+    "adds",
+    "adding",
+    "added",
+    "fix",
+    "fixes",
+    "fixing",
+    "fixed",
+    "update",
+    "updates",
+    "updating",
+    "updated",
+    "implement",
+    "implements",
+    "implementing",
+    "implemented",
+    "refactor",
+    "refactors",
+    "refactoring",
+    "refactored",
+    "remove",
+    "removes",
+    "removing",
+    "removed",
+    "delete",
+    "deletes",
+    "deleting",
+    "deleted",
+    "move",
+    "moves",
+    "moving",
+    "moved",
+    "rename",
+    "renames",
+    "renaming",
+    "renamed",
+    "optimize",
+    "optimise",
+    "optimizes",
+    "optimising",
+    "install",
+    "installs",
+    "installing",
+    "installed",
+    "run",
+    "runs",
+    "running",
+    "build",
+    "builds",
+    "building",
+    "built",
+    "generate",
+    "generates",
+    "generating",
+    "generated",
+    "write",
+    "writes",
+    "writing",
+    "wrote",
+    "read",
+    "reads",
+    "reading",
+    "show",
+    "shows",
+    "list",
+    "lists",
+    "listing",
+    "edit",
+    "edits",
+    "editing",
+    "change",
+    "changes",
+    "changing",
+    "changed",
+    "modify",
+    "modifies",
+    "modifying",
+    "modified",
+    "review",
+    "apply",
+    "revert",
+    "rollback",
+    "merge",
+    "split",
+    "migrate",
+    "migrates",
+    "migrating",
+    "migrated",
+    "convert",
+    "converts",
+    "converting",
+    "converted",
+    "extract",
+    "extracts",
+    "extracting",
+    "extracted",
+    "deploy",
+    "deploys",
+    "deploying",
+    "deployed",
+    "test",
+    "tests",
+    "testing",
+    "tested",
+    "check",
+    "checks",
+    "checking",
+    "checked",
+    "verify",
+    "verifies",
+    "verifying",
+    "verified",
+    "analyze",
+    "analyse",
+    "analyzes",
+    "analysing",
+    "configure",
+    "configures",
+    "configuring",
+    "configured",
+    "debug",
+    "debugs",
+    "debugging",
+    "debugged",
+    "scaffold",
+    "scaffolds",
+    "scaffolding",
+    "bootstrap",
+    "bootstraps",
+    "bootstrapping",
+    "init",
+    "initialize",
+    "initialise",
+    "initializing",
+    "set up",
+    "setup",
+    "set-up"
+  ].join("|") + ")\\b"
+);
+const DELIVERABLE_NOUN_REGEX = new RegExp(
+  "\\b(?:" + [
+    // pages / sites
+    "landing",
+    "site",
+    "website",
+    "pagina",
+    "page",
+    "home",
+    "homepage",
+    "frontend",
+    "backend",
+    "fullstack",
+    "app",
+    "webapp",
+    "mobile app",
+    // UI parts
+    "componente",
+    "component",
+    "modal",
+    "dialog",
+    "card",
+    "hero",
+    "cta",
+    "header",
+    "footer",
+    "nav",
+    "navbar",
+    "menu",
+    "sidebar",
+    "tab",
+    "tabs",
+    "botao",
+    "button",
+    "form",
+    "input",
+    "dropdown",
+    "select",
+    "tooltip",
+    "tabela",
+    "table",
+    "lista",
+    "list",
+    "grid",
+    "gallery",
+    "carousel",
+    "banner",
+    "badge",
+    "avatar",
+    "spinner",
+    "toast",
+    "snackbar",
+    "drawer",
+    // backend parts
+    "api",
+    "endpoint",
+    "rota",
+    "route",
+    "router",
+    "controller",
+    "handler",
+    "middleware",
+    "service",
+    "servico",
+    "worker",
+    "job",
+    "cron",
+    "queue",
+    "webhook",
+    "rpc",
+    "graphql",
+    "rest",
+    "grpc",
+    // data
+    "schema",
+    "model",
+    "entity",
+    "repository",
+    "dao",
+    "dto",
+    "migration",
+    "seed",
+    "tabela",
+    "table",
+    "campo",
+    "field",
+    "coluna",
+    "column",
+    "banco",
+    "database",
+    "index",
+    "indice",
+    "query",
+    "view",
+    "trigger",
+    // language constructs
+    "funcao",
+    "function",
+    "metodo",
+    "method",
+    "classe",
+    "class",
+    "modulo",
+    "module",
+    "interface",
+    "type",
+    "enum",
+    "trait",
+    "struct",
+    "protocol",
+    "mixin",
+    "hook",
+    "provider",
+    "adapter",
+    "factory",
+    // files / structure
+    "arquivo",
+    "file",
+    "pasta",
+    "folder",
+    "diretorio",
+    "directory",
+    "package",
+    "pacote",
+    "crate",
+    "gem",
+    // tests
+    "teste",
+    "test",
+    "spec",
+    "unit test",
+    "e2e",
+    "integration test",
+    // infra / tooling
+    "docker",
+    "dockerfile",
+    "kubernetes",
+    "k8s",
+    "helm",
+    "terraform",
+    "ci",
+    "cd",
+    "pipeline",
+    "workflow",
+    "github action",
+    "gitlab ci",
+    "monorepo",
+    "workspace",
+    "turborepo",
+    "nx",
+    // problems
+    "bug",
+    "erro",
+    "error",
+    "crash",
+    "memory leak",
+    "race condition",
+    "flaky",
+    "timeout",
+    "regressao",
+    "regression",
+    // features
+    "feature",
+    "funcionalidade",
+    "fluxo",
+    "flow",
+    "pipeline",
+    "integracao",
+    "integration",
+    "auth",
+    "login",
+    "signup",
+    "logout",
+    "session",
+    "oauth",
+    "sso",
+    "pagamento",
+    "payment",
+    "checkout",
+    "cart",
+    "carrinho",
+    "dashboard",
+    "admin",
+    "painel",
+    "profile",
+    "perfil",
+    "settings",
+    "config",
+    "env",
+    "envvar"
+  ].join("|") + ")\\b"
+);
+const REPO_PATH_REGEX = /(?:\b(?:src|apps|packages|tests?|specs?|lib|cmd|internal|pkg|cmd|service|services|components?|pages|routes|app)\/|\b[A-Za-z0-9_-]+\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|html|json|md|mdx|yml|yaml|toml|go|py|rs|java|kt|kts|cs|rb|php|swift|dart|vue|svelte|sql|sh|bat|ps1|dockerfile)\b)/i;
 function parsePlanResult(text, originalObjective) {
   const xmlMatch = text.match(/<plan_result>([\s\S]*?)<\/plan_result>/i);
   if (!xmlMatch) return null;
@@ -959,7 +1474,7 @@ async function buildProvider(params, onModelDetected) {
   if (resolved && onModelDetected) onModelDetected(model);
   const usedFallback = !safeConfigured && !resolved && !!presetFallback;
   return {
-    provider: new agent.OpenAICompatibleProvider({ apiKey: apiKey || providerName, baseUrl, model, extraBody }),
+    provider: new agent.OpenAICompatibleProvider({ apiKey: apiKey || void 0, baseUrl, model, extraBody }),
     resolvedProvider: providerName,
     resolvedModel: model,
     fallback: usedFallback || !!safeConfigured && resolved !== safeConfigured,
@@ -1000,18 +1515,41 @@ async function tryFallbackProvider(ctx) {
 function resolveFallbackApiKey(fallbackProvider, settings) {
   return fallbackProvider === "anthropic" ? settings.anthropicKey : fallbackProvider === "openai" ? settings.openaiKey : fallbackProvider === "deepseek" ? settings.deepseekKey : fallbackProvider === "openrouter" ? settings.openrouterKey : fallbackProvider === "kimi" ? settings.kimiKey : fallbackProvider === "gemini" ? settings.geminiKey : fallbackProvider === "xai" ? settings.xaiKey : fallbackProvider === "openai-compatible" ? settings.openaiCompatibleKey : "";
 }
-async function buildPatchTask(objective, provider, projectRoot, adapter) {
+const STRUCTURE_TIMEOUT_MS = 3e4;
+async function buildPatchTask(objective, provider, projectRoot, adapter, options = {}) {
+  const fallback = buildFallbackTask(objective.split("\n")[0].slice(0, 120), adapter.name);
+  if (looksLikeScaffoldingRequest(objective)) return fallback;
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), STRUCTURE_TIMEOUT_MS);
+  const composedSignal = options.signal ? AbortSignal.any([options.signal, timeoutController.signal]) : timeoutController.signal;
   try {
     const structured = await execution.structureTask(objective, {
       root: projectRoot,
       stackAdapter: adapter.name,
       affectedFiles: [],
-      llm: provider
+      llm: wrapWithSignal(provider, composedSignal)
     });
     if (structured.valid) return structured.task;
   } catch {
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return buildFallbackTask(objective.split("\n")[0].slice(0, 120), adapter.name);
+  return fallback;
+}
+function wrapWithSignal(provider, signal) {
+  return {
+    async generate(messages, opts) {
+      if (signal.aborted) throw new Error("structuring aborted");
+      return provider.generate(messages, opts);
+    }
+  };
+}
+function looksLikeScaffoldingRequest(objective) {
+  const normalized = objective.toLowerCase().normalize("NFD").replace(new RegExp("\\p{Diacritic}", "gu"), "");
+  const hasCreateVerb = /\b(?:cri[aeio]r?|gere|gerar?|scaffold|bootstrap|generate|build|create|make|setup|set up)\b/.test(normalized);
+  if (!hasCreateVerb) return false;
+  const hasDeliverable = /\b(?:landing|site|website|pagina|page|app|webapp|dockerfile|component|projeto|project|dashboard|admin)\b/.test(normalized);
+  return hasDeliverable;
 }
 class LruCache {
   constructor(capacity) {
@@ -1184,6 +1722,14 @@ class EngineManager {
       this.emit({ type: "stream_end" });
       return;
     }
+    const deterministicReply = buildTestingFollowupReply(resolution.userContent, history);
+    if (deterministicReply) {
+      const tokens = estimateMessagesTokens([{ role: "assistant", content: deterministicReply }]);
+      this.emit({ type: "token", token: deterministicReply });
+      this.emit({ type: "token_usage", message: `${tokens} tokens`, tokensUsed: tokens });
+      this.emit({ type: "stream_end" });
+      return;
+    }
     let resolution2;
     try {
       resolution2 = await this.providerFactory(params, this.onModelDetected ?? void 0);
@@ -1234,7 +1780,9 @@ class EngineManager {
       await this.runReviewSession(resolution.userContent, history, provider, projectRoot, adapter, params, this.sessionAbort.signal, explicitFiles, attachments);
       return;
     }
-    const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter);
+    const task = await buildPatchTask(resolution.userContent, provider, projectRoot, adapter, {
+      signal: this.sessionAbort.signal
+    });
     this.onStructured?.(task);
     await this.runUnifiedSession(
       resolution.userContent,
@@ -1254,13 +1802,6 @@ class EngineManager {
     let streamEndEmitted = false;
     const reasoning = createReasoningEmitter((event) => this.emit(event));
     try {
-      const deterministicReply = buildTestingFollowupReply(userContent, history);
-      if (deterministicReply) {
-        const tokens = estimateMessagesTokens([{ role: "assistant", content: deterministicReply }]);
-        this.emit({ type: "token", token: deterministicReply });
-        this.emit({ type: "token_usage", message: `${tokens} tokens`, tokensUsed: tokens });
-        return;
-      }
       let content = userContent;
       if (params.includeProjectContext !== false && (history.length === 0 || !history.some((h) => h.role === "assistant"))) {
         const contextEngine = this.getContextEngine(projectRoot, adapter);
@@ -1285,9 +1826,9 @@ ${f.content}
       let usageReported = false;
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
-        tools: [],
+        tools: agent.READ_ONLY_TOOLS,
         executor: new agent.ToolExecutor(projectRoot, signal, agent.READ_ONLY_PERMISSION_POLICY),
-        maxTurns: 1,
+        maxTurns: 6,
         signal,
         onToken: (t) => {
           reasoning.end();
@@ -1296,6 +1837,16 @@ ${f.content}
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: (delta) => reasoning.delta(delta),
         onReasoningEnd: () => reasoning.end(),
+        onToolCall: (name, input) => {
+          const preview = String(input.path ?? input.dir ?? input.pattern ?? name);
+          this.emit({ type: "tool_call", toolName: name, toolInput: input, message: preview });
+        },
+        onToolResult: (name, result) => this.emit({
+          type: "tool_result",
+          toolName: name,
+          message: result.slice(0, 2e3),
+          toolOutput: result.slice(0, 2e4)
+        }),
         onUsageReport: (report) => {
           usageReported = true;
           this.emit(usageEventFromReport(report));

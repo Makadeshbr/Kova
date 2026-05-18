@@ -59,6 +59,52 @@ function normalizeSessionUsage(usage: Partial<SessionUsage> | null | undefined):
   return { ...EMPTY_USAGE, ...(usage ?? {}) }
 }
 
+function appendServerExitEvent(
+  events: ExecutionEvent[],
+  task: TaskDefinition | null,
+  session: TerminalSessionInfo | undefined,
+  exitCode: number,
+): ExecutionEvent[] {
+  if (!task || !session || !looksLikeDevServerCommand(session.command)) return events
+  const lastMatchingEvent = [...events].reverse().find(event => event.serverSession?.sessionId === session.id)
+  if (lastMatchingEvent?.type === 'server_failed') return events
+  return [
+    ...events,
+    {
+      type: 'server_failed',
+      taskId: task.id,
+      timestamp: new Date().toISOString(),
+      message: `Dev server process exited with code ${exitCode}.`,
+      toolInput: { command: session.command },
+      serverSession: {
+        sessionId: session.id,
+        command: session.command,
+        cwd: session.cwd,
+        persistent: true,
+        ready: false,
+        diagnostics: [`process_exited:${exitCode}`],
+      },
+    },
+  ]
+}
+
+function looksLikeDevServerCommand(command: string): boolean {
+  const normalized = command.trim().toLowerCase()
+  return [
+    /^npm(?:\.cmd)?\s+run\s+dev\b/,
+    /^pnpm(?:\.cmd)?\s+(?:run\s+)?dev\b/,
+    /^yarn(?:\.cmd)?\s+dev\b/,
+    /^bun(?:\.cmd)?\s+dev\b/,
+    /^(?:npx\s+)?vite(?:\s|$)/,
+    /^(?:npx\s+)?next\s+dev\b/,
+    /^(?:npx\s+)?astro\s+dev\b/,
+    /^(?:npx\s+)?remix\s+dev\b/,
+    /^webpack\s+serve\b/,
+    /^python\s+manage\.py\s+runserver\b/,
+    /^rails\s+(?:s|server)\b/,
+  ].some(pattern => pattern.test(normalized))
+}
+
 export function App(): React.ReactElement {
   const [state, setState] = useState<AppState>({
     projectRoot: null, task: null, executionState: null, settings: null,
@@ -88,6 +134,7 @@ export function App(): React.ReactElement {
       setState(prev => ({
         ...prev,
         terminalSessions: prev.terminalSessions.map(s => s.id === id ? { ...s, exitCode } : s),
+        executionEvents: appendServerExitEvent(prev.executionEvents, prev.task, prev.terminalSessions.find(s => s.id === id), exitCode),
       }))
     })
     const unsubApproval = window.kova.onInteractiveRequest((id, command, reason) => {

@@ -1,4 +1,4 @@
-import { r as reactExports, j as jsxRuntimeExports } from "./index-RKXIy0lA.js";
+import { r as reactExports, j as jsxRuntimeExports } from "./index-CNXLlBun.js";
 var xterm = { exports: {} };
 var hasRequiredXterm;
 function requireXterm() {
@@ -6130,6 +6130,10 @@ function TerminalInstance({ sessionId, onClose }) {
       fit.fit();
     } catch {
     }
+    try {
+      term.focus();
+    } catch {
+    }
     termRef.current = term;
     fitRef.current = fit;
     term.onData((data) => {
@@ -6167,20 +6171,31 @@ function TerminalInstance({ sessionId, onClose }) {
           flexShrink: 0
         },
         children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-2)", fontFamily: "var(--font-mono)" }, children: "Terminal" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, minWidth: 0 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "var(--text-2)", fontFamily: "var(--font-mono)" }, children: "Terminal" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "var(--text-3)", whiteSpace: "nowrap" }, children: "interactive PTY" })
+          ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
               onClick: onClose,
               style: { background: "transparent", color: "var(--text-3)", fontSize: 14, padding: "2px 6px" },
-              title: "Close terminal",
-              children: "✕"
+              title: "Stop terminal session",
+              "aria-label": "Stop terminal session",
+              children: "x"
             }
           )
         ]
       }
     ),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: containerRef, style: { flex: 1, overflow: "hidden" } })
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        ref: containerRef,
+        onMouseDown: () => termRef.current?.focus(),
+        style: { flex: 1, overflow: "hidden" }
+      }
+    )
   ] });
 }
 function ApprovalDialog({ approval, onApprove }) {
