@@ -24,7 +24,7 @@ export interface UserCommand {
   attachments?: Attachment[]
 }
 
-const SLASH_PATTERN = /^\/(plan|review)\b\s*/i
+const SLASH_PATTERN = /^\/(plan|review|chat)\b\s*/i
 
 export function parseUserInput(raw: string, defaultMode: ChatMode, attachments?: Attachment[]): UserCommand {
   const trimmed = raw.trim()

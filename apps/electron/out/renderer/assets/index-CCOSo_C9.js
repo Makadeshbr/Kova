@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-BcIYtK7r.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./TerminalPanel-DbZy1oCb.js","./TerminalPanel-BKlWQB97.css"])))=>i.map(i=>d[i]);
 function getDefaultExportFromCjs(x) {
   return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, "default") ? x["default"] : x;
 }
@@ -12859,7 +12859,7 @@ function useSessionPersistence(opts) {
     window.kova.saveSession(projectRoot, session).catch(console.error);
   }, [messages, isThinking, executionState, sessionUsage, projectRoot, sessionId, task, executionEvents, todos]);
 }
-const SLASH_PATTERN = /^\/(plan|review)\b\s*/i;
+const SLASH_PATTERN = /^\/(plan|review|chat)\b\s*/i;
 function parseUserInput(raw, defaultMode, attachments) {
   const trimmed = raw.trim();
   const match = SLASH_PATTERN.exec(trimmed);
@@ -14352,7 +14352,8 @@ function AttachmentChip({ attachment, onRemove }) {
 }
 const SLASH_COMMANDS = [
   { cmd: "/plan", label: "Plan", detail: "Analyze and create a technical plan — no file changes" },
-  { cmd: "/review", label: "Review", detail: "Read-only code review with detailed findings" }
+  { cmd: "/review", label: "Review", detail: "Read-only code review with detailed findings" },
+  { cmd: "/chat", label: "Chat", detail: "Read-only Q&A — answer questions without touching files" }
 ];
 function SlashPalette({ query, onSelect }) {
   const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(query.toLowerCase()));
@@ -15078,6 +15079,7 @@ function ChatArea({
     if (!t && attachments.length === 0 || !projectRoot) return;
     if (/^\/plan(\s|$)/i.test(t)) onModeChange("plan");
     else if (/^\/review(\s|$)/i.test(t)) onModeChange("review");
+    else if (/^\/chat(\s|$)/i.test(t)) onModeChange("chat");
     onSend(t, void 0, attachments.length > 0 ? attachments : void 0);
     setValue("");
     setAttachments([]);
@@ -16715,7 +16717,7 @@ function ProviderModal({ settings, onSave, onClose }) {
     }
   );
 }
-const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-BcIYtK7r.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
+const TerminalPanel = React.lazy(() => __vitePreload(() => import("./TerminalPanel-DbZy1oCb.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url).then((m) => ({ default: m.TerminalPanel })));
 const EMPTY_REASONING = {
   active: false,
   text: "",

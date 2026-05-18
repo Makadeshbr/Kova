@@ -533,16 +533,18 @@ describe('ExecutionEngine — Contract enforcement', () => {
 
   /**
    * Hallucination early-exit (FIX — anti-repair-loop):
-   * When iteration 0 produces zero changes AND zero tool calls, the model
-   * either refused the request or hallucinated something off-topic (e.g. the
-   * "Dear Client, your file is under review" reply). Repairing this re-feeds
-   * the same misunderstanding 5x. The engine must exit immediately, with a
-   * clear reason and exactly one iteration recorded.
+   * When iteration 0 produces zero changes, zero tool calls, AND no substantive
+   * response, the model either refused the request or hallucinated something
+   * empty. Repairing this re-feeds the same misunderstanding 5x. The engine
+   * must exit immediately, with a clear reason and exactly one iteration recorded.
+   *
+   * Distinct from "analysis-only" follow-ups (model answered a question with
+   * substantive prose) — those are now treated as success in unified mode.
    */
-  it('exits immediately when iteration 0 has zero changes and zero tool calls (no repair loop)', async () => {
+  it('exits immediately when iteration 0 has zero changes, zero tools, and a near-empty response', async () => {
     const agentExecute = vi.fn().mockResolvedValue({
       mode: 'unified',
-      thought: 'Subject: Update Regarding Your File...',
+      thought: 'Done.',
       changes: [],
       tokensUsed: 50,
     })
@@ -559,7 +561,46 @@ describe('ExecutionEngine — Contract enforcement', () => {
     expect(agentExecute).toHaveBeenCalledTimes(1)
     const last = state.iterationHistory.at(-1)!
     expect(last.decision.decision).toBe('reject')
-    expect(last.decision.reason).toMatch(/no file changes and called no tools/i)
+    expect(last.decision.reason).toMatch(/no file changes/i)
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Analysis-only success: in unified (patch) mode, a follow-up question can
+   * be answered with substantive prose alone — that is a legitimate outcome,
+   * not hallucination. Sticky-mode routing means questions naturally land in
+   * patch mode without losing tool access, but the model still chooses prose
+   * when no implementation is needed.
+   */
+  it('treats a substantive text-only response as analysis success (no repair loop)', async () => {
+    const longAnswer =
+      'You can verify the build by running pnpm test in the package root. ' +
+      'The current configuration uses Vitest with the workspace defaults and ' +
+      'discovers files in __tests__. If something fails, run pnpm typecheck ' +
+      'to surface compiler errors before re-running the suite. The ChatArea ' +
+      'component is the entry point for the renderer and Vitest runs it under ' +
+      'jsdom by default. Use the focus filter (-t) to narrow scope.'
+    const agentExecute = vi.fn().mockResolvedValue({
+      mode: 'unified',
+      thought: longAnswer,
+      changes: [],
+      tokensUsed: 80,
+    })
+    const deps = makeDeps({ agent: { execute: agentExecute } })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 5,
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('feature-task', { type: 'feature' }))
+
+    // Substantive answer with no tools and no files should NOT trigger repair.
+    expect(state.status).toBe('completed')
+    expect(state.iterationHistory.length).toBe(1)
+    expect(agentExecute).toHaveBeenCalledTimes(1)
+    const last = state.iterationHistory.at(-1)!
+    expect(last.decision.decision).toBe('auto_apply')
+    expect(last.decision.reason).toMatch(/analysis-only/i)
     expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
   })
 

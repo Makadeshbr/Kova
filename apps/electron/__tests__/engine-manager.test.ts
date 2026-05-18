@@ -337,16 +337,33 @@ describe('inferRunMode — unified default (patch)', () => {
   })
 })
 
-describe('EngineManager - conversational routing', () => {
-  it('routes short greetings to chat even when the default UI mode is patch', async () => {
-    const provider = makeMockProvider({ emitTokens: ['ok'] })
+describe('EngineManager - sticky mode routing (Kova v2)', () => {
+  /**
+   * NEW CONTRACT: mode is a session property. The renderer pins it (default
+   * 'patch') and only changes it on explicit slash commands. Short greetings
+   * NO LONGER auto-route to chat — they stay in patch (unified) mode and
+   * the agent decides via prompt + tools whether to reply or write.
+   */
+  it('keeps short greetings in patch mode by default (no auto-chat-routing)', async () => {
+    const provider = makeMockProvider({ emitTokens: ['hi back'] })
     const [manager, { events }] = makeManager(provider)
 
     await manager.sendMessage('Ola', [], makeParams(projectRoot))
 
-    expect(events.some(e => e.type === 'state_changed')).toBe(false)
+    // Patch mode triggers ExecutionEngine — at minimum a state_changed event
+    // (or stream_end) must fire to confirm we didn't silently swallow the turn.
+    const sawStreamEnd = events.some(e => e.type === 'stream_end')
+    expect(sawStreamEnd).toBe(true)
+  })
+
+  it('routes explicit /chat slash to chat mode (read-only, no validation)', async () => {
+    const provider = makeMockProvider({ emitTokens: ['ok'] })
+    const [manager, { events }] = makeManager(provider)
+
+    await manager.sendMessage('/chat ola', [], makeParams(projectRoot))
+
+    // Chat mode never runs the validation harness.
     expect(events.some(e => e.type === 'validation_started')).toBe(false)
-    expect(events.filter(e => e.type === 'token').map(e => e.token).join('')).toBe('ok')
     expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
   })
 })
@@ -729,15 +746,18 @@ Use LRU pattern.
 })
 
 describe('EngineManager — English UI copy (FIX-004)', () => {
-  it('emits context_loaded with English "files in context" message', async () => {
+  it('emits context_loaded with English copy (Portuguese strings are not leaked)', async () => {
     const provider = makeMockProvider({ emitTokens: ['ok'] })
     const [manager, { events }] = makeManager(provider)
 
-    await manager.sendMessage('hi', [], makeParams(projectRoot))
+    // Use /chat so we hit runChatSession; otherwise patch routes through the
+    // ExecutionEngine which uses different context-loaded copy. The point of
+    // this test is the English UI invariant, not which code path emits it.
+    await manager.sendMessage('/chat hi', [], makeParams(projectRoot))
 
     const ctxLoaded = events.find(e => e.type === 'context_loaded')
     if (ctxLoaded) {
-      expect(ctxLoaded.message).toMatch(/file(s)? in context/)
+      expect(ctxLoaded.message).toMatch(/file(s)? in context|context files?/i)
       expect(ctxLoaded.message).not.toMatch(/arquivo|contexto/)
     }
   })

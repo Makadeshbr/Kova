@@ -18,7 +18,7 @@ import { adapterFromProjectProfile, detectStack } from '@kova/adapters'
 import { buildProjectProfile } from '@kova/project'
 import { resolveAtRefs, shouldShortCircuitDeniedRefs, deniedRefsMessage } from './at-refs'
 import type { ResolvedAtRefs } from './at-refs'
-import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, inferRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
+import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, resolveRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
 import type { KovaRunMode } from './session-prompts'
 import {
   buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
@@ -194,10 +194,10 @@ export class EngineManager {
     const { projectRoot } = params
     const profile = buildProjectProfile(projectRoot)
     const adapter = profile.confidence > 0 ? adapterFromProjectProfile(profile) : detectStack(projectRoot)
-    const mode = inferRunMode(message, params.mode)
-    const rawContent = mode === 'plan'
-      ? message.trim().replace(/^\/plan\s*/i, '').trim()
-      : message
+    const mode = resolveRunMode(message, params.mode)
+    // Strip the leading slash command so the model receives the actual request,
+    // not the routing token. Done uniformly for all slash-routed modes.
+    const rawContent = stripModeSlash(message, mode)
     const resolution = resolveAtRefs(rawContent, projectRoot)
 
     if (resolution.refs.length) this.emit({ type: 'tool_result', message: `@ ${resolution.refs.map(r => r.path).join(', ')}` })
@@ -872,6 +872,18 @@ function classifyProviderError(err: unknown): NonNullable<ExecutionEvent['provid
   if (msg.includes('404') && msg.includes('model')) return 'provider_model_not_found'
   if (msg.includes('fetch') || msg.includes('econnrefused') || msg.includes('network')) return 'provider_unavailable'
   return 'provider_unknown'
+}
+
+/**
+ * Removes a leading slash-command prefix (`/plan`, `/review`, `/chat`) so the
+ * model receives the actual user request, not the routing token. Patch mode
+ * has no slash, so the message passes through unchanged.
+ */
+function stripModeSlash(message: string, mode: KovaRunMode): string {
+  if (mode === 'plan')   return message.trim().replace(/^\/plan\s*/i, '').trim() || message.trim()
+  if (mode === 'review') return message.trim().replace(/^\/review\s*/i, '').trim() || message.trim()
+  if (mode === 'chat')   return message.trim().replace(/^\/chat\s*/i, '').trim() || message.trim()
+  return message
 }
 
 function mapResultDecision(

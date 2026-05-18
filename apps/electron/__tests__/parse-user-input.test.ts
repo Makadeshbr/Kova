@@ -21,9 +21,17 @@ describe('parseUserInput — slash commands', () => {
     expect(cmd.fromSlashCommand).toBe(true)
   })
 
+  it('routes /chat to chat mode regardless of defaultMode', () => {
+    const cmd = parseUserInput('/chat explain monads', 'patch')
+    expect(cmd.mode).toBe('chat')
+    expect(cmd.text).toBe('explain monads')
+    expect(cmd.fromSlashCommand).toBe(true)
+  })
+
   it('case-insensitive slash command matching', () => {
     expect(parseUserInput('/PLAN x', 'patch').mode).toBe('plan')
     expect(parseUserInput('/Review x', 'patch').mode).toBe('review')
+    expect(parseUserInput('/CHAT x', 'patch').mode).toBe('chat')
   })
 
   it('handles slash command with no body — preserves the slash itself', () => {

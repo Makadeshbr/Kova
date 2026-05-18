@@ -119,6 +119,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRe
 const SLASH_COMMANDS = [
   { cmd: '/plan',   label: 'Plan',   detail: 'Analyze and create a technical plan — no file changes' },
   { cmd: '/review', label: 'Review', detail: 'Read-only code review with detailed findings' },
+  { cmd: '/chat',   label: 'Chat',   detail: 'Read-only Q&A — answer questions without touching files' },
 ]
 
 function SlashPalette({ query, onSelect }: { query: string; onSelect: (cmd: string) => void }): React.ReactElement | null {
@@ -892,6 +893,7 @@ export function ChatArea({
     // the dispatch decision is owned by handleSend.
     if (/^\/plan(\s|$)/i.test(t)) onModeChange('plan')
     else if (/^\/review(\s|$)/i.test(t)) onModeChange('review')
+    else if (/^\/chat(\s|$)/i.test(t)) onModeChange('chat')
     onSend(t, undefined, attachments.length > 0 ? attachments : undefined)
     setValue('')
     setAttachments([])

@@ -102,34 +102,50 @@ EXAMPLE for "add login flow to existing React app":
 Now produce the plan for the user's request. Respond with ONLY the <plan_result> XML - no preamble, no exploration text.`
 }
 
-export function inferRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
-  // Explicit mode always wins — UI sends 'plan', 'review', or 'patch'; code may send 'chat'
-  if (explicit && explicit !== 'patch') return explicit
-  // Slash command prefixes in message text
-  if (/^\/plan(\s|$)/i.test(message.trim()))   return 'plan'
-  if (/^\/review(\s|$)/i.test(message.trim())) return 'review'
-  // Default: unified patch — model decides whether to write files or just respond
-  if (isConversationalMessage(message)) return 'chat'
+/**
+ * Mode resolution — Claude Code / Cursor / Codex parity.
+ *
+ * Mode is a SESSION property, not inferred per-message. The renderer pins a
+ * mode (default 'patch') and only changes it on explicit slash commands.
+ * Follow-up questions in a patch session stay in patch mode — the agent
+ * has tools and decides via tool use whether to read, answer, or write.
+ *
+ * Resolution order (first match wins):
+ *
+ *   1. Slash prefix in the message text (`/plan`, `/review`, `/chat`)
+ *      — always wins; lets users override the pinned mode for a single turn.
+ *   2. Explicit `params.mode` from the UI — respects the pinned mode the
+ *      renderer is showing.
+ *   3. Default — `patch` (unified, all tools). This is the safe choice for
+ *      everything except read-only modes, because the agent decides via
+ *      tools and prompt whether to write files or just respond.
+ *
+ * The prior `isConversationalMessage` heuristic that routed questions to
+ * chat-mode is no longer used here — it caused follow-ups to lose tool
+ * access exactly when context-grounded answers were needed.
+ */
+export function resolveRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
+  const trimmed = message.trim()
+  if (/^\/plan(\s|$)/i.test(trimmed))   return 'plan'
+  if (/^\/review(\s|$)/i.test(trimmed)) return 'review'
+  if (/^\/chat(\s|$)/i.test(trimmed))   return 'chat'
+  if (explicit === 'plan' || explicit === 'review' || explicit === 'chat') return explicit
   return 'patch'
 }
 
+/** @deprecated Kept for tests of the old contract — use {@link resolveRunMode}. */
+export function inferRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
+  return resolveRunMode(message, explicit)
+}
+
 /**
- * Mode routing — matches Claude Code / Cursor / Codex behaviour:
+ * Best-effort detection of "the user is just chatting" — not used for mode
+ * routing anymore (mode is sticky). Still exported because other parts of
+ * the system (e.g. memory ranking, telemetry) may want a soft signal of
+ * conversational vs implementation intent.
  *
- *   ENGINEERING SIGNAL WINS OVER QUESTION FORM.
- *
- * "Como criar uma landing page?" → patch (model gets tools, builds it)
- * "Pode adicionar um endpoint X?"  → patch
- * "O que é REST?"                  → chat   (pure curiosity, no deliverable)
- * "Como funciona o git rebase?"    → chat   (pure curiosity)
- * "Oi, tudo bem?"                  → chat   (greeting)
- * "responde em portugues"          → chat   (meta-instruction)
- *
- * The decision is: if the message names something to BUILD/FIX/INSPECT
- * (a deliverable + verb, or just an imperative), route to patch and let
- * the agent decide via tools. Only fall to chat for pure conversational
- * signals: greetings, affirmations, meta-instructions, and questions
- * that contain no engineering deliverable.
+ * Conservative: returns true only for unambiguous greetings, affirmations,
+ * meta-instructions, and definitional questions with no engineering noun.
  */
 export function isConversationalMessage(message: string): boolean {
   const normalized = normalizeText(message)

@@ -460,20 +460,45 @@ export class ExecutionEngine {
       reasoning.end()
     }
 
-    // Text-only response: valid for docs/explanations, but a hard product bug
-    // for implementation tasks. Kova must not say "done" when the user asked
-    // it to create/fix/refactor code and no files were changed.
+    // Empty / text-only response handling.
+    //
+    // Patch mode is unified — the model decides via tools + prompt whether to
+    // write files or just respond. A turn with zero file changes can mean
+    // three different things:
+    //
+    //   1. docs/analysis task        → success, the answer IS the deliverable
+    //   2. follow-up question        → success, model answered with substantive
+    //                                  text (and possibly read-tool inspections)
+    //   3. genuine hallucination     → fail fast, do NOT enter repair loop
+    //
+    // Old logic conflated cases 2 and 3 (any "no tools + no changes" was failure).
+    // That penalized natural Q&A follow-ups and produced the "I cannot modify
+    // files" UX. New logic distinguishes via two signals:
+    //   - did the model use any read tools (grep/glob/read/list)?
+    //   - is the response substantive (>=120 chars of cleaned text)?
     if (codeOutput.changes.length === 0) {
-      const textOnlyAllowed = task.type === 'docs'
       const isFirstIteration = this.state!.currentIteration === 0
-      // Hallucination signature: first iteration produced neither file changes
-      // NOR any tool inspections, AND the task is not docs. Repairing this
-      // produces 5x the same misunderstanding (history poisons each retry).
-      // Exit cleanly so the user sees one clear failure instead of a long loop.
+      const responseText = (codeOutput.thought ?? '').trim()
+      const hasSubstantiveResponse = responseText.length >= 120
+      const usedTools = completionTrace.toolCalls.length > 0
+
+      // Analysis-only success: the answer IS the deliverable. Accepted when:
+      //   - task is explicitly docs, OR
+      //   - the model produced a substantive prose response (Q&A follow-up).
+      // Tool calls alone are NOT sufficient — a model that read a file and
+      // produced no real answer is still "in progress" and should repair.
+      const textOnlyAllowed =
+        task.type === 'docs' ||
+        hasSubstantiveResponse
+
+      // True hallucination signature: first iteration, no tool calls, no
+      // substantive response, not a docs task. Anything past iteration 0
+      // is repair territory (model already had a real attempt with feedback).
       const hallucinated =
         isFirstIteration &&
-        !textOnlyAllowed &&
-        completionTrace.toolCalls.length === 0
+        task.type !== 'docs' &&
+        !usedTools &&
+        !hasSubstantiveResponse
 
       const emptyHarness = textOnlyAllowed
         ? buildTextOnlySuccessHarness(this.state!.currentIteration + 1)
@@ -481,7 +506,9 @@ export class ExecutionEngine {
       const emptyDecision: import('@kova/shared').DecisionResult = textOnlyAllowed
         ? {
             decision: 'auto_apply', score: 100,
-            reason: 'No file changes — text-only response',
+            reason: task.type === 'docs'
+              ? 'No file changes — text-only response'
+              : 'Analysis-only turn — model answered without modifying files',
             feedback: [],
           }
         : hallucinated
@@ -489,7 +516,7 @@ export class ExecutionEngine {
             decision: 'reject',
             score: 0,
             reason:
-              'Model produced no file changes and called no tools. The request may not have been understood, or the active model does not support tool calling. Try rephrasing as a concrete imperative ("crie X", "adicione Y") or switch to a tool-capable model in Settings.',
+              'Model produced no file changes, no tool calls, and no substantive response. Try rephrasing as a concrete imperative ("crie X", "adicione Y") or switch to a tool-capable model in Settings.',
             feedback: [],
           }
         : {
@@ -515,7 +542,7 @@ export class ExecutionEngine {
           type: 'agent_completed',
           mode: 'unified',
           message:
-            'Model produced no tool calls — request may have been misunderstood. Aborting before repair loop.',
+            'Model produced no tool calls and no substantive response — aborting before repair loop.',
         })
         this.state = withStatus(this.state!, 'failed')
         this.emit()

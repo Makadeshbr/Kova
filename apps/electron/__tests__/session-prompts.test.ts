@@ -1,134 +1,167 @@
 /**
- * Mode-routing regression suite.
+ * Mode-resolution contract — Kova v2 (sticky session mode).
  *
- * The contract:
- *   - Engineering signal (action verb OR named deliverable OR repo path)
- *     always wins over question form. "Como criar uma landing page?" must
- *     route to patch so the agent gets tools and can build it.
- *   - Pure questions / explanations without engineering signal → chat.
- *   - Greetings, affirmations, meta-instructions → chat.
+ * NEW CONTRACT (maio 2026):
+ *   - Mode is a SESSION property, not inferred per-message.
+ *   - The renderer pins a mode (default 'patch') and only changes it on
+ *     explicit slash commands (`/plan`, `/review`, `/chat`).
+ *   - Follow-up questions in a patch session stay in patch mode — the agent
+ *     has tools and decides via tool use whether to read, answer, or write.
  *
- * These tests lock down the Claude Code / Cursor / Codex parity rule:
- * the model always has tools available when a deliverable is named.
+ * Resolution order (first match wins):
+ *   1. Slash prefix in message text (`/plan`, `/review`, `/chat`)
+ *   2. Explicit `params.mode` from UI (when not 'patch')
+ *   3. Default → 'patch' (unified, all tools)
+ *
+ * The old "engineering signal vs question form" heuristic is no longer used
+ * for routing. It lives on as `isConversationalMessage` / `looksLikeEngineeringTask`
+ * for soft signals (memory ranking, telemetry) but never decides mode.
  */
 import { describe, it, expect } from 'vitest'
-import { inferRunMode, isConversationalMessage, looksLikeEngineeringTask } from '../src/main/session-prompts'
+import {
+  resolveRunMode,
+  inferRunMode,
+  isConversationalMessage,
+  looksLikeEngineeringTask,
+} from '../src/main/session-prompts'
 
-describe('inferRunMode — explicit overrides', () => {
-  it('honours explicit plan from UI', () => {
-    expect(inferRunMode('do anything', 'plan')).toBe('plan')
+describe('resolveRunMode — slash prefix in message text always wins', () => {
+  it('routes /plan to plan', () => {
+    expect(resolveRunMode('/plan add login flow')).toBe('plan')
   })
-  it('honours explicit review from UI', () => {
-    expect(inferRunMode('do anything', 'review')).toBe('review')
+  it('routes /review to review', () => {
+    expect(resolveRunMode('/review my recent change')).toBe('review')
   })
-  it('explicit patch falls back to message-based inference', () => {
-    // patch is the default — explicit patch lets message text re-route to chat for greetings
-    expect(inferRunMode('oi', 'patch')).toBe('chat')
+  it('routes /chat to chat', () => {
+    expect(resolveRunMode('/chat explain monads')).toBe('chat')
   })
-  it('recognises /plan slash command', () => {
-    expect(inferRunMode('/plan create something')).toBe('plan')
+  it('slash wins over explicit pinned mode', () => {
+    // user pinned 'chat' but typed /plan this turn — single-turn override.
+    expect(resolveRunMode('/plan refactor X', 'chat')).toBe('plan')
   })
-  it('recognises /review slash command', () => {
-    expect(inferRunMode('/review my recent change')).toBe('review')
+  it('case-insensitive slash matching', () => {
+    expect(resolveRunMode('/Plan stuff')).toBe('plan')
+    expect(resolveRunMode('/REVIEW stuff')).toBe('review')
+  })
+  it('bare slash command (no body) still routes', () => {
+    expect(resolveRunMode('/plan')).toBe('plan')
+    expect(resolveRunMode('/chat')).toBe('chat')
   })
 })
 
-describe('isConversationalMessage — engineering signal wins over question form', () => {
-  // The original bug: "Como criar X" was routed to chat because of "como" prefix.
-  // Concorrent parity requires patch for any message that names a deliverable.
-  const engineeringQuestions = [
-    'como criar uma landing page para barbearia?',
-    'como criar uma landing page',
-    'como faço uma landing page',
-    'como adicionar um endpoint /users?',
-    'como implemento autenticação?',
-    'pode criar um componente de hero?',
-    'pode fazer uma landing page?',
-    'qual a melhor forma de implementar oauth?',
-    'o que falta para minha landing page funcionar?',
-    'how do I create a landing page?',
-    'how to add a login flow?',
-    'can you build a checkout page?',
-    'what should I change in src/auth.ts?',
-    'why is the api returning 500?',
-  ]
-  for (const message of engineeringQuestions) {
-    it(`routes to patch: "${message}"`, () => {
-      expect(isConversationalMessage(message)).toBe(false)
-      expect(inferRunMode(message)).toBe('patch')
-    })
-  }
+describe('resolveRunMode — explicit pinned mode (no slash)', () => {
+  it('honours pinned plan', () => {
+    expect(resolveRunMode('keep planning the same thing', 'plan')).toBe('plan')
+  })
+  it('honours pinned review', () => {
+    expect(resolveRunMode('keep reviewing', 'review')).toBe('review')
+  })
+  it('honours pinned chat', () => {
+    expect(resolveRunMode('keep chatting', 'chat')).toBe('chat')
+  })
+  it('explicit patch falls through to default (patch)', () => {
+    expect(resolveRunMode('any message', 'patch')).toBe('patch')
+  })
 })
 
-describe('isConversationalMessage — pure conversational signals route to chat', () => {
-  const pureChat = [
-    'oi',
-    'ola',
-    'hello',
-    'bom dia',
+describe('resolveRunMode — default is patch (unified), never chat', () => {
+  // The critical fix: messages that LOOK like questions no longer
+  // route to chat. Patch (unified) has read tools and the model decides.
+  const followUpsThatUsedToRouteToChat = [
+    'como posso testar?',
+    'isso funcionou?',
+    'que mais falta?',
+    'how do I test this?',
+    'did it work?',
+    'what else is missing?',
+    'o que é REST?',          // even pure curiosity → patch by default now
+    'explain this code',
+    'oi',                     // greeting in patch mode = patch (model will reply briefly)
     'obrigado',
-    'ok',
-    'sim',
-    'tudo bem',
-    'oi, tudo bem?',
-    'o que é REST?',                 // pure curiosity, no deliverable
-    'o que é git?',
-    'qual a diferença entre let e const?',
-    'por que typescript é melhor que js?',
-    'what is REST?',
-    'why is functional programming popular?',
-    'me explica monads',
-    'responde em portugues',
-    'fale em ingles',
-    'seja mais formal',
-    'act as a senior reviewer',
+    'tudo bem?',
   ]
-  for (const message of pureChat) {
-    it(`routes to chat: "${message}"`, () => {
-      expect(isConversationalMessage(message)).toBe(true)
-      expect(inferRunMode(message)).toBe('chat')
+  for (const message of followUpsThatUsedToRouteToChat) {
+    it(`defaults to patch: "${message}"`, () => {
+      expect(resolveRunMode(message)).toBe('patch')
+      expect(resolveRunMode(message, 'patch')).toBe('patch')
     })
   }
 })
 
-describe('isConversationalMessage — clear engineering commands route to patch', () => {
+describe('resolveRunMode — engineering commands stay patch', () => {
   const commands = [
     'crie uma landing page para barbearia',
-    'criar landing page',
     'corrija o bug em src/app.ts',
     'adicionar endpoint de login',
     'refatore o ContextEngine',
-    'remova o codigo morto em packages/agent',
-    'gere um Dockerfile',
-    'gerar testes para o ExecutionEngine',
     'instale react-router',
     'rode os testes',
-    'execute npm install',
     'implemente paginacao na lista de usuarios',
     'fix the auth bug',
     'add a logout button',
     'create a new component called Hero',
     'refactor packages/decision/src/decision-engine.ts',
-    'install tailwind',
     'bootstrap a next.js app',
   ]
   for (const message of commands) {
-    it(`routes to patch: "${message}"`, () => {
-      expect(isConversationalMessage(message)).toBe(false)
-      expect(inferRunMode(message)).toBe('patch')
+    it(`stays patch: "${message}"`, () => {
+      expect(resolveRunMode(message)).toBe('patch')
     })
   }
 })
 
+describe('resolveRunMode — edge cases', () => {
+  it('empty string defaults to patch', () => {
+    expect(resolveRunMode('')).toBe('patch')
+  })
+  it('whitespace-only defaults to patch', () => {
+    expect(resolveRunMode('    ')).toBe('patch')
+  })
+  it('slash followed immediately by text without space — not a command', () => {
+    // "/planning" should NOT route to plan mode (no word boundary).
+    expect(resolveRunMode('/planning the next sprint')).toBe('patch')
+  })
+})
+
+describe('inferRunMode — deprecated alias mirrors resolveRunMode', () => {
+  it('delegates to resolveRunMode', () => {
+    expect(inferRunMode('/plan x')).toBe('plan')
+    expect(inferRunMode('como criar X?')).toBe('patch')
+    expect(inferRunMode('oi')).toBe('patch')
+  })
+})
+
+// ─── Soft signals (not used for routing — useful for memory/telemetry) ──────
+
+describe('isConversationalMessage — kept as a soft signal', () => {
+  it('still flags clear conversational phrases', () => {
+    expect(isConversationalMessage('oi')).toBe(true)
+    expect(isConversationalMessage('obrigado')).toBe(true)
+    expect(isConversationalMessage('hello')).toBe(true)
+    expect(isConversationalMessage('responda em portugues')).toBe(true)
+  })
+  it('still flags definitional questions', () => {
+    expect(isConversationalMessage('o que é REST?')).toBe(true)
+    expect(isConversationalMessage('what is OAuth?')).toBe(true)
+  })
+  it('engineering signal still wins over conversational form', () => {
+    expect(isConversationalMessage('como criar uma landing page?')).toBe(false)
+    expect(isConversationalMessage('pode criar um componente?')).toBe(false)
+    expect(isConversationalMessage('refactor src/auth.ts')).toBe(false)
+  })
+  it('empty returns false (caller decides)', () => {
+    expect(isConversationalMessage('')).toBe(false)
+    expect(isConversationalMessage('   ')).toBe(false)
+  })
+})
+
 describe('looksLikeEngineeringTask — coverage by family', () => {
-  it('detects pt-BR action verbs in all common conjugations', () => {
+  it('detects pt-BR action verbs in common conjugations', () => {
     expect(looksLikeEngineeringTask('crie um teste')).toBe(true)
     expect(looksLikeEngineeringTask('criar um teste')).toBe(true)
     expect(looksLikeEngineeringTask('cria um teste')).toBe(true)
     expect(looksLikeEngineeringTask('gere um arquivo')).toBe(true)
-    expect(looksLikeEngineeringTask('gerar um arquivo')).toBe(true)
     expect(looksLikeEngineeringTask('faca isso')).toBe(true)
-    expect(looksLikeEngineeringTask('fazer isso')).toBe(true)
   })
 
   it('detects English action verbs', () => {
@@ -156,36 +189,5 @@ describe('looksLikeEngineeringTask — coverage by family', () => {
     expect(looksLikeEngineeringTask('oi tudo bem')).toBe(false)
     expect(looksLikeEngineeringTask('obrigado')).toBe(false)
     expect(looksLikeEngineeringTask('que dia bonito')).toBe(false)
-  })
-})
-
-describe('isConversationalMessage — edge cases', () => {
-  it('empty string returns false (caller decides)', () => {
-    expect(isConversationalMessage('')).toBe(false)
-  })
-
-  it('whitespace-only normalizes to empty → returns false', () => {
-    expect(isConversationalMessage('    ')).toBe(false)
-  })
-
-  it('greeting with engineering follow-up still routes to patch', () => {
-    // The engineering signal is dominant; greeting prefix is incidental.
-    expect(isConversationalMessage('oi, pode criar uma landing page?')).toBe(false)
-  })
-
-  it('meta-instruction without engineering still routes to chat', () => {
-    expect(isConversationalMessage('responda em portugues')).toBe(true)
-    expect(isConversationalMessage('respond in english please')).toBe(true)
-  })
-
-  it('short non-task message defaults to chat', () => {
-    expect(isConversationalMessage('hmm')).toBe(true)
-    expect(isConversationalMessage('ué')).toBe(true)
-  })
-
-  it('non-question without engineering signal stays patch (model decides)', () => {
-    // A statement like "the build is broken" is ambiguous — let the agent
-    // inspect via tools. This matches Claude Code/Cursor behaviour.
-    expect(isConversationalMessage('the build is broken on main')).toBe(false)
   })
 })

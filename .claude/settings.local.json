@@ -135,7 +135,10 @@
       "Bash(pnpm -F @kova/electron run test -- __tests__/task-structurer.test.ts __tests__/engine-manager.test.ts)",
       "Bash(pnpm -F @kova/electron run test -- __tests__/provider-resolver.test.ts __tests__/provider-fallback-e2e.test.ts)",
       "Bash(pnpm -F @kova/execution run test -- __tests__/completion-contract.test.ts)",
-      "Bash(pnpm -F @kova/electron run build)"
+      "Bash(pnpm -F @kova/electron run build)",
+      "Bash(git commit *)",
+      "Bash(pnpm --filter @kova/electron test -- --run --reporter=basic)",
+      "Bash(pnpm --filter @kova/execution test -- --run --reporter=basic)"
     ]
   }
 }

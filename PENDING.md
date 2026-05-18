@@ -1,7 +1,10 @@
 # Kova — Pendências Enterprise
 
 > Última auditoria: 2026-05-18
-> Origem: auditoria pós-refatoração maio/2026 (commit `8eb9389f` resolveu 9 contratos críticos de roteamento, chat informado, anti-hallucination, gating de bare-blocks, structureTask resiliente, provider sentinel, frontend stack-agnostic, e cleanup).
+>
+> **Histórico recente de correções (verde):**
+> - `8eb9389f` — 9 contratos críticos: routing por engineering signal, chat informado, anti-hallucination, bare-block gating, structureTask resiliente, provider sentinel, frontend stack-agnostic, cleanup.
+> - **(novo)** Sticky session mode + unified default — `resolveRunMode` substitui `inferRunMode`. Mode é propriedade de sessão; follow-ups herdam. Slash commands (`/plan`, `/review`, `/chat`) viraram switch explícito. ExecutionEngine reconhece resposta substantiva sem tools como "analysis-only success" (não fica em repair loop infinito quando user pergunta algo após o build).
 >
 > Este arquivo lista o que **ainda não foi corrigido** para Kova alcançar paridade enterprise com Claude Code, Cursor e Codex.
 > Identidade do produto: `KOVA.md`. Arquitetura: `ARCHITECTURE.md`. Estado por package: `ROADMAP.md`.
@@ -237,6 +240,60 @@ Prioridade: 🔴 Crítico → 🟠 Alto → 🟡 Médio → 🟢 Baixo.
 | 4 (2 semanas) | #6, #12, #13 | Governance + distribuição + multi-tenant |
 
 Sprints 1+2 já posicionam Kova em paridade funcional com Cursor / Claude Code para uso individual. Sprints 3+4 são para venda enterprise.
+
+---
+
+---
+
+## Pendências adicionais detectadas no teste KŌJI (2026-05-18)
+
+O teste real de scaffolding (Next.js + Clean Architecture + DDD via Kimi K2.6) expôs problemas que unit tests não pegariam. Mode routing já foi resolvido nesta sessão — o resto continua aberto.
+
+### 20. Validation workspace roda `npm run build` sem `npm install` antes 🔴
+
+- **Onde:** `packages/orchestrator/...` (validate-workspace logic)
+- **Sintoma:** `'next' não é reconhecido como um comando interno` em `kova-validate-*` temp dir.
+- **Causa raiz:** o orchestrator copia arquivos para temp dir mas pula install de dependências.
+- **Fix proposto:** detectar `package.json com scripts.build && !node_modules` → executar install primeiro (pnpm > yarn > npm). Se install falhar, degradar para warning (não block).
+- **Esforço:** 1 dia.
+
+### 21. Repair loop não detecta erro de ambiente irrecuperável 🔴
+
+- **Onde:** `packages/orchestrator/src/...` (harness layer classification)
+- **Sintoma:** "Repairing... iter 2/20" travado quando erro é `command not found` — nenhum edit de código resolve.
+- **Fix proposto:** classificar stderr (`is not recognized`, `command not found`, `MODULE_NOT_FOUND`) → marca `environment_failure`, sai do loop, aceita scaffold mesmo sem build verde.
+- **Esforço:** 4 horas.
+
+### 22. `.env.example` bloqueado como credencial 🔴
+
+- **Onde:** `packages/agent/src/tools.ts` / `@kova/shared` forbiddenPaths
+- **Sintoma:** `Review Gate blocked: .env.example is a credentials file`
+- **Causa raiz:** filtro casa qualquer `.env*` — mas `.env.example`/`.env.template`/`.env.sample` são templates sem segredo.
+- **Fix proposto:** allowlist exata para esses sufixos. Bloquear continua só `.env`, `.env.local`, `.env.production`, etc.
+- **Esforço:** 15 minutos.
+
+### 23. Queue bloqueia input durante repair 🟠
+
+- **Onde:** `apps/electron/src/renderer/src/App.tsx` queue logic
+- **Sintoma:** "Message will be queued..." enquanto repair roda. Cancel não cancela.
+- **Fix proposto:** Cancel = abort imediato + flush da fila + estado volta a idle. Mensagem nova durante repair → "Cancelar atual e enviar nova?"
+- **Esforço:** meio dia.
+
+### 24. Sem preview/diff para arquivos criados 🟠
+
+- **Onde:** `apps/electron/src/renderer/src/components/ChatArea.tsx` / `TaskResultCard`
+- **Sintoma:** 30 arquivos com chip `create` + filename, nenhum jeito de ver o conteúdo antes do apply.
+- **Fix proposto:** clicar no chip abre painel lateral com syntax highlight do arquivo staged. Binary → placeholder.
+- **Esforço:** 1 dia.
+
+### 25. Thinking inline + contadores inconsistentes 🟡
+
+- **Onde:** UI (renderer)
+- **Sintoma:** Cadeia de pensamento aparece como output normal. Mesma tela mostra "iter 2/20" e "maxTurns 24".
+- **Fix proposto:**
+  - Colapsar `<thinking>` em accordion fechado por padrão.
+  - Labels explícitos pros contadores: "Repair iter X/Y", "Agent turn N/M".
+- **Esforço:** 3 horas total.
 
 ---
 
