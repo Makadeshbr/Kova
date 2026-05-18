@@ -3,7 +3,19 @@ import ts from 'typescript'
 
 const GENERATED_PATHS = ['dist/**', 'out/**', 'node_modules/**']
 const DEPENDENCY_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb']
-const CREDENTIAL_PATHS = ['.env', '.env.*']
+
+// Template env files are documented standard (`.env.example`, `.env.template`,
+// `.env.sample`, `.env.dist`) — they hold names, not values. Allow them.
+// Block real ones: `.env`, `.env.local`, `.env.production`, `.env.staging`, etc.
+const CREDENTIAL_TEMPLATE_SUFFIXES = ['.example', '.template', '.sample', '.dist']
+
+function isCredentialPath(path: string): boolean {
+  const lower = path.toLowerCase().replace(/\\/g, '/')
+  const basename = lower.slice(lower.lastIndexOf('/') + 1)
+  if (!basename.startsWith('.env')) return false
+  if (CREDENTIAL_TEMPLATE_SUFFIXES.some(suffix => basename.endsWith(suffix))) return false
+  return true
+}
 
 export interface ReviewGateInput {
   changes: FileChange[]
@@ -56,7 +68,7 @@ function universalPolicyLayer(input: ReviewGateInput): ReviewFinding[] {
       })
     }
 
-    if (matchesAny(change.path, CREDENTIAL_PATHS)) {
+    if (isCredentialPath(change.path)) {
       findings.push({
         category: 'security',
         severity: 'high',

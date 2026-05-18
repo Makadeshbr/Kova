@@ -138,7 +138,8 @@
       "Bash(pnpm -F @kova/electron run build)",
       "Bash(git commit *)",
       "Bash(pnpm --filter @kova/electron test -- --run --reporter=basic)",
-      "Bash(pnpm --filter @kova/execution test -- --run --reporter=basic)"
+      "Bash(pnpm --filter @kova/execution test -- --run --reporter=basic)",
+      "Bash(pnpm --filter @kova/harness test -- --run --reporter=basic)"
     ]
   }
 }

@@ -97,7 +97,11 @@ export interface EvidenceScoreBreakdown {
 
 export interface HarnessError {
   layer: string
-  type: 'syntax' | 'logic' | 'architecture' | 'security' | 'style'
+  // 'environment' signals a missing binary/module in the build environment
+  // (e.g. `'next' is not recognized`, `MODULE_NOT_FOUND`). Repairing source
+  // code cannot fix this — the execution engine breaks out of the repair
+  // loop and asks the user to install/configure tooling.
+  type: 'syntax' | 'logic' | 'architecture' | 'security' | 'style' | 'environment'
   severity: 'low' | 'medium' | 'high' | 'critical'
   fixable: boolean
   message: string

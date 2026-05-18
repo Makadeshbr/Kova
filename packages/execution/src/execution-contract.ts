@@ -9,7 +9,21 @@ const DEFAULT_FORBIDDEN_PATHS = [
 
 // Files that must NEVER be created or modified — secrets, infra, generated locks.
 // Unlike other safe zones, these block even new-file creation.
-const CREDENTIAL_PATHS = ['.env', '.env.*']
+//
+// Template files are explicitly allowed: `.env.example`, `.env.template`,
+// `.env.sample`, `.env.dist`. These hold variable NAMES, not values, and are
+// the documented standard for env templates in every modern stack
+// (Next.js, Vite, Rails, Django, Laravel). Blocking them broke scaffolding.
+const CREDENTIAL_TEMPLATE_SUFFIXES = ['.example', '.template', '.sample', '.dist']
+
+function isCredentialPath(path: string): boolean {
+  const lower = path.toLowerCase().replace(/\\/g, '/')
+  const basename = lower.slice(lower.lastIndexOf('/') + 1)
+  if (!basename.startsWith('.env')) return false
+  // Allow .env.example, .env.template, .env.sample, .env.dist
+  if (CREDENTIAL_TEMPLATE_SUFFIXES.some(suffix => basename.endsWith(suffix))) return false
+  return true
+}
 
 const DEFAULT_SAFE_ZONES = [
   '.github/**',
@@ -104,7 +118,7 @@ export function validateContractChanges(
         })
         continue
       }
-      if (matchesAny(change.path, CREDENTIAL_PATHS)) {
+      if (isCredentialPath(change.path)) {
         violations.push({
           severity: 'high',
           message: `${change.path} is a credentials file — creation and modification require human review`,
@@ -137,8 +151,9 @@ export function validateContractChanges(
       continue
     }
 
-    // Credential files: block even creation — .env files must never hold secrets committed via agent
-    if (matchesAny(change.path, CREDENTIAL_PATHS)) {
+    // Credential files: block even creation — .env files must never hold secrets committed via agent.
+    // Template suffixes (.example/.template/.sample/.dist) are explicitly allowed.
+    if (isCredentialPath(change.path)) {
       violations.push({
         severity: 'high',
         message: `${change.path} is a credentials file — creation and modification require human review`,

@@ -81,4 +81,49 @@ describe('Execution Contract', () => {
 
     expect(violations.some(v => v.rule === 'safe_zone')).toBe(true)
   })
+
+  /**
+   * Template env files (`.env.example`, `.env.template`, `.env.sample`, `.env.dist`)
+   * hold variable NAMES, not values. They are the documented standard for env
+   * templates in every modern stack — blocking them broke scaffolding flows.
+   */
+  describe('credential whitelist — env templates are allowed', () => {
+    it('allows creating .env.example (no credential violation)', () => {
+      const contract = createExecutionContract(task({ stackAdapter: 'typescript', affectedFiles: [] }))
+      const violations = validateContractChanges([change('.env.example')], contract)
+
+      expect(violations.some(v => v.rule === 'safe_zone' && v.file === '.env.example')).toBe(false)
+    })
+
+    it('allows creating .env.template and .env.sample and .env.dist', () => {
+      const contract = createExecutionContract(task({ stackAdapter: 'typescript', affectedFiles: [] }))
+      for (const path of ['.env.template', '.env.sample', '.env.dist']) {
+        const violations = validateContractChanges([change(path)], contract)
+        expect(violations.some(v => v.rule === 'safe_zone' && v.file === path)).toBe(false)
+      }
+    })
+
+    it('still blocks .env, .env.local, .env.production (real secrets)', () => {
+      const contract = createExecutionContract(task({ stackAdapter: 'typescript', affectedFiles: [] }))
+      for (const path of ['.env', '.env.local', '.env.production', '.env.staging']) {
+        const violations = validateContractChanges([change(path)], contract)
+        expect(violations.some(v => v.rule === 'safe_zone' && v.file === path)).toBe(true)
+      }
+    })
+
+    it('whitelist also applies in modify path (not just scaffolding)', () => {
+      const contract = createExecutionContract(task({ stackAdapter: 'typescript', affectedFiles: [] }))
+      const modifyTemplate: FileChange = { path: '.env.example', type: 'modify', diff: 'NEW=', before: 'OLD=' }
+      // Pair with another modify to force the non-scaffolding branch.
+      const modifySrc: FileChange = { path: 'src/app.ts', type: 'modify', diff: 'x', before: 'y' }
+      const violations = validateContractChanges([modifyTemplate, modifySrc], contract)
+      expect(violations.some(v => v.rule === 'safe_zone' && v.file === '.env.example')).toBe(false)
+    })
+
+    it('whitelist matches case-insensitively (.ENV.EXAMPLE)', () => {
+      const contract = createExecutionContract(task({ stackAdapter: 'typescript', affectedFiles: [] }))
+      const violations = validateContractChanges([change('.ENV.EXAMPLE')], contract)
+      expect(violations.some(v => v.rule === 'safe_zone' && v.file === '.ENV.EXAMPLE')).toBe(false)
+    })
+  })
 })

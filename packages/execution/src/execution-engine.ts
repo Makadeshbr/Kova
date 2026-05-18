@@ -558,10 +558,30 @@ export class ExecutionEngine {
 
     this.state = withStatus(this.state!, 'deciding')
     this.emit()
-    const decision = decide(harnessResult, this.state!.iterationHistory, {
-      changes: codeOutput.changes,
-      contract: this.contract ?? undefined,
-    })
+
+    // Environment-failure short-circuit. When build/tests fail because a
+    // required binary is missing (`'next' is not recognized`, MODULE_NOT_FOUND),
+    // no amount of source editing will fix it. Repair loops on env errors
+    // poison the conversation: each retry rewrites unrelated source against
+    // the same broken environment, often producing worse code.
+    //
+    // For scaffolding (all-creates): auto-apply so the user gets the files,
+    // then surface a clear next-step ("run npm install before validating").
+    // For modifications: suggest — stop the loop, let the user decide.
+    const envErrors = collectEnvironmentErrors(harnessResult)
+    const decision = envErrors.length > 0
+      ? buildEnvFailureDecision(envErrors, codeOutput.changes)
+      : decide(harnessResult, this.state!.iterationHistory, {
+          changes: codeOutput.changes,
+          contract: this.contract ?? undefined,
+        })
+    if (envErrors.length > 0) {
+      this.event({
+        type: 'agent_completed',
+        mode: 'unified',
+        message: `Environment incomplete — ${envErrors[0].humanMessage}`,
+      })
+    }
     this.event({ type: 'decision_made', decision, message: decision.reason })
 
     this.state = withIteration(this.state!, buildRecord(this.state!.currentIteration, codeOutput, harnessResult, decision, context, iterStart))
@@ -783,6 +803,42 @@ function buildRecord(
     duration: Date.now() - startMs,
     tokensUsed: output.tokensUsed + context.tokensUsed,
     contextFiles: context.files.map(f => ({ path: f.path })),
+  }
+}
+
+/**
+ * Collects all `type: 'environment'` errors from the harness layers — these
+ * are produced by `@kova/harness` when stderr matches a missing-binary or
+ * missing-module pattern (see `harness/layers/environment-error.ts`).
+ */
+function collectEnvironmentErrors(harnessResult: HarnessResult): HarnessError[] {
+  const errors: HarnessError[] = []
+  for (const layer of harnessResult.layers) {
+    for (const error of layer.errors) {
+      if (error.type === 'environment') errors.push(error)
+    }
+  }
+  return errors
+}
+
+/**
+ * Decision when the validation environment is missing required tooling.
+ * Auto-apply for scaffolds (all creates) so the user gets the files and a
+ * clear next-step. For modifications, fall back to `suggest` so the user
+ * can review before applying anything against an unverified environment.
+ */
+function buildEnvFailureDecision(envErrors: HarnessError[], changes: FileChange[]): DecisionResult {
+  const isScaffolding = changes.length > 0 && changes.every(c => c.type === 'create' && !c.before)
+  const hints = envErrors.map(error => error.humanMessage).filter(Boolean)
+  const uniqueHints = Array.from(new Set(hints))
+  const reason = isScaffolding
+    ? `Files were written. Validation could not run: ${uniqueHints.join(' ')} Install the required tooling, then re-run validation.`
+    : `Validation could not run: ${uniqueHints.join(' ')} Repair will not fix this — install the tooling and try again.`
+  return {
+    decision: isScaffolding ? 'auto_apply' : 'suggest',
+    score: 75,
+    reason,
+    feedback: [],
   }
 }
 

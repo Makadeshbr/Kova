@@ -1,7 +1,8 @@
-import { cpSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import type { CommandCandidate, HarnessMode, HarnessResult, FileChange } from '@kova/shared'
+import { runCommandInvocation } from '@kova/shared'
 import {
   runBuildLayer, runTestsLayer, runRulesLayer,
   runSecurityLayer, runLintLayer, runTypecheckLayer, runPipeline,
@@ -87,6 +88,93 @@ function shouldCopyToStaging(projectRoot: string, src: string): boolean {
   return true
 }
 
+/**
+ * When the staging workspace has a Node package.json with runnable scripts
+ * but no `node_modules`, install dependencies once before the harness runs.
+ *
+ * Why this exists: `createValidationWorkspace` deliberately excludes
+ * `node_modules` from the copy (it's huge and stale renders make it useless).
+ * For scaffolding scenarios — where the agent just generated `package.json`
+ * and the source project has no install yet — the build layer would otherwise
+ * always fail with `'next' is not recognized` / `MODULE_NOT_FOUND` and the
+ * repair loop would burn iterations trying to fix source for an env problem.
+ *
+ * Package manager detection follows the lockfile in the staging tree:
+ *   - pnpm-lock.yaml → pnpm
+ *   - yarn.lock      → yarn
+ *   - package-lock.json → npm
+ *   - default        → npm (most universal)
+ *
+ * Install runs with a generous timeout but is non-blocking — if it fails,
+ * the harness still executes and surfaces the real error (which the env
+ * classifier in @kova/harness will then catch as a `type: 'environment'`
+ * error, exiting the repair loop cleanly).
+ */
+async function ensureNodeBootstrap(stagingRoot: string, config: OrchestratorConfig): Promise<void> {
+  const manifestPath = join(stagingRoot, 'package.json')
+  if (!existsSync(manifestPath)) return
+  if (existsSync(join(stagingRoot, 'node_modules'))) return
+
+  let manifest: { scripts?: Record<string, string> }
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { scripts?: Record<string, string> }
+  } catch {
+    // Broken package.json — the build layer will surface a clearer error.
+    return
+  }
+  // Only install when there is something to run. A package.json without any
+  // scripts won't trigger build/test layers in a way install would help.
+  const scripts = manifest.scripts ?? {}
+  const hasRunnableScript = Boolean(scripts.build || scripts.dev || scripts.test || scripts.lint || scripts.typecheck || scripts.start)
+  if (!hasRunnableScript) return
+
+  const pm = detectPackageManager(stagingRoot)
+  const installCommand = packageManagerInstallCommand(pm)
+  const layerName = 'bootstrap'
+  config.onLayerStart?.(layerName, installCommand)
+  try {
+    const result = await runCommandInvocation({
+      command: installCommand,
+      workspaceRoot: stagingRoot,
+      cwd: stagingRoot,
+      kind: 'run',
+      timeoutMs: 180_000,
+      signal: config.signal,
+      onLine: config.onHarnessLine
+        ? (line, stream) => config.onHarnessLine?.(layerName, line, stream)
+        : undefined,
+    })
+    if (result.exitCode !== 0) {
+      config.onHarnessLine?.(layerName, `bootstrap install exited with code ${result.exitCode}`, 'stderr')
+    }
+  } catch (err) {
+    // Non-blocking — surface to the live feed and let the harness continue.
+    const message = err instanceof Error ? err.message : String(err)
+    config.onHarnessLine?.(layerName, `bootstrap install failed: ${message}`, 'stderr')
+  }
+}
+
+type NodePackageManager = 'pnpm' | 'yarn' | 'npm'
+
+function detectPackageManager(stagingRoot: string): NodePackageManager {
+  if (existsSync(join(stagingRoot, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (existsSync(join(stagingRoot, 'yarn.lock'))) return 'yarn'
+  if (existsSync(join(stagingRoot, 'package-lock.json'))) return 'npm'
+  // Default to npm — most universally available and the agent rarely declares
+  // a preferred manager in a brand-new scaffold.
+  return 'npm'
+}
+
+function packageManagerInstallCommand(pm: NodePackageManager): string {
+  // `--prefer-offline` and `--no-audit` keep things fast and resilient to
+  // flaky network; `--ignore-scripts` would mask postinstall side-effects
+  // and is intentionally NOT set — packages that need a postinstall (e.g.
+  // esbuild, sharp) require it to wire up native binaries.
+  if (pm === 'pnpm') return 'pnpm install --prefer-offline'
+  if (pm === 'yarn') return 'yarn install --prefer-offline'
+  return 'npm install --no-audit --no-fund --prefer-offline'
+}
+
 function mapCwdToStaging(cwd: string | undefined, realRoot: string, stagedRoot: string): string | undefined {
   if (!cwd) return cwd
   if (!isAbsolute(cwd)) return cwd
@@ -123,6 +211,13 @@ export class HarnessOrchestrator {
         onLayerStart: config.onLayerStart,
         onLayerLine: config.onHarnessLine,
       }
+
+      // Bootstrap step — when the staging workspace has a Node manifest with
+      // scripts but no `node_modules`, the build layer would otherwise fail
+      // with `'next' is not recognized` / `MODULE_NOT_FOUND`. The bootstrap
+      // step installs dependencies once before validation. Failures here are
+      // non-blocking — the harness still runs and reports the real error.
+      await ensureNodeBootstrap(staging.root, config)
 
       const harnessResult = await runPipeline(layers, pipelineConfig)
 

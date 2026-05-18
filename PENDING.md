@@ -4,7 +4,8 @@
 >
 > **Histórico recente de correções (verde):**
 > - `8eb9389f` — 9 contratos críticos: routing por engineering signal, chat informado, anti-hallucination, bare-block gating, structureTask resiliente, provider sentinel, frontend stack-agnostic, cleanup.
-> - **(novo)** Sticky session mode + unified default — `resolveRunMode` substitui `inferRunMode`. Mode é propriedade de sessão; follow-ups herdam. Slash commands (`/plan`, `/review`, `/chat`) viraram switch explícito. ExecutionEngine reconhece resposta substantiva sem tools como "analysis-only success" (não fica em repair loop infinito quando user pergunta algo após o build).
+> - `b55e37b0` — Sticky session mode + unified default. `resolveRunMode` substitui `inferRunMode`. Mode é propriedade de sessão; follow-ups herdam. Slash commands (`/plan`, `/review`, `/chat`) viraram switch explícito. ExecutionEngine reconhece resposta substantiva sem tools como "analysis-only success" (não fica em repair loop quando user pergunta algo após o build).
+> - **(novo)** Bootstrap install + environment-error classifier + `.env.example` whitelist (itens 20/21/22 abaixo). Resolve os 3 bloqueadores 🔴 do teste KŌJI.
 >
 > Este arquivo lista o que **ainda não foi corrigido** para Kova alcançar paridade enterprise com Claude Code, Cursor e Codex.
 > Identidade do produto: `KOVA.md`. Arquitetura: `ARCHITECTURE.md`. Estado por package: `ROADMAP.md`.
@@ -249,28 +250,32 @@ Sprints 1+2 já posicionam Kova em paridade funcional com Cursor / Claude Code p
 
 O teste real de scaffolding (Next.js + Clean Architecture + DDD via Kimi K2.6) expôs problemas que unit tests não pegariam. Mode routing já foi resolvido nesta sessão — o resto continua aberto.
 
-### 20. Validation workspace roda `npm run build` sem `npm install` antes 🔴
+### 20. Validation workspace roda `npm run build` sem `npm install` antes ✅ RESOLVIDO
 
-- **Onde:** `packages/orchestrator/...` (validate-workspace logic)
-- **Sintoma:** `'next' não é reconhecido como um comando interno` em `kova-validate-*` temp dir.
-- **Causa raiz:** o orchestrator copia arquivos para temp dir mas pula install de dependências.
-- **Fix proposto:** detectar `package.json com scripts.build && !node_modules` → executar install primeiro (pnpm > yarn > npm). Se install falhar, degradar para warning (não block).
-- **Esforço:** 1 dia.
+- **Onde:** `packages/orchestrator/src/orchestrator.ts` — novo `ensureNodeBootstrap`
+- **Sintoma original:** `'next' não é reconhecido como um comando interno` em `kova-validate-*` temp dir.
+- **Causa raiz:** o orchestrator copiava arquivos para temp dir mas pulava install de dependências.
+- **Fix aplicado:** quando workspace de staging tem `package.json` com scripts runnable e não tem `node_modules`, detecta package manager (pnpm-lock → pnpm, yarn.lock → yarn, padrão → npm) e roda install antes da pipeline. Timeout 180s, não-bloqueante: se install falhar, harness continua e o classifier (#21) marca como environment error. Comando usa flags rápidas (`--prefer-offline`, `--no-audit`).
 
-### 21. Repair loop não detecta erro de ambiente irrecuperável 🔴
+### 21. Repair loop não detecta erro de ambiente irrecuperável ✅ RESOLVIDO
 
-- **Onde:** `packages/orchestrator/src/...` (harness layer classification)
-- **Sintoma:** "Repairing... iter 2/20" travado quando erro é `command not found` — nenhum edit de código resolve.
-- **Fix proposto:** classificar stderr (`is not recognized`, `command not found`, `MODULE_NOT_FOUND`) → marca `environment_failure`, sai do loop, aceita scaffold mesmo sem build verde.
-- **Esforço:** 4 horas.
+- **Onde:**
+  - `packages/shared/src/types.ts` — adiciona `'environment'` a `HarnessError['type']`
+  - `packages/harness/src/layers/environment-error.ts` — novo classifier
+  - `packages/harness/src/layers/{build,tests}.ts` — invoca classifier
+  - `packages/execution/src/execution-engine.ts` — `collectEnvironmentErrors` + `buildEnvFailureDecision` interrompem o loop
+- **Sintoma original:** "Repairing... iter 2/20" travado quando erro é `command not found` — nenhum edit de código resolve.
+- **Fix aplicado:** stderr é varrido contra patterns multi-plataforma — Windows (English + pt-BR + variants mangled), POSIX (bash/zsh "command not found"), Node (`Cannot find module`, `MODULE_NOT_FOUND`, `ERR_MODULE_NOT_FOUND`), Python (`ModuleNotFoundError`). Match marca o erro como `type: 'environment'`, severidade crítica, `fixable: false`. Execution engine detecta antes de `decide()` e override:
+  - **scaffold (all creates):** `auto_apply` com mensagem clara — aplica os arquivos e diz pro user `npm install`.
+  - **modify:** `suggest` — pausa pro user decidir.
+- Repair loop nunca dispara nessa condição. 14 testes cobrindo cada plataforma.
 
-### 22. `.env.example` bloqueado como credencial 🔴
+### 22. `.env.example` bloqueado como credencial ✅ RESOLVIDO
 
-- **Onde:** `packages/agent/src/tools.ts` / `@kova/shared` forbiddenPaths
-- **Sintoma:** `Review Gate blocked: .env.example is a credentials file`
-- **Causa raiz:** filtro casa qualquer `.env*` — mas `.env.example`/`.env.template`/`.env.sample` são templates sem segredo.
-- **Fix proposto:** allowlist exata para esses sufixos. Bloquear continua só `.env`, `.env.local`, `.env.production`, etc.
-- **Esforço:** 15 minutos.
+- **Onde:** `packages/execution/src/execution-contract.ts` + `packages/decision/src/review-gate.ts`
+- **Sintoma original:** `Review Gate blocked: .env.example is a credentials file`
+- **Causa raiz:** filtro `['.env', '.env.*']` casava qualquer `.env*` incluindo templates.
+- **Fix aplicado:** helper `isCredentialPath` com whitelist explícita dos sufixos seguros: `.example`, `.template`, `.sample`, `.dist`. Bloqueia continua `.env`, `.env.local`, `.env.production`, `.env.staging`, etc. Case-insensitive, funciona em subpastas (ex: `apps/api/.env.example`). 11 testes novos cobrindo whitelist + manutenção do block para arquivos reais.
 
 ### 23. Queue bloqueia input durante repair 🟠
 

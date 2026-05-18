@@ -634,4 +634,46 @@ describe('credential path protection', () => {
     expect(review.passed).toBe(false)
     expect(review.findings[0].category).toBe('security')
   })
+
+  it('blocks .env.local', () => {
+    const create: FileChange = { path: '.env.local', type: 'create', diff: 'SECRET=value' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    expect(review.passed).toBe(false)
+    expect(review.findings.some(f => f.category === 'security')).toBe(true)
+  })
+
+  // Template env files (.env.example, .env.template, .env.sample, .env.dist) hold
+  // variable names — not values — and are the documented standard for every
+  // modern stack. Blocking them broke scaffolding.
+  it('ALLOWS creating .env.example (template, holds names not values)', () => {
+    const create: FileChange = { path: '.env.example', type: 'create', diff: 'DATABASE_URL=' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    const credentialFindings = review.findings.filter(f =>
+      f.category === 'security' && f.message.includes('credentials file'))
+    expect(credentialFindings).toHaveLength(0)
+  })
+
+  it('ALLOWS .env.template', () => {
+    const create: FileChange = { path: '.env.template', type: 'create', diff: 'API_KEY=' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    expect(review.findings.filter(f => f.message.includes('credentials file'))).toHaveLength(0)
+  })
+
+  it('ALLOWS .env.sample', () => {
+    const create: FileChange = { path: '.env.sample', type: 'create', diff: 'KEY=value' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    expect(review.findings.filter(f => f.message.includes('credentials file'))).toHaveLength(0)
+  })
+
+  it('ALLOWS .env.dist (Symfony convention)', () => {
+    const create: FileChange = { path: '.env.dist', type: 'create', diff: 'KEY=value' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    expect(review.findings.filter(f => f.message.includes('credentials file'))).toHaveLength(0)
+  })
+
+  it('ALLOWS .env.example in a subfolder', () => {
+    const create: FileChange = { path: 'apps/api/.env.example', type: 'create', diff: 'DATABASE_URL=' }
+    const review = runReviewGate({ changes: [create], harnessResult: cleanHarness })
+    expect(review.findings.filter(f => f.message.includes('credentials file'))).toHaveLength(0)
+  })
 })

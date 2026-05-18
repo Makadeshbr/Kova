@@ -566,6 +566,127 @@ describe('ExecutionEngine — Contract enforcement', () => {
   })
 
   /**
+   * Environment failure short-circuit. When the build/test layer reports a
+   * missing binary or missing module (`type: 'environment'`), no amount of
+   * source editing will fix it. The execution engine must exit the repair
+   * loop and surface a clear next-step.
+   *
+   * For scaffolds (all creates): apply the files and stop, so the user gets
+   * what was generated and can run install themselves.
+   */
+  it('exits repair loop when harness reports a type=environment error (scaffold path)', async () => {
+    const envFailureHarness: HarnessResult = {
+      passed: false,
+      score: 0,
+      duration: 50,
+      iteration: 1,
+      validationConfidence: 'partial',
+      layers: [{
+        name: 'build',
+        passed: false,
+        skipped: false,
+        duration: 30,
+        errors: [{
+          layer: 'build',
+          type: 'environment',
+          severity: 'critical',
+          fixable: false,
+          message: `'next' is not recognized as an internal or external command`,
+          humanMessage: `'next' is not on PATH. Install it or run npm install.`,
+          file: '',
+          rule: 'environment_missing',
+        }],
+        warnings: [],
+      }],
+    }
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({
+          mode: 'unified',
+          thought: 'Scaffolded Next.js app',
+          changes: [
+            { path: 'package.json', type: 'create' as const, diff: '{}' },
+            { path: 'app/page.tsx', type: 'create' as const, diff: 'export default function() { return null }' },
+          ],
+          tokensUsed: 50,
+        }),
+      },
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: envFailureHarness, scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 5,
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('scaffold-task', { type: 'feature' }))
+
+    // Exactly one iteration — repair loop must NOT fire.
+    expect(state.iterationHistory.length).toBe(1)
+    expect(deps.agent.execute).toHaveBeenCalledOnce()
+    const last = state.iterationHistory.at(-1)!
+    expect(last.decision.decision).toBe('auto_apply')
+    expect(last.decision.reason).toMatch(/install/i)
+    // Files were applied so the user gets the scaffold even though validation
+    // could not run end-to-end.
+    expect(deps.applicationEngine.apply).toHaveBeenCalledOnce()
+  })
+
+  it('exits repair loop and SUGGESTS on env error when changes are modifications', async () => {
+    const envFailureHarness: HarnessResult = {
+      passed: false,
+      score: 0,
+      duration: 50,
+      iteration: 1,
+      validationConfidence: 'partial',
+      layers: [{
+        name: 'build',
+        passed: false,
+        skipped: false,
+        duration: 30,
+        errors: [{
+          layer: 'build',
+          type: 'environment',
+          severity: 'critical',
+          fixable: false,
+          message: `Cannot find module 'next'`,
+          humanMessage: `Node could not resolve 'next'. Run npm install.`,
+          file: '',
+        }],
+        warnings: [],
+      }],
+    }
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({
+          mode: 'unified',
+          thought: 'Modified config',
+          changes: [
+            { path: 'src/app.ts', type: 'modify' as const, diff: 'new', before: 'old' },
+          ],
+          tokensUsed: 50,
+        }),
+      },
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: envFailureHarness, scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 5,
+      autoApply: true,
+      skipPlan: true,
+    }))
+    const state = await engine.run(makeTask('modify-task'))
+
+    expect(state.iterationHistory.length).toBe(1)
+    const last = state.iterationHistory.at(-1)!
+    expect(last.decision.decision).toBe('suggest')
+    // suggest → no apply, user decides
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  /**
    * Analysis-only success: in unified (patch) mode, a follow-up question can
    * be answered with substantive prose alone — that is a legitimate outcome,
    * not hallucination. Sticky-mode routing means questions naturally land in

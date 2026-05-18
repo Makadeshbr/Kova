@@ -1,6 +1,7 @@
 import type { LayerResult, HarnessError, HarnessWarning } from '@kova/shared'
 import { parseTestFailures } from './error-parsers'
 import { makePolicyError, runLayerCommand } from './command-result'
+import { classifyEnvironmentFailure } from './environment-error'
 
 export interface TestsLayerConfig {
   command: string
@@ -39,6 +40,11 @@ export async function runTestsLayer(config: TestsLayerConfig): Promise<LayerResu
   const output = (base.stdout?.trim() ? base.stdout : base.stderr) ?? ''
   if (isPolicyOutput(output)) {
     return { name: 'tests', passed: false, errors: [makePolicyError('tests', output)], warnings: [], skipped: false, ...base }
+  }
+  // Environment errors (missing binary, missing module) — same fix path as build layer.
+  const envError = classifyEnvironmentFailure('tests', output, base.command)
+  if (envError) {
+    return { name: 'tests', passed: false, errors: [envError], warnings: [], skipped: false, ...base }
   }
   const parsed = parseOutput(output)
   return {

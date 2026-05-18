@@ -1,6 +1,7 @@
 import type { LayerResult, HarnessError } from '@kova/shared'
 import { parseBuildErrors } from './error-parsers'
 import { makePolicyError, runLayerCommand } from './command-result'
+import { classifyEnvironmentFailure } from './environment-error'
 
 export interface BuildLayerConfig {
   command: string
@@ -29,6 +30,13 @@ export async function runBuildLayer(config: BuildLayerConfig): Promise<LayerResu
   }
 
   const output = (base.stderr?.trim() ? base.stderr : base.stdout) ?? ''
+  // Environment failures (missing binary, MODULE_NOT_FOUND) are not fixable by
+  // editing source. Surface them as a typed error so the execution engine can
+  // exit the repair loop instead of looping uselessly.
+  const envError = classifyEnvironmentFailure('build', output, base.command)
+  if (envError) {
+    return { name: 'build', passed: false, errors: [envError], warnings: [], skipped: false, ...base }
+  }
   const errors = isPolicyOutput(output) ? [makePolicyError('build', output)] : parseBuildErrors(output)
   return { name: 'build', passed: false, errors, warnings: [], skipped: false, ...base }
 }
