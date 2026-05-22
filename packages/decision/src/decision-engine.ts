@@ -134,9 +134,9 @@ export function decide(
       }
     }
     return {
-      decision: 'reject',
-      score: Math.min(score, 55),
-      reason: `${formatLayerName(failedValidation.name)} failed; repair loop required`,
+      decision: 'suggest',
+      score: Math.max(Math.min(score, 89), SUGGEST_THRESHOLD),
+      reason: `${formatLayerName(failedValidation.name)} failed; harness warning requires review`,
       feedback,
       reviewGate,
     }

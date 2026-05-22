@@ -2,14 +2,16 @@ import type {
   DecisionResult, ExecutionContract, ExecutionState,
   FileChange, HarnessResult, ProofPack, ProofPackValidation,
 } from '@kova/shared'
+import { consolidateIterationChanges } from './changes'
 
 export function generateProofPack(state: ExecutionState, contract: ExecutionContract): ProofPack {
   const lastIter = state.iterationHistory.at(-1)
   const harness = lastIter?.harnessResult
   const decision = lastIter?.decision
-  const changes = lastIter?.changes.map(c => ({
+  const consolidatedChanges = consolidateIterationChanges(state.iterationHistory)
+  const changes = consolidatedChanges.map(c => ({
     path: c.path, type: c.type, reason: summarizeChangeReason(c),
-  })) ?? []
+  }))
 
   const validationsRun: ProofPackValidation[] = []
   const validationsNotRun: Array<{ kind: string; reason: string }> = []
@@ -152,10 +154,10 @@ function mapProofPackDecision(
   harness?: HarnessResult,
 ): NonNullable<ProofPack['finalUiDecision']> {
   if (status === 'completed') return 'apply'
-  if (harness?.layers.some(l => !l.skipped && !l.passed)) return 'repair_needed'
   if (decision === 'human_required' || status === 'paused') return 'needs_review'
   if (decision === 'suggest') return 'suggest'
   if (decision === 'auto_apply') return 'apply'
+  if (harness?.layers.some(l => !l.skipped && !l.passed)) return 'repair_needed'
   return 'reject'
 }
 

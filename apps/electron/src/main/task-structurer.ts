@@ -9,9 +9,9 @@
  *     better than pinning the UI in "structuring..." indefinitely.
  *   - External signal propagates: user-abort during structuring cancels cleanly.
  */
-import type { AgentProvider, AgentMessage } from '@kova/agent'
+import type { AgentProvider } from '@kova/agent'
 import { structureTask } from '@kova/execution'
-import type { TaskDefinition } from '@kova/shared'
+import type { AgentMessage, TaskDefinition } from '@kova/shared'
 import type { detectStack } from '@kova/adapters'
 import { buildFallbackTask } from './session-utils'
 

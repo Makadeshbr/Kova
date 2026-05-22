@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, dirname, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { CommandOutputCallback, FileChange, Todo, TodoStatus, ValidationCommandKind } from '@kova/shared'
-import { isLongRunningCommand, normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
+import { classifyCommandEnvironmentIssue, isLongRunningCommand, normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
 import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
 import { globFiles, type GlobOptions } from './glob-files'
 
@@ -45,6 +45,28 @@ export const ASK_PERMISSION_POLICY: PermissionPolicy = {
 }
 
 const RUN_TIMEOUT_MS = 120_000  // 2 min — enough for npm install on slow machines
+
+const TOOL_ABORT_MESSAGE = 'Aborted: session was cancelled'
+const TOOL_ABORT_CHECK_INTERVAL = 100
+
+class ToolAbortError extends Error {
+  constructor(message = TOOL_ABORT_MESSAGE) {
+    super(message)
+    this.name = 'AbortError'
+  }
+}
+
+export function formatCommandEnvironmentFailureForAgent(output: string): string | null {
+  const issue = classifyCommandEnvironmentIssue(output)
+  if (!issue) return null
+  return [
+    'Environment blocked:',
+    issue.humanMessage,
+    `Suggestion: ${issue.suggestion}`,
+    'Do not retry this command or edit source files to fix this environment failure. Stop and report the validation blocker to the user.',
+    output.trim() ? `Output:\n${output.trim()}` : '',
+  ].filter(Boolean).join('\n')
+}
 
 // FIX-006: read_file returns up to this many characters per call. Files larger
 // than this are truncated with a clear message instructing the agent how to
@@ -336,31 +358,37 @@ export class ToolExecutor {
   }
 
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
-    switch (name) {
-      case 'write_file':  return this.writeFile(String(input.path ?? ''), String(input.content ?? ''))
-      case 'edit_file':   return this.editFile(
-        String(input.path ?? ''),
-        String(input.old_string ?? ''),
-        String(input.new_string ?? ''),
-        input.replace_all === true,
-      )
-      case 'read_file':   return this.readFile(String(input.path ?? ''), numberOrZero(input.offset))
-      case 'delete_file': return this.deleteFile(String(input.path ?? ''))
-      case 'list_files':  return this.listFiles(String(input.dir ?? '.'))
-      case 'grep_codebase': return this.grepCodebase(input)
-      case 'glob_files':    return this.globFiles(input)
-      case 'todo_write':    return this.todoWrite(input)
-      case 'run_command': return this.runCommand(
-        String(input.command ?? ''),
-        stringOrUndefined(input.cwd),
-        stringOrUndefined(input.kind) as ValidationCommandKind | undefined,
-      )
-      case 'run_interactive_command': return this.runInteractiveCommand(
-        String(input.command ?? ''),
-        String(input.reason ?? ''),
-        stringOrUndefined(input.cwd),
-      )
-      default: return `Unknown tool: ${name}`
+    try {
+      this.throwIfAborted()
+      switch (name) {
+        case 'write_file':  return this.writeFile(String(input.path ?? ''), String(input.content ?? ''))
+        case 'edit_file':   return this.editFile(
+          String(input.path ?? ''),
+          String(input.old_string ?? ''),
+          String(input.new_string ?? ''),
+          input.replace_all === true,
+        )
+        case 'read_file':   return this.readFile(String(input.path ?? ''), numberOrZero(input.offset))
+        case 'delete_file': return this.deleteFile(String(input.path ?? ''))
+        case 'list_files':  return await this.listFiles(String(input.dir ?? '.'))
+        case 'grep_codebase': return await this.grepCodebase(input)
+        case 'glob_files':    return await this.globFiles(input)
+        case 'todo_write':    return await this.todoWrite(input)
+        case 'run_command': return await this.runCommand(
+          String(input.command ?? ''),
+          stringOrUndefined(input.cwd),
+          stringOrUndefined(input.kind) as ValidationCommandKind | undefined,
+        )
+        case 'run_interactive_command': return await this.runInteractiveCommand(
+          String(input.command ?? ''),
+          String(input.reason ?? ''),
+          stringOrUndefined(input.cwd),
+        )
+        default: return `Unknown tool: ${name}`
+      }
+    } catch (err) {
+      if (err instanceof ToolAbortError) return err.message
+      throw err
     }
   }
 
@@ -556,6 +584,7 @@ export class ToolExecutor {
    * continue (`offset=<next>`). Prevents silent data loss when re-writing large files.
    */
   private readFile(rawPath: string, offset: number = 0): string {
+    this.throwIfAborted()
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
     const permission = this.requirePermission('read', path)
@@ -572,8 +601,10 @@ export class ToolExecutor {
     if (!existsSync(fullPath)) return `Error: not found — ${path}`
     try {
       const content = readFileSync(fullPath, 'utf-8')
+      this.throwIfAborted()
       return sliceWithTruncationNotice(content, offset, path)
-    } catch {
+    } catch (err) {
+      if (err instanceof ToolAbortError) throw err
       return `Error: cannot read ${path}`
     }
   }
@@ -618,7 +649,7 @@ export class ToolExecutor {
     return `OK: deleted ${path}`
   }
 
-  private listFiles(rawDir: string): string {
+  private async listFiles(rawDir: string): Promise<string> {
     const dir = this.sanitizePath(rawDir) ?? '.'
     const permission = this.requirePermission('list', dir)
     if (permission) return permission
@@ -630,16 +661,23 @@ export class ToolExecutor {
     const fullPath = join(this.projectRoot, dir)
     if (existsSync(fullPath)) {
       try {
-        for (const f of readdirSync(fullPath)) {
+        const diskEntries = readdirSync(fullPath)
+        for (let i = 0; i < diskEntries.length; i++) {
+          if (i % TOOL_ABORT_CHECK_INTERVAL === 0) await this.abortCheckpoint()
+          const f = diskEntries[i]
           entries.set(f, statSync(join(fullPath, f)).isDirectory())
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof ToolAbortError) throw err
         if (entries.size === 0) return `Error: cannot list ${dir}`
       }
     }
 
     // Apply buffer overlay: show staged creates, hide staged deletes
-    for (const [bufPath, content] of this.buffer) {
+    const bufferedEntries = [...this.buffer.entries()]
+    for (let i = 0; i < bufferedEntries.length; i++) {
+      if (i % TOOL_ABORT_CHECK_INTERVAL === 0) await this.abortCheckpoint()
+      const [bufPath, content] = bufferedEntries[i]
       const normalized = bufPath.replace(/\\/g, '/')
       if (!normalized.startsWith(dirNorm)) continue
       const remainder = normalized.slice(dirNorm.length)
@@ -669,6 +707,7 @@ export class ToolExecutor {
    * the duration of the search so the agent can grep its own work-in-progress.
    */
   private async grepCodebase(rawInput: Record<string, unknown>): Promise<string> {
+    this.throwIfAborted()
     const pattern = typeof rawInput.pattern === 'string' ? rawInput.pattern : ''
     if (!pattern.trim()) return 'Error: grep_codebase requires a non-empty pattern.'
 
@@ -684,7 +723,7 @@ export class ToolExecutor {
 
     const result = await this.withStagedFilesOnDisk(() => grepCodebase(this.projectRoot, options, this.signal))
 
-    if (!result.ok) return `Error: ${result.error ?? 'grep_codebase failed'}`
+    if (!result.ok) return formatToolFailure(result.error, 'grep_codebase failed')
     if (result.lines.length === 0) return 'No matches.'
 
     const header = `${result.lines.length} ${options.outputMode === 'content' ? 'matching line(s)' : 'result(s)'}${result.truncated ? ' (truncated)' : ''}:`
@@ -697,6 +736,7 @@ export class ToolExecutor {
    * created earlier in the same iteration.
    */
   private async globFiles(rawInput: Record<string, unknown>): Promise<string> {
+    this.throwIfAborted()
     const pattern = typeof rawInput.pattern === 'string' ? rawInput.pattern : ''
     if (!pattern.trim()) return 'Error: glob_files requires a non-empty pattern.'
 
@@ -708,7 +748,7 @@ export class ToolExecutor {
 
     const result = await this.withStagedFilesOnDisk(() => globFiles(this.projectRoot, options, this.signal))
 
-    if (!result.ok) return `Error: ${result.error ?? 'glob_files failed'}`
+    if (!result.ok) return formatToolFailure(result.error, 'glob_files failed')
     if (result.paths.length === 0) return 'No files matched.'
 
     const header = `${result.paths.length} file(s)${result.truncated ? ' (truncated; head_limit reached)' : ''}:`
@@ -732,7 +772,7 @@ export class ToolExecutor {
   }
 
   private async runCommand(command: string, cwd?: string, kind?: ValidationCommandKind): Promise<string> {
-    if (this.signal?.aborted) return 'Aborted: session was cancelled before command could run'
+    this.throwIfAborted('Aborted: session was cancelled before command could run')
     const bashPermission = resolvePermission(this.permissionPolicy.bash, command)
     if (bashPermission === 'deny') return `Blocked: bash denied for ${command}`
     // FIX-CMD: the staged buffer holds writes that will be on disk by the time
@@ -779,19 +819,27 @@ export class ToolExecutor {
       signal: this.signal,
       onLine,
     }))
-    if (this.signal?.aborted) return 'Aborted: command cancelled by session abort'
+    this.throwIfAborted('Aborted: command cancelled by session abort')
     if (result.timedOut) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
     const out = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
-    if (result.exitCode !== 0) return `Error:\n${out || 'command failed'}`
+    if (result.exitCode !== 0) {
+      const environmentFailure = formatCommandEnvironmentFailureForAgent(out)
+      if (environmentFailure) return environmentFailure
+      return `Error:\n${out || 'command failed'}`
+    }
     return out || 'OK: command completed with no output'
   }
 
   private async withStagedFilesOnDisk<T>(run: () => Promise<T>): Promise<T> {
+    this.throwIfAborted()
     if (this.buffer.size === 0) return run()
 
     const touched = [...this.buffer.keys()]
     try {
-      for (const [path, content] of this.buffer.entries()) {
+      const stagedEntries = [...this.buffer.entries()]
+      for (let i = 0; i < stagedEntries.length; i++) {
+        if (i % TOOL_ABORT_CHECK_INTERVAL === 0) await this.abortCheckpoint()
+        const [path, content] = stagedEntries[i]
         const fullPath = join(this.projectRoot, path)
         if (content === null) {
           rmSync(fullPath, { force: true })
@@ -833,6 +881,7 @@ export class ToolExecutor {
   }
 
   private async runInteractiveCommand(command: string, reason: string, cwd?: string): Promise<string> {
+    this.throwIfAborted()
     if (!this.interactiveRunner) {
       return 'Interactive commands are not available in this context. Ask the user to run this command manually: ' + command
     }
@@ -858,6 +907,43 @@ export class ToolExecutor {
     }
   }
 
+  private throwIfAborted(message = TOOL_ABORT_MESSAGE): void {
+    if (this.signal?.aborted) throw new ToolAbortError(message)
+  }
+
+  private async abortCheckpoint(message = TOOL_ABORT_MESSAGE): Promise<void> {
+    this.throwIfAborted(message)
+    await yieldToEventLoop(this.signal)
+    this.throwIfAborted(message)
+  }
+
+}
+
+function formatToolFailure(error: string | undefined, fallback: string): string {
+  const message = error ?? fallback
+  return /^aborted\b/i.test(message) ? `Aborted: ${message.replace(/^aborted:?\s*/i, '')}` : `Error: ${message}`
+}
+
+function yieldToEventLoop(signal?: AbortSignal): Promise<void> {
+  if (!signal) return Promise.resolve()
+  if (signal?.aborted) return Promise.reject(new ToolAbortError())
+  return new Promise((resolvePromise, reject) => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise()
+    }, 0)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      reject(new ToolAbortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function resolvePermission(rule: PermissionAction | PermissionRule[] | undefined, target: string): PermissionAction {

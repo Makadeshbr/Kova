@@ -100,10 +100,20 @@ export function structuredMessageToHistoryText(message: StructuredAgentMessage):
 
   const changed = message.filesChanged.map(file => `${file.path} (${file.status})`).join(', ')
   const validations = message.validations.map(v => `${v.command}: ${v.status}`).join(', ')
+  const report = message.report
   return [
     `${message.title}: ${message.summary}`,
+    report ? `Objective: ${report.objective}` : '',
+    report ? `Outcome: ${report.outcome}` : '',
     changed ? `Files changed: ${changed}` : 'Files changed: none',
     validations ? `Validations: ${validations}` : '',
+    report?.commandsRun.length ? `Commands run: ${report.commandsRun.join(', ')}` : '',
+    report?.validationsNotRun.length
+      ? `Validations not run: ${report.validationsNotRun.map(item => `${item.kind} (${item.reason})`).join(', ')}`
+      : '',
+    report?.contextFiles.length ? `Context used: ${report.contextFiles.join(', ')}` : '',
+    report?.evidence.length ? `Evidence: ${report.evidence.join('; ')}` : '',
+    report?.nextSteps.length ? `Next steps: ${report.nextSteps.join(' ')}` : '',
     message.notes.length ? `Notes: ${message.notes.join(' ')}` : '',
     `Decision: ${message.decision}; risk: ${message.risk}`,
   ].filter(Boolean).join('\n')

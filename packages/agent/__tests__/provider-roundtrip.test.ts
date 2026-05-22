@@ -121,7 +121,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
       vi.stubGlobal('fetch', fetchMock)
 
       const executor = new ToolExecutor(projectRoot)
-      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm', retryPolicy: { maxAttempts: 1 } })
       const result = await provider.runAgentLoop(
         [{ role: 'user', content: 'create main.go' }],
         { system: 'be helpful', tools: AGENT_TOOLS, executor },
@@ -145,7 +145,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
       vi.stubGlobal('fetch', fetchMock)
 
       const executor = new ToolExecutor(projectRoot)
-      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+      const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm', retryPolicy: { maxAttempts: 1 } })
       await provider.runAgentLoop(
         [{ role: 'user', content: 'list files' }],
         { system: 'sys', tools: AGENT_TOOLS, executor },
@@ -254,7 +254,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
     it('Anthropic: 401 vira KovaProviderError provider_auth nao recuperavel', async () => {
       mockCreate.mockRejectedValueOnce(new Error('401 {"error":{"type":"authentication_error"}}'))
       const executor = new ToolExecutor(projectRoot)
-      const provider = new AnthropicProvider({ apiKey: 'bad-key' })
+      const provider = new AnthropicProvider({ apiKey: 'bad-key', retryPolicy: { maxAttempts: 1 } })
       await expect(
         provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
       ).rejects.toMatchObject({ code: 'provider_auth', recoverable: false, provider: 'anthropic' })
@@ -263,7 +263,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
     it('Anthropic: 429 vira KovaProviderError provider_rate_limited recuperavel', async () => {
       mockCreate.mockRejectedValueOnce(new Error('429 {"error":{"type":"rate_limit_error"}}'))
       const executor = new ToolExecutor(projectRoot)
-      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      const provider = new AnthropicProvider({ apiKey: 'test-key', retryPolicy: { maxAttempts: 1 } })
       await expect(
         provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
       ).rejects.toMatchObject({ code: 'provider_rate_limited', recoverable: true, provider: 'anthropic' })
@@ -273,7 +273,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
       const sdkErr = Object.assign(new Error('Too Many Requests'), { status: 429 })
       mockCreate.mockRejectedValueOnce(sdkErr)
       const executor = new ToolExecutor(projectRoot)
-      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      const provider = new AnthropicProvider({ apiKey: 'test-key', retryPolicy: { maxAttempts: 1 } })
       await expect(
         provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
       ).rejects.toMatchObject({ code: 'provider_rate_limited', recoverable: true })
@@ -282,7 +282,7 @@ describe('Provider round-trip: tool_use_id preservation', () => {
     it('Anthropic: 404 model not found vira KovaProviderError recuperavel', async () => {
       mockCreate.mockRejectedValueOnce(new Error('404 {"error":{"type":"not_found_error","message":"model not found"}}'))
       const executor = new ToolExecutor(projectRoot)
-      const provider = new AnthropicProvider({ apiKey: 'test-key' })
+      const provider = new AnthropicProvider({ apiKey: 'test-key', retryPolicy: { maxAttempts: 1 } })
       await expect(
         provider.runAgentLoop([{ role: 'user', content: 'hi' }], { system: '', tools: [], executor }),
       ).rejects.toMatchObject({ code: 'provider_model_not_found', recoverable: true })

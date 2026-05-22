@@ -5,6 +5,7 @@ import type { LLMResponse, GenerateOptions, AgentProvider, AgentLoopOptions, Pro
 import type { KovaTool } from '../tools'
 import { normalizeProviderError } from './errors'
 import { detectCapabilities } from './model-catalog'
+import { makeNonRetryableProviderError, withProviderRetry, type ProviderRetryPolicyInput } from './retry'
 import {
   withCachedSystem,
   withCachedTools,
@@ -15,6 +16,7 @@ import {
 export interface AnthropicProviderOptions {
   apiKey?: string
   model?: string
+  retryPolicy?: ProviderRetryPolicyInput
 }
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6'
@@ -23,10 +25,12 @@ const DEFAULT_MAX_TOKENS = 8192
 export class AnthropicProvider implements AgentProvider {
   private readonly client: Anthropic
   private readonly defaultModel: string
+  private readonly retryPolicy?: ProviderRetryPolicyInput
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.client = new Anthropic({ apiKey: options.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '' })
     this.defaultModel = options.model ?? DEFAULT_MODEL
+    this.retryPolicy = options.retryPolicy
   }
 
   capabilities(): ProviderCapabilities {
@@ -51,12 +55,12 @@ export class AnthropicProvider implements AgentProvider {
 
     let response: Anthropic.Messages.Message
     try {
-      response = await this.client.messages.create({
+      response = await this.withRetry(() => this.client.messages.create({
         model,
         max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
         ...(cachedSystem ? { system: cachedSystem } : {}),
         messages: cachedMessages,
-      })
+      }), model)
     } catch (err) {
       throw normalizeProviderError(err, { provider: 'anthropic', model })
     }
@@ -81,17 +85,35 @@ export class AnthropicProvider implements AgentProvider {
       if (!onToken) return this.generate(messages, { system, model: options.model, maxTokens: options.maxTokens })
 
       // Streaming chat without tools (Anthropic doesn't stream via generate())
-      const stream = this.client.messages.stream({
-        model: options.model ?? this.defaultModel,
-        max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-        ...(cachedSystem ? { system: cachedSystem } : {}),
-        messages: cachedHistory,
-      }, { signal })
       let thought = ''
-      stream.on('text', text => { thought += text; onToken(text) })
       let response: Anthropic.Messages.Message
       try {
-        response = await stream.finalMessage()
+        response = await this.withRetry(async () => {
+          let emittedText = false
+          const stream = this.client.messages.stream({
+            model: options.model ?? this.defaultModel,
+            max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+            ...(cachedSystem ? { system: cachedSystem } : {}),
+            messages: cachedHistory,
+          }, { signal })
+          stream.on('text', text => {
+            emittedText = true
+            thought += text
+            onToken(text)
+          })
+          try {
+            return await stream.finalMessage()
+          } catch (err) {
+            if (emittedText) {
+              throw makeNonRetryableProviderError(
+                err,
+                'Streaming response interrupted after partial output. Retry skipped to avoid duplicate tokens.',
+                { provider: 'anthropic', model: options.model ?? this.defaultModel },
+              )
+            }
+            throw err
+          }
+        }, options.model ?? this.defaultModel, signal, options.onProviderRetry)
       } catch (err) {
         throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
       }
@@ -125,21 +147,41 @@ export class AnthropicProvider implements AgentProvider {
 
       if (onToken) {
         // Streaming path — emit tokens in real time and accumulate the full response
-        const stream = this.client.messages.stream(params, { signal })
-
-        stream.on('text', (text) => {
-          turnText += text
-          onToken(text)
-        })
-
         try {
-          response = await stream.finalMessage()
+          response = await this.withRetry(async () => {
+            let emittedText = false
+            const stream = this.client.messages.stream(params, { signal })
+
+            stream.on('text', (text) => {
+              emittedText = true
+              turnText += text
+              onToken(text)
+            })
+
+            try {
+              return await stream.finalMessage()
+            } catch (err) {
+              if (emittedText) {
+                throw makeNonRetryableProviderError(
+                  err,
+                  'Streaming response interrupted after partial output. Retry skipped to avoid duplicate tokens.',
+                  { provider: 'anthropic', model: options.model ?? this.defaultModel },
+                )
+              }
+              throw err
+            }
+          }, options.model ?? this.defaultModel, signal, options.onProviderRetry)
         } catch (err) {
           throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
         }
       } else {
         try {
-          response = await this.client.messages.create(params)
+          response = await this.withRetry(
+            () => this.client.messages.create(params),
+            options.model ?? this.defaultModel,
+            signal,
+            options.onProviderRetry,
+          )
         } catch (err) {
           throw normalizeProviderError(err, { provider: 'anthropic', model: options.model ?? this.defaultModel })
         }
@@ -178,6 +220,20 @@ export class AnthropicProvider implements AgentProvider {
       maxTurnsReached,
       incompleteReason: maxTurnsReached ? `Agent reached maxTurns (${maxTurns}) before a final response.` : undefined,
     }
+  }
+
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    model: string,
+    signal?: AbortSignal,
+    onProviderRetry?: AgentLoopOptions['onProviderRetry'],
+  ): Promise<T> {
+    return withProviderRetry(operation, {
+      provider: 'anthropic',
+      model,
+      signal,
+      onRetry: onProviderRetry,
+    }, this.retryPolicy)
   }
 }
 

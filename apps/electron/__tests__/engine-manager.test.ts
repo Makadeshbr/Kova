@@ -8,7 +8,7 @@
  *  - no-validation score does not produce auto_apply
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EngineManager } from '../src/main/engine-manager'
@@ -35,13 +35,15 @@ type MockProviderOpts = {
   throws?: Error
   emitTokens?: string[]
   emitReasoning?: string[]
+  generateThought?: string
+  loopThought?: string
   makeChanges?: boolean
 }
 
 function makeMockProvider(opts: MockProviderOpts = {}): AgentProvider {
   return {
     capabilities: () => ({ supportsToolCalls: true, contextTokenLimit: 8_000 }),
-    generate: vi.fn().mockResolvedValue({ thought: '', changes: [], tokensUsed: 0 } as LLMResponse),
+    generate: vi.fn().mockResolvedValue({ thought: opts.generateThought ?? '', changes: [], tokensUsed: 1 } as LLMResponse),
     runAgentLoop: vi.fn().mockImplementation(async (msgs: AgentMessage[], loopOpts: AgentLoopOptions) => {
       if (opts.delay) await new Promise(r => setTimeout(r, opts.delay))
 
@@ -60,8 +62,10 @@ function makeMockProvider(opts: MockProviderOpts = {}): AgentProvider {
       if (opts.throws) throw opts.throws
 
       return {
-        thought: (opts.emitTokens ?? []).join(''),
-        changes: [],
+        thought: opts.loopThought ?? (opts.emitTokens ?? []).join(''),
+        changes: opts.makeChanges
+          ? [{ path: 'src/app.ts', type: 'create' as const, diff: 'export const app = true\n' }]
+          : [],
         tokensUsed: 1,
       } as LLMResponse
     }),
@@ -108,6 +112,46 @@ afterEach(() => {
 })
 
 describe('stream_end — emitted exactly once', () => {
+  it('projectless chat uses provider.generate without workspace tools', async () => {
+    const provider = makeMockProvider({ generateThought: 'Boa noite. Como posso ajudar?' })
+    const [manager, { events }] = makeManager(provider)
+
+    await manager.sendMessage('Boa noite', [], {
+      objective: 'Boa noite',
+      mode: 'chat',
+      provider: 'anthropic',
+      apiKey: 'test-key',
+      model: 'claude-test',
+      maxIterations: 1,
+      autoApply: false,
+    })
+
+    expect(vi.mocked(provider.generate)).toHaveBeenCalled()
+    expect(vi.mocked(provider.runAgentLoop)).not.toHaveBeenCalled()
+    expect(events.some(e => e.type === 'token' && e.token === 'Boa noite. Como posso ajudar?')).toBe(true)
+    expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
+  })
+
+  it('projectless code mode is blocked before the agent loop', async () => {
+    const provider = makeMockProvider()
+    const [manager, { events }] = makeManager(provider)
+
+    await manager.sendMessage('create an app', [], {
+      objective: 'create an app',
+      mode: 'patch',
+      provider: 'anthropic',
+      apiKey: 'test-key',
+      model: 'claude-test',
+      maxIterations: 1,
+      autoApply: false,
+    })
+
+    expect(vi.mocked(provider.generate)).not.toHaveBeenCalled()
+    expect(vi.mocked(provider.runAgentLoop)).not.toHaveBeenCalled()
+    expect(events.some(e => e.type === 'token' && e.token?.includes('needs an attached project'))).toBe(true)
+    expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
+  })
+
   it('text-only response: stream_end emitted exactly once', async () => {
     const provider = makeMockProvider({ emitTokens: ['Hello', ' world'] })
     const [manager, { events }] = makeManager(provider)
@@ -116,6 +160,19 @@ describe('stream_end — emitted exactly once', () => {
 
     const streamEnds = events.filter(e => e.type === 'stream_end')
     expect(streamEnds).toHaveLength(1)
+  })
+
+  it('patch text-only response is still visible when the provider returns final text without streaming tokens', async () => {
+    const provider = makeMockProvider({
+      loopThought: 'I inspected the request and there are no file changes needed because this is a direct explanation with enough detail for the user to act on.',
+    })
+    const [manager, { events }] = makeManager(provider)
+
+    await manager.sendMessage('Explain the current task', [], { ...makeParams(projectRoot), mode: 'patch' })
+
+    const visible = events.filter(e => e.type === 'token').map(e => e.token).join('')
+    expect(visible).toContain('there are no file changes needed')
+    expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
   })
 
   it('provider error on first iteration: stream_end emitted exactly once', async () => {
@@ -149,6 +206,42 @@ describe('stream_end — emitted exactly once', () => {
 
     const streamEnds = events.filter(e => e.type === 'stream_end')
     expect(streamEnds.length).toBeLessThanOrEqual(1)
+  })
+
+  it('patch completion emits a structured run report for the chat history', async () => {
+    const provider = makeMockProvider({ makeChanges: true })
+    const [manager, { events }] = makeManager(provider)
+
+    await manager.sendMessage('Create a tiny app', [], makeParams(projectRoot))
+
+    const streamEnd = events.find(e => e.type === 'stream_end' && e.structuredMessage?.kind === 'agent_result')
+    expect(streamEnd?.structuredMessage?.kind).toBe('agent_result')
+    const result = streamEnd?.structuredMessage as import('@kova/shared').AgentResultMessage | undefined
+    expect(result?.report?.objective).toContain('Create a tiny app')
+    expect(result?.report?.files[0]?.path).toBe('src/app.ts')
+    expect(result?.report?.evidence.join('\n')).toContain('file')
+    expect(Array.isArray(result?.report?.validationsNotRun)).toBe(true)
+  })
+
+  it('patch completion persists a recoverable final snapshot with the run receipt', async () => {
+    const provider = makeMockProvider({ makeChanges: true })
+    const [manager] = makeManager(provider)
+
+    await manager.sendMessage('Create a tiny app', [], {
+      ...makeParams(projectRoot),
+      sessionId: 'session-receipt',
+    })
+
+    const snapshotDir = join(projectRoot, '.kova', 'sessions', 'session-receipt')
+    const finalPath = join(snapshotDir, 'session.json')
+    expect(existsSync(finalPath)).toBe(true)
+    expect(existsSync(join(snapshotDir, 'current.json'))).toBe(false)
+    const persisted = JSON.parse(readFileSync(finalPath, 'utf-8')) as {
+      finalMessage?: { structured?: { kind?: string } }
+      executionState?: { status?: string }
+    }
+    expect(persisted.finalMessage?.structured?.kind).toBe('agent_result')
+    expect(persisted.executionState?.status).toBe('paused')
   })
 
   it('emits reasoning events separately from final response tokens', async () => {
@@ -338,22 +431,15 @@ describe('inferRunMode — unified default (patch)', () => {
 })
 
 describe('EngineManager - sticky mode routing (Kova v2)', () => {
-  /**
-   * NEW CONTRACT: mode is a session property. The renderer pins it (default
-   * 'patch') and only changes it on explicit slash commands. Short greetings
-   * NO LONGER auto-route to chat — they stay in patch (unified) mode and
-   * the agent decides via prompt + tools whether to reply or write.
-   */
-  it('keeps short greetings in patch mode by default (no auto-chat-routing)', async () => {
+  it('routes short greetings to chat mode so normal conversation does not open execution', async () => {
     const provider = makeMockProvider({ emitTokens: ['hi back'] })
     const [manager, { events }] = makeManager(provider)
 
     await manager.sendMessage('Ola', [], makeParams(projectRoot))
 
-    // Patch mode triggers ExecutionEngine — at minimum a state_changed event
-    // (or stream_end) must fire to confirm we didn't silently swallow the turn.
-    const sawStreamEnd = events.some(e => e.type === 'stream_end')
-    expect(sawStreamEnd).toBe(true)
+    expect(events.some(e => e.type === 'validation_started')).toBe(false)
+    expect(events.some(e => e.type === 'proof_pack')).toBe(false)
+    expect(events.filter(e => e.type === 'stream_end')).toHaveLength(1)
   })
 
   it('routes explicit /chat slash to chat mode (read-only, no validation)', async () => {
@@ -429,7 +515,6 @@ describe('handleOpenFolder — state reset contract', () => {
    *   task: null
    *   isThinking: false
    *   streamingText: ''
-   *   showDiff: false
    *   openFilePath: null
    *
    * This contract is validated manually or via React Testing Library.
@@ -442,11 +527,10 @@ describe('handleOpenFolder — state reset contract', () => {
       'task',
       'isThinking',
       'streamingText',
-      'showDiff',
       'openFilePath',
     ]
     // All required fields documented in handleOpenFolder (App.tsx)
-    expect(requiredResets).toHaveLength(7)
+    expect(requiredResets).toHaveLength(6)
   })
 })
 

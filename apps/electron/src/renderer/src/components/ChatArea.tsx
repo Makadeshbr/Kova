@@ -2,12 +2,13 @@ import React, { useState, useRef, useEffect, useCallback, type KeyboardEvent, ty
 import type { ExecutionEvent, ExecutionState, TaskDefinition } from '../types'
 import type { ChatMessage, ChatMode, QueuedMessage, ReasoningState, SessionUsage } from '../App'
 import type { AgentResultMessage, Attachment, Todo } from '@kova/shared'
-import { FileCard } from './FileCard'
 import { ActivityFeed } from './ActivityFeed'
 import { TodoListCard } from './TodoListCard'
 import { getValidationConfidenceCopy } from '../lib/validation-confidence-copy'
 import { contextualStatusLabel } from '../lib/status-context'
 import { shouldRenderFloatingResultCard } from '../lib/chat-ordering'
+import { shouldRenderRunOverlay } from '../lib/run-overlay'
+import { buildContextContinuitySummary, type ContextContinuitySummary } from '../lib/context-continuity'
 import kovaLogo from '../assets/Logo_Kova.png'
 
 // Per-attachment cap (10 MB) and per-message cap (50 MB total). Enforced
@@ -61,6 +62,11 @@ interface Props {
   activeModel: string | null
   /** FIX-018: multi-step todo list emitted by todo_write. [] hides the card. */
   todos: Todo[]
+  reviewChangeCount: number
+  onReviewChanges?: () => void
+  onApplyChanges?: () => void
+  onPauseRun: () => void
+  onCancelRun: () => void
   onModeChange: (mode: ChatMode) => void
   onClearQueue: () => void
 }
@@ -119,7 +125,6 @@ function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRe
 const SLASH_COMMANDS = [
   { cmd: '/plan',   label: 'Plan',   detail: 'Analyze and create a technical plan — no file changes' },
   { cmd: '/review', label: 'Review', detail: 'Read-only code review with detailed findings' },
-  { cmd: '/chat',   label: 'Chat',   detail: 'Read-only Q&A — answer questions without touching files' },
 ]
 
 function SlashPalette({ query, onSelect }: { query: string; onSelect: (cmd: string) => void }): React.ReactElement | null {
@@ -310,6 +315,7 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
   const statusColor = ok ? 'var(--teal)' : msg.decision === 'needs_review' ? 'var(--yellow)' : 'var(--red)'
   const statusIcon  = ok ? '✓' : msg.decision === 'needs_review' ? '⏸' : '✗'
 
+  const report = msg.report
   const created  = msg.filesChanged.filter(f => f.status === 'created').length
   const modified = msg.filesChanged.filter(f => f.status === 'modified').length
   const deleted  = msg.filesChanged.filter(f => f.status === 'deleted').length
@@ -336,6 +342,58 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
             </span>
           </div>
         </div>
+
+        {report && (
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-2)', display: 'flex', flexDirection: 'column', gap: 9 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 10, color: 'var(--text-3)', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.06em' }}>Run report</div>
+                <div style={{ color: 'var(--text-1)', fontSize: 12.5, lineHeight: 1.5, marginTop: 3, wordBreak: 'break-word' }}>{report.objective}</div>
+                <div style={{ color: 'var(--text-3)', fontSize: 11, marginTop: 3 }}>{report.outcome}</div>
+              </div>
+              <span style={{ fontSize: 10, color: statusColor, background: 'var(--bg-3)', border: '1px solid var(--border)', padding: '2px 7px', borderRadius: 7, fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
+                {report.status}
+              </span>
+            </div>
+
+            {report.evidence.length > 0 && (
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                {report.evidence.map(item => (
+                  <span key={item} style={{ fontSize: 10, color: 'var(--text-2)', background: 'var(--bg-3)', border: '1px solid var(--border)', padding: '1px 6px', borderRadius: 7, fontFamily: 'var(--font-mono)' }}>{item}</span>
+                ))}
+              </div>
+            )}
+
+            {(report.commandsRun.length > 0 || report.validationsNotRun.length > 0 || report.contextFiles.length > 0) && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
+                {report.commandsRun.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 3 }}>Commands</div>
+                    {report.commandsRun.slice(0, 3).map(command => <code key={command} style={{ display: 'block', fontSize: 10.5, color: 'var(--text-2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{command}</code>)}
+                  </div>
+                )}
+                {report.validationsNotRun.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 3 }}>Not run</div>
+                    {report.validationsNotRun.slice(0, 3).map(item => <div key={`${item.kind}:${item.reason}`} style={{ fontSize: 10.5, color: 'var(--text-2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.kind}: {item.reason}</div>)}
+                  </div>
+                )}
+                {report.contextFiles.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, color: 'var(--text-3)', marginBottom: 3 }}>Context used</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--text-2)' }}>{report.contextFiles.slice(0, 3).join(', ')}{report.contextFiles.length > 3 ? ` +${report.contextFiles.length - 3}` : ''}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {report.nextSteps.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5 }}>
+                Next: {report.nextSteps.slice(0, 2).join(' ')}
+              </div>
+            )}
+          </div>
+        )}
 
         {msg.validations.length > 0 && (
           <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)', display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -633,6 +691,276 @@ function formatDuration(ms: number): string {
   return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`
 }
 
+function ContextContinuityPanel({ summary }: { summary: ContextContinuitySummary }): React.ReactElement | null {
+  if (!summary.visible) return null
+
+  return (
+    <section className="kova-context-continuity" aria-label="Context used by Kova">
+      <div className="kova-context-continuity-head">
+        <div>
+          <span>Context</span>
+          <strong>{summary.fileCount} file{summary.fileCount === 1 ? '' : 's'}</strong>
+        </div>
+        <div className="kova-context-continuity-badges">
+          <span>{summary.tokenLabel}</span>
+          {summary.reused && <span>reused</span>}
+          {summary.memoryLabel && <span>{summary.memoryLabel}</span>}
+          {summary.safetyLabel && <span>{summary.safetyLabel}</span>}
+        </div>
+      </div>
+
+      {summary.selectedFiles.length > 0 && (
+        <div className="kova-context-file-row">
+          {summary.selectedFiles.map(file => (
+            <div key={file.path} className="kova-context-file-chip" title={file.reason}>
+              <span>{compactPath(file.path)}</span>
+              <small>{file.source} / {file.confidence}</small>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {summary.warnings.length > 0 && (
+        <div className="kova-context-warnings">
+          {summary.warnings.map(warning => <span key={warning}>{warning}</span>)}
+        </div>
+      )}
+    </section>
+  )
+}
+
+interface ChangeCounts {
+  created: number
+  modified: number
+  deleted: number
+  total: number
+}
+
+interface CommandBlock {
+  id: string
+  title: string
+  status: 'running' | 'success' | 'failed'
+  lines: string[]
+}
+
+function collectChanges(executionState: ExecutionState | null) {
+  return executionState?.iterationHistory.flatMap(iteration => iteration.changes) ?? []
+}
+
+function countChanges(executionState: ExecutionState | null): ChangeCounts {
+  const changes = collectChanges(executionState)
+  return {
+    created: changes.filter(change => change.type === 'create').length,
+    modified: changes.filter(change => change.type === 'modify').length,
+    deleted: changes.filter(change => change.type === 'delete').length,
+    total: changes.length,
+  }
+}
+
+function compactPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  if (parts.length <= 3) return path
+  return `${parts[0]}/.../${parts.slice(-2).join('/')}`
+}
+
+function runTitle(executionState: ExecutionState | null, isThinking: boolean): string {
+  if (isThinking && !executionState) return 'Thinking'
+  const status = executionState?.status
+  if (!status) return 'Ready'
+  if (status === 'paused') return 'Review required'
+  if (status === 'completed') return 'Completed'
+  if (status === 'failed') return 'Needs attention'
+  return status.replace(/_/g, ' ')
+}
+
+function completionStopLabel(reason: NonNullable<ExecutionState['iterationHistory'][number]['decision']['completion']>['reason']): string {
+  if (reason === 'completed_with_warnings') return 'Completed with warnings'
+  if (reason === 'environment_blocked') return 'Environment blocked'
+  if (reason === 'needs_user') return 'Needs user'
+  return 'Continuing next turn'
+}
+
+function buildCommandBlocks(events: ExecutionEvent[]): CommandBlock[] {
+  const blocks: CommandBlock[] = []
+  for (const event of events) {
+    if (event.type === 'tool_call' && event.toolName === 'run_command') {
+      blocks.push({
+        id: event.commandId ?? `${event.timestamp}:${blocks.length}`,
+        title: String(event.toolInput?.command ?? event.message ?? 'run_command'),
+        status: 'running',
+        lines: [],
+      })
+      continue
+    }
+    if (event.type === 'harness_layer_start') {
+      blocks.push({
+        id: `${event.timestamp}:${event.harnessLayer ?? 'harness'}`,
+        title: event.message ?? event.harnessLayer ?? 'validation',
+        status: 'running',
+        lines: [],
+      })
+      continue
+    }
+    if (event.type === 'command_output') {
+      const block = [...blocks].reverse().find(item => item.id === event.commandId) ?? blocks.at(-1)
+      if (block && event.commandLine) block.lines.push(event.commandLine)
+      continue
+    }
+    if (event.type === 'harness_line') {
+      const block = blocks.at(-1)
+      if (block && event.harnessLine) block.lines.push(event.harnessLine)
+      continue
+    }
+    if (event.type === 'tool_result') {
+      const block = [...blocks].reverse().find(item => item.status === 'running')
+      if (block) block.status = event.message?.startsWith('Error:') ? 'failed' : 'success'
+      continue
+    }
+    if (event.type === 'validation_completed') {
+      const block = [...blocks].reverse().find(item => item.status === 'running')
+      if (block) block.status = event.harnessResult?.passed ? 'success' : 'failed'
+    }
+  }
+  return blocks.slice(-3).map(block => ({ ...block, lines: block.lines.slice(-24) }))
+}
+
+function RunControlOverlay({
+  executionState, events, todos, reviewChangeCount, isThinking, isRunning,
+  activeMode, minimized, onToggleMinimized, onReviewChanges, onApplyChanges, onPauseRun, onCancelRun,
+}: {
+  executionState: ExecutionState | null
+  events: ExecutionEvent[]
+  todos: Todo[]
+  reviewChangeCount: number
+  isThinking: boolean
+  isRunning: boolean
+  activeMode: ChatMode
+  minimized: boolean
+  onToggleMinimized: () => void
+  onReviewChanges?: () => void
+  onApplyChanges?: () => void
+  onPauseRun: () => void
+  onCancelRun: () => void
+}): React.ReactElement | null {
+  if (!shouldRenderRunOverlay({ executionState, events, todos, reviewChangeCount, isThinking, activeMode })) return null
+
+  const counts = countChanges(executionState)
+  const last = executionState?.iterationHistory.at(-1)
+  const completionStop = last?.decision.completion
+  const failedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && !layer.passed) ?? []
+  const passedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && layer.passed) ?? []
+  const score = last?.decision.score ?? last?.harnessResult.score
+  const status = executionState?.status ?? null
+  const canApply = (status === 'paused' || status === 'completed') && reviewChangeCount > 0 && !!onApplyChanges
+  const hasActions = isRunning || reviewChangeCount > 0
+  const changedSummary = counts.total > 0
+    ? [
+      counts.created > 0 ? `${counts.created} new` : null,
+      counts.modified > 0 ? `${counts.modified} changed` : null,
+      counts.deleted > 0 ? `${counts.deleted} deleted` : null,
+    ].filter(Boolean).join(' / ')
+    : 'No file changes'
+  const visibleTodos = todos.slice(0, 5)
+  const hiddenTodoCount = Math.max(0, todos.length - visibleTodos.length)
+  const completedTodoCount = todos.filter(todo => todo.status === 'completed').length
+  const nonTokenEvents = events.filter(event => event.type !== 'token')
+
+  return (
+    <section className="kova-run-overlay" data-minimized={minimized ? 'true' : 'false'}>
+      <div className="kova-run-overlay-top">
+        <div className="kova-run-summary-main">
+          <div className="kova-run-summary-title">
+            <span className={`kova-run-dot ${isRunning ? 'running' : status === 'failed' ? 'failed' : status === 'paused' ? 'paused' : ''}`} />
+            <strong>{runTitle(executionState, isThinking)}</strong>
+            {score !== undefined && <span className="kova-run-score">score {score}</span>}
+          </div>
+          <div className="kova-run-summary-meta">
+            {todos.length > 0 && <span>Plan {todos.filter(todo => todo.status === 'completed').length}/{todos.length}</span>}
+            {counts.total > 0 && <span>{changedSummary}</span>}
+            {passedLayers.length > 0 && <span>{passedLayers.length} checks passed</span>}
+            {failedLayers.length > 0 && <span className="danger">{failedLayers.map(layer => layer.name).join(', ')} failed</span>}
+            {completionStop && <span>{completionStopLabel(completionStop.reason)}</span>}
+            {nonTokenEvents.length > 0 && <span>{nonTokenEvents.length} events</span>}
+          </div>
+        </div>
+        <div className="kova-run-summary-actions">
+          {hasActions && reviewChangeCount > 0 && onReviewChanges && (
+            <button className="secondary" onClick={onReviewChanges}>
+              <span className="material-symbols-outlined">difference</span>
+              Review {reviewChangeCount}
+            </button>
+          )}
+          {canApply && (
+            <button className="primary" onClick={() => onApplyChanges?.()}>
+              <span className="material-symbols-outlined">check</span>
+              {status === 'completed' ? 'Approve' : 'Apply'}
+            </button>
+          )}
+          {hasActions && isRunning && <button className="secondary" onClick={onPauseRun}>Pause</button>}
+          {hasActions && (isRunning || status === 'paused') && <button className="danger" onClick={onCancelRun}>Reject</button>}
+          <button className="icon" onClick={onToggleMinimized} title={minimized ? 'Expand run details' : 'Minimize run details'}>
+            <span className="material-symbols-outlined">{minimized ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}</span>
+          </button>
+        </div>
+      </div>
+
+      {!minimized && todos.length > 0 && (
+        <div className="kova-run-overlay-plan">
+          <TodoListCard todos={visibleTodos} summaryLabel={`${completedTodoCount}/${todos.length}`} />
+          {hiddenTodoCount > 0 && (
+            <div className="kova-run-overlay-more">
+              +{hiddenTodoCount} more step{hiddenTodoCount === 1 ? '' : 's'}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!minimized && todos.length === 0 && nonTokenEvents.length > 0 && (
+        <div className="kova-run-overlay-log">
+          {completionStop && (
+            <div>
+              <span>{completionStopLabel(completionStop.reason)}</span>
+              <p>{completionStop.detail}</p>
+            </div>
+          )}
+          {nonTokenEvents.slice(-3).map((event, index) => (
+            <div key={`${event.timestamp}-${index}`}>
+              <span>{event.type.replace(/_/g, ' ')}</span>
+              <p>{event.message ?? event.toolName ?? 'Working'}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function CommandOutputPanel({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
+  const blocks = buildCommandBlocks(events)
+  if (blocks.length === 0) return null
+  return (
+    <div className="kova-command-panel">
+      <div className="kova-command-panel-title">
+        <span className="material-symbols-outlined">terminal</span>
+        <strong>Commands</strong>
+      </div>
+      {blocks.map(block => (
+        <section className="kova-command-block" data-status={block.status} key={block.id}>
+          <header>
+            <span className="kova-command-status" />
+            <code>{block.title}</code>
+          </header>
+          {block.lines.length > 0 ? (
+            <pre>{block.lines.join('\n')}</pre>
+          ) : (
+            <p>{block.status === 'running' ? 'Waiting for output...' : 'No output captured.'}</p>
+          )}
+        </section>
+      ))}
+    </div>
+  )
+}
+
 // ─── Task result card ─────────────────────────────────────────────────────────
 
 function TaskResultCard({ executionState }: { executionState: ExecutionState }): React.ReactElement | null {
@@ -754,10 +1082,19 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
           </div>
         )}
 
-        <div style={{ padding: '8px 10px', background: 'var(--bg-2)' }}>
-          {changes.map((change, i) => (
-            <FileCard key={i} change={change} defaultOpen={changes.length === 1} />
+        <div className="kova-result-file-strip">
+          {changes.slice(0, 8).map((change, i) => (
+            <div className="kova-result-file-row" data-kind={change.type} key={`${change.path}:${i}`}>
+              <span>{change.type}</span>
+              <code>{compactPath(change.path)}</code>
+            </div>
           ))}
+          {changes.length > 8 && (
+            <div className="kova-result-file-row muted">
+              <span>more</span>
+              <code>{changes.length - 8} additional file{changes.length - 8 === 1 ? '' : 's'} in Review</code>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -779,13 +1116,14 @@ export function ChatArea({
   messages, executionState, isThinking, isRunning,
   streamingText, reasoning, events, projectRoot, onSend, onOpenFolder,
   queuedMessages, activeMode, sessionUsage, activeModel, todos, onModeChange, onClearQueue,
-  supportsVision,
+  supportsVision, reviewChangeCount, onReviewChanges, onApplyChanges, onPauseRun, onCancelRun,
 }: Props): React.ReactElement {
   const [value, setValue]           = useState('')
   const [showSlash, setShowSlash]   = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [runOverlayMinimized, setRunOverlayMinimized] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -886,19 +1224,18 @@ export function ChatArea({
   const submit = useCallback(() => {
     const t = value.trim()
     // Allow sending with attachments but no text (e.g. "what's in this screenshot?")
-    if ((!t && attachments.length === 0) || !projectRoot) return
+    if (!t && attachments.length === 0) return
     // The slash command parsing happens canonically inside handleSend (parseUserInput).
     // We still update the pinned-mode pill visually so subsequent messages without a
     // slash prefix continue in the same mode. This setState is for UI state only —
     // the dispatch decision is owned by handleSend.
     if (/^\/plan(\s|$)/i.test(t)) onModeChange('plan')
     else if (/^\/review(\s|$)/i.test(t)) onModeChange('review')
-    else if (/^\/chat(\s|$)/i.test(t)) onModeChange('chat')
     onSend(t, undefined, attachments.length > 0 ? attachments : undefined)
     setValue('')
     setAttachments([])
     setAttachmentError(null)
-  }, [value, attachments, projectRoot, onSend, onModeChange])
+  }, [value, attachments, onSend, onModeChange])
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() }
@@ -919,8 +1256,8 @@ export function ChatArea({
   const hasResult = !!lastIter && lastIter.changes.length > 0
   const isActive  = !!executionState && !['completed', 'failed', 'paused'].includes(executionState.status)
   const showLive  = (isRunning || isThinking || reasoning.active) && !hasResult
+  const showActivityArchive = !showLive && events.length > 0
   const hasStructuredTaskResult = messages.some(msg => msg.structured?.kind === 'agent_result')
-  const showTodoCard = todos.length > 0 && (isActive || isRunning || isThinking || reasoning.active)
   const showResultCard = shouldRenderFloatingResultCard({
     hasResult,
     showLive,
@@ -932,6 +1269,7 @@ export function ChatArea({
   const contextPct  = sessionUsage.maxContextTokens
     ? Math.min(100, Math.round((sessionUsage.contextTokens / sessionUsage.maxContextTokens) * 100))
     : 0
+  const contextContinuity = buildContextContinuitySummary(sessionUsage, events)
 
   const isNonDefaultMode = activeMode === 'plan' || activeMode === 'review'
 
@@ -939,7 +1277,8 @@ export function ChatArea({
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
       {/* ─── Messages ──────────────────────────────────────────────────── */}
-      <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px 12px', scrollbarWidth: 'thin' }}>
+      <div className="kova-chat-scroll">
+        <div className="kova-chat-column">
 
         {isEmpty && (
           <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
@@ -969,16 +1308,16 @@ export function ChatArea({
             <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--cyan)', letterSpacing: '0.12em' }}>KOVA</div>
             <p style={{ color: 'var(--text-3)', fontSize: 13, textAlign: 'center', lineHeight: 1.8, maxWidth: 340 }}>
               {projectRoot
-                ? 'Ask, analyze, or request to create and fix code.'
-                : 'Open a project to get started.'}
+                ? 'Ask questions, plan changes, review code, or build directly in this workspace.'
+                : 'Ask anything now. Attach a project when you want Kova to inspect or change files.'}
             </p>
             {!projectRoot && (
               <button onClick={onOpenFolder} style={{
-                marginTop: 8, background: 'var(--amber-dim)', color: 'var(--amber)',
-                border: '1px solid rgba(193,122,46,0.25)', padding: '8px 22px',
+                marginTop: 8, background: 'var(--cyan-dim)', color: 'var(--cyan)',
+                border: '1px solid rgba(164,230,255,0.25)', padding: '8px 22px',
                 borderRadius: 8, fontSize: 13,
               }}>
-                Open project
+                Attach project
               </button>
             )}
             {projectRoot && (
@@ -1000,9 +1339,6 @@ export function ChatArea({
           </div>
         )}
 
-        {/* FIX-018: multi-step plan card. Hidden when no active agent run owns it. */}
-        {showTodoCard && <TodoListCard todos={todos} />}
-
         {messages.map(msg =>
           msg.role === 'user'
             ? <UserBubble key={msg.id} msg={msg} />
@@ -1010,6 +1346,15 @@ export function ChatArea({
         )}
 
         {showResultCard && <TaskResultCard executionState={executionState!} />}
+
+        {contextContinuity.visible && <ContextContinuityPanel summary={contextContinuity} />}
+
+        {showActivityArchive && (
+          <>
+            <CommandOutputPanel events={events} />
+            <ActivityFeed events={events} />
+          </>
+        )}
 
         {showLive && (
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
@@ -1031,6 +1376,7 @@ export function ChatArea({
                   }} />
                 </div>
               )}
+              <CommandOutputPanel events={events} />
               {events.length > 0 && <ActivityFeed events={events} />}
               {isActive && (
                 <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1043,11 +1389,28 @@ export function ChatArea({
           </div>
         )}
 
-        <div ref={bottomRef} />
+          <div ref={bottomRef} />
+        </div>
       </div>
 
       {/* ─── Composer ─────────────────────────────────────────────────── */}
-      <div style={{ padding: '10px 16px 14px', borderTop: '1px solid var(--border)', background: 'var(--bg-1)', flexShrink: 0 }}>
+      <div className="kova-composer-dock">
+        <div className="kova-composer-column">
+        <RunControlOverlay
+          executionState={executionState}
+          events={events}
+          todos={todos}
+          reviewChangeCount={reviewChangeCount}
+          isThinking={isThinking}
+          isRunning={isRunning}
+          activeMode={activeMode}
+          minimized={runOverlayMinimized}
+          onToggleMinimized={() => setRunOverlayMinimized(value => !value)}
+          onReviewChanges={onReviewChanges}
+          onApplyChanges={onApplyChanges}
+          onPauseRun={onPauseRun}
+          onCancelRun={onCancelRun}
+        />
 
         {/* Queue banner */}
         {queuedMessages.length > 0 && (
@@ -1145,10 +1508,9 @@ export function ChatArea({
               onChange={e => setValue(e.target.value)}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
-              disabled={!projectRoot}
               placeholder={
-                !projectRoot ? 'Open a project to get started...'
-                : isRunning || isThinking ? 'Message will be queued...'
+                isRunning || isThinking ? 'Message will be queued...'
+                : !projectRoot ? 'Ask anything. Attach a project when you need code changes...'
                 : isDragging ? 'Drop files here...'
                 : 'Ask, analyze, or request code changes. Use @file or /plan, /review'
               }
@@ -1167,39 +1529,44 @@ export function ChatArea({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={!projectRoot}
                 title={supportsVision === false ? 'Active model does not support images — text/PDF only' : 'Attach files or images (drag-drop or paste also works)'}
                 style={{
                   width: 28, height: 28, borderRadius: 8,
                   background: 'transparent', border: '1px solid var(--border)',
                   color: 'var(--text-3)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0, cursor: projectRoot ? 'pointer' : 'not-allowed',
+                  flexShrink: 0, cursor: 'pointer',
                   transition: 'background 0.15s, color 0.15s, border-color 0.15s',
                 }}
-                onMouseEnter={e => { if (projectRoot) { e.currentTarget.style.borderColor = 'var(--cyan)'; e.currentTarget.style.color = 'var(--cyan)' } }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--cyan)'; e.currentTarget.style.color = 'var(--cyan)' }}
                 onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-3)' }}
               >
                 <span className="material-symbols-outlined" style={{ fontSize: 16 }}>add</span>
               </button>
 
               {/* Mode pills */}
-              {(['plan', 'review'] as const).map(mode => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => onModeChange(activeMode === mode ? 'patch' : mode)}
-                  style={{
-                    fontSize: 11, padding: '3px 10px', borderRadius: 20, fontWeight: 500,
-                    border: `1px solid ${activeMode === mode ? 'rgba(93,202,165,0.4)' : 'var(--border)'}`,
-                    background: activeMode === mode ? 'var(--cyan-dim)' : 'transparent',
-                    color: activeMode === mode ? 'var(--cyan)' : 'var(--text-3)',
-                    transition: 'all 0.15s',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  /{mode}
-                </button>
-              ))}
+              {(['patch', 'plan', 'review'] as const).map(mode => {
+                const disabled = !projectRoot
+                const label = mode === 'patch' ? 'code' : mode
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => onModeChange(mode)}
+                    title={disabled ? 'Attach a project to use this mode' : `${label} mode`}
+                    style={{
+                      fontSize: 11, padding: '3px 10px', borderRadius: 20, fontWeight: 500,
+                      border: `1px solid ${activeMode === mode ? 'rgba(164,230,255,0.45)' : 'var(--border)'}`,
+                      background: activeMode === mode ? 'var(--cyan-dim)' : 'transparent',
+                      color: activeMode === mode ? 'var(--cyan)' : 'var(--text-3)',
+                      transition: 'all 0.15s',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
 
               {/* Token indicator */}
               {totalTokens > 0 && (
@@ -1219,11 +1586,11 @@ export function ChatArea({
               {/* Send button — enabled when there's text OR at least one attachment */}
               <button
                 onClick={submit}
-                disabled={(!value.trim() && attachments.length === 0) || !projectRoot}
+                disabled={!value.trim() && attachments.length === 0}
                 style={{
                   width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-                  background: (value.trim() || attachments.length > 0) && projectRoot ? 'var(--cyan)' : 'var(--bg-active)',
-                  color: (value.trim() || attachments.length > 0) && projectRoot ? '#000' : 'var(--text-3)',
+                  background: value.trim() || attachments.length > 0 ? 'var(--cyan)' : 'var(--bg-active)',
+                  color: value.trim() || attachments.length > 0 ? '#000' : 'var(--text-3)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   transition: 'background 0.15s, color 0.15s',
                   border: 'none',
@@ -1238,6 +1605,7 @@ export function ChatArea({
         <p style={{ marginTop: 5, fontSize: 10, color: 'var(--text-ghost)', textAlign: 'center' }}>
           Enter · Shift+Enter new line · @file includes context
         </p>
+        </div>
       </div>
     </div>
   )

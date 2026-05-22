@@ -380,6 +380,62 @@ describe('manifest validation — additionalManifests (staged buffer aware)', ()
     expect(result.ok).toBe(true)
   })
 
+  it('passes package-manager commands that target a subproject with --prefix', () => {
+    mkdirSync(join(root, 'puphub'))
+    writeFileSync(join(root, 'puphub', 'package.json'), '{"scripts":{"build":"next build"}}', 'utf-8')
+
+    const install = normalizeCommandInvocation({
+      command: 'npm --prefix puphub install',
+      workspaceRoot: root,
+      kind: 'run',
+    })
+    const build = normalizeCommandInvocation({
+      command: 'npm --prefix=puphub run build',
+      workspaceRoot: root,
+      kind: 'build',
+    })
+
+    expect(install.ok).toBe(true)
+    expect(build.ok).toBe(true)
+  })
+
+  it('passes --prefix commands when the subproject manifest is staged in the same iteration', () => {
+    mkdirSync(join(root, 'puphub'))
+    const result = normalizeCommandInvocation({
+      command: 'npm --prefix puphub install',
+      workspaceRoot: root,
+      kind: 'run',
+      additionalManifests: ['puphub/package.json'],
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('blocks package-manager --prefix paths outside the workspace', () => {
+    const result = normalizeCommandInvocation({
+      command: 'npm --prefix ../outside install',
+      workspaceRoot: root,
+      kind: 'run',
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('outside the allowed workspace')
+  })
+
+  it('still routes long-running package-manager commands with --prefix away from run_command', () => {
+    mkdirSync(join(root, 'puphub'))
+    writeFileSync(join(root, 'puphub', 'package.json'), '{"scripts":{"dev":"next dev"}}', 'utf-8')
+
+    const result = normalizeCommandInvocation({
+      command: 'npm --prefix puphub run dev',
+      workspaceRoot: root,
+      kind: 'run',
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('Long-running command')
+  })
+
   it('also accepts go.mod / Cargo.toml / pyproject.toml from staged buffer', () => {
     expect(normalizeCommandInvocation({
       command: 'go test ./...', workspaceRoot: root, kind: 'test',

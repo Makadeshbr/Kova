@@ -322,7 +322,7 @@ export class TerminalManager {
             url: meta.url,
             port: meta.port,
             cwd,
-            diagnostics: meta.url ? [...meta.diagnostics, 'readiness_probe_failed'] : meta.diagnostics,
+            diagnostics: meta.url ? [...(meta.diagnostics ?? []), 'readiness_probe_failed'] : meta.diagnostics,
           })
         }, PERSISTENT_START_GRACE_MS)
         if (typeof readyTimer.unref === 'function') readyTimer.unref()

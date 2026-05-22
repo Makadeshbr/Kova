@@ -121,12 +121,25 @@ export interface HarnessWarning {
 
 export type HarnessMode = 'fast' | 'standard' | 'full'
 
+export type CompletionStopReason =
+  | 'completed_with_warnings'
+  | 'environment_blocked'
+  | 'needs_user'
+  | 'continue_next_turn'
+
+export interface CompletionStop {
+  reason: CompletionStopReason
+  detail: string
+  retryable: boolean
+}
+
 export interface DecisionResult {
   decision: 'auto_apply' | 'suggest' | 'reject' | 'human_required'
   score: number
   reason: string
   feedback: AgentFeedback[]
   reviewGate?: ReviewGateResult
+  completion?: CompletionStop
 }
 
 export interface AgentFeedback {
@@ -272,6 +285,22 @@ export interface AgentResultMessage {
   kind: 'agent_result'
   title: string
   summary: string
+  report?: {
+    objective: string
+    status: 'completed' | 'awaiting_review' | 'failed'
+    outcome: string
+    files: Array<{
+      path: string
+      status: 'created' | 'modified' | 'deleted'
+      reason?: string
+    }>
+    commandsRun: string[]
+    validationsNotRun: Array<{ kind: string; reason: string }>
+    contextFiles: string[]
+    evidence: string[]
+    nextSteps: string[]
+    completedAt: string
+  }
   filesChanged: Array<{
     path: string
     displayName: string
@@ -380,6 +409,7 @@ export interface ExecutionEvent {
     | 'context_ref_denied' // a referenced file was intentionally not attached
     | 'file_mutation' // a file was created/modified/deleted by a tool before harness completes
     | 'token_usage'  // token usage reported or estimated for the last model turn
+    | 'provider_retry' // recoverable provider/API failure scheduled for retry
     | 'provider_error' // provider/API failure classified by Kova, not harness/build output
     | 'tool_call'    // agent called a tool
     | 'tool_result'  // result of a tool call
@@ -432,6 +462,10 @@ export interface ExecutionEvent {
   providerStatus?: number
   provider?: string
   model?: string
+  providerRetryAttempt?: number
+  providerRetryNextAttempt?: number
+  providerRetryMaxAttempts?: number
+  providerRetryDelayMs?: number
   diffReview?: DiffReviewDecision
   // tool events
   toolName?: string

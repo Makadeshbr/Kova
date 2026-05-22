@@ -1,13 +1,31 @@
-/**
- * Environment-error classifier — converts platform-specific build/test
- * failure stderr ("'next' is not recognized", "MODULE_NOT_FOUND", etc.)
- * into a typed HarnessError so the execution engine can break the repair
- * loop instead of rewriting source against a broken environment.
- */
 import { describe, expect, it } from 'vitest'
 import { classifyEnvironmentFailure } from '../src/layers/environment-error'
 
-describe('classifyEnvironmentFailure — Windows cmd / PowerShell', () => {
+describe('classifyEnvironmentFailure - filesystem access failures', () => {
+  it('detects Next.js .next trace EPERM as an environment file lock', () => {
+    const error = classifyEnvironmentFailure(
+      'build',
+      `uncaughtException [Error: EPERM: operation not permitted, open 'C:\\Users\\allan\\Desktop\\TesteHarnes\\puphub\\.next\\trace'] {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'open',
+  path: 'C:\\Users\\allan\\Desktop\\TesteHarnes\\puphub\\.next\\trace'
+}`,
+      'npm run build',
+    )
+
+    expect(error).not.toBeNull()
+    expect(error?.type).toBe('environment')
+    expect(error?.severity).toBe('critical')
+    expect(error?.fixable).toBe(false)
+    expect(error?.rule).toBe('environment_filesystem_access')
+    expect(error?.humanMessage).toContain('Next.js')
+    expect(error?.humanMessage).toContain('Source edits will not fix this')
+    expect(error?.suggestion).toContain('Do not keep retrying build')
+  })
+})
+
+describe('classifyEnvironmentFailure - Windows cmd / PowerShell', () => {
   it('detects English "is not recognized" pattern', () => {
     const error = classifyEnvironmentFailure(
       'build',
@@ -23,7 +41,7 @@ operable program or batch file.`,
     expect(error?.humanMessage).toContain('npm install')
   })
 
-  it('detects Portuguese localized variant ("n o   reconhecido")', () => {
+  it('detects Portuguese localized variant ("n o reconhecido")', () => {
     const error = classifyEnvironmentFailure(
       'build',
       `'next' n o   reconhecido como um comando interno ou externo, um programa oper vel ou um arquivo em lotes.`,
@@ -34,7 +52,17 @@ operable program or batch file.`,
     expect(error?.humanMessage).toContain("'next'")
   })
 
-  it('detects "não é reconhecido" full-accent variant', () => {
+  it('detects "nao e reconhecido" localized variant when accents are lost', () => {
+    const error = classifyEnvironmentFailure(
+      'build',
+      `'vite' nao e reconhecido como um comando interno ou externo`,
+      'npm run build',
+    )
+    expect(error).not.toBeNull()
+    expect(error?.type).toBe('environment')
+  })
+
+  it('detects full-accent Portuguese localized variant', () => {
     const error = classifyEnvironmentFailure(
       'build',
       `'vite' não é reconhecido como um comando interno ou externo`,
@@ -45,7 +73,7 @@ operable program or batch file.`,
   })
 })
 
-describe('classifyEnvironmentFailure — POSIX command not found', () => {
+describe('classifyEnvironmentFailure - POSIX command not found', () => {
   it('detects "X: command not found"', () => {
     const error = classifyEnvironmentFailure(
       'build',
@@ -68,7 +96,7 @@ describe('classifyEnvironmentFailure — POSIX command not found', () => {
   })
 })
 
-describe('classifyEnvironmentFailure — Node module resolution', () => {
+describe('classifyEnvironmentFailure - Node module resolution', () => {
   it('detects "Cannot find module"', () => {
     const error = classifyEnvironmentFailure(
       'build',
@@ -104,7 +132,7 @@ describe('classifyEnvironmentFailure — Node module resolution', () => {
   })
 })
 
-describe('classifyEnvironmentFailure — Python', () => {
+describe('classifyEnvironmentFailure - Python', () => {
   it('detects ModuleNotFoundError', () => {
     const error = classifyEnvironmentFailure(
       'tests',
@@ -118,7 +146,7 @@ describe('classifyEnvironmentFailure — Python', () => {
   })
 })
 
-describe('classifyEnvironmentFailure — does NOT misfire on real source errors', () => {
+describe('classifyEnvironmentFailure - does NOT misfire on real source errors', () => {
   it('returns null for TypeScript compile errors', () => {
     const error = classifyEnvironmentFailure(
       'build',
@@ -131,7 +159,7 @@ describe('classifyEnvironmentFailure — does NOT misfire on real source errors'
   it('returns null for test failures', () => {
     const error = classifyEnvironmentFailure(
       'tests',
-      `FAIL src/app.test.ts > "should login" — expected 1 to equal 2`,
+      `FAIL src/app.test.ts > "should login" - expected 1 to equal 2`,
       'vitest',
     )
     expect(error).toBeNull()
@@ -149,21 +177,5 @@ describe('classifyEnvironmentFailure — does NOT misfire on real source errors'
       'tsc',
     )
     expect(error).toBeNull()
-  })
-
-  it('returns null when message includes "not recognized" but in a different context', () => {
-    const error = classifyEnvironmentFailure(
-      'build',
-      `Warning: option not recognized by this version`,
-      'eslint',
-    )
-    // This DOES match our pattern (which is intentionally permissive) — but we
-    // need to ensure the extracted name is meaningful. The pattern requires a
-    // quoted/unquoted identifier before "not recognized", so "option" would be
-    // captured. This is acceptable: false positives push to a clear next-step
-    // ("install option") which the user can easily ignore. The cost of false
-    // negatives (loops forever) is much higher than this.
-    // Sanity check the *shape* is still correct:
-    if (error) expect(error.type).toBe('environment')
   })
 })

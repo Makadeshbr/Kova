@@ -97,6 +97,21 @@ describe('IPC origin and payload validation', () => {
     expect(() => sanitizeStartTaskParams({ objective: 'x', projectRoot: '', maxIterations: 999 })).toThrow('Invalid number payload')
   })
 
+  it('allows projectless chat payloads', () => {
+    const params = sanitizeStartTaskParams({ objective: 'hello', mode: 'chat', maxIterations: 5 })
+    expect(params.projectRoot).toBeUndefined()
+    expect(params.mode).toBe('chat')
+  })
+
+  it('blocks projectless code modes', () => {
+    expect(() => sanitizeStartTaskParams({ objective: 'build this', mode: 'patch', maxIterations: 5 }))
+      .toThrow('Project folder required for this mode')
+    expect(() => sanitizeStartTaskParams({ objective: 'plan this', mode: 'plan', maxIterations: 5 }))
+      .toThrow('Project folder required for this mode')
+    expect(() => sanitizeStartTaskParams({ objective: 'review this', mode: 'review', maxIterations: 5 }))
+      .toThrow('Project folder required for this mode')
+  })
+
   it('settings save does not overwrite masked NVIDIA secret', () => {  // anchor
     const merged = mergeSettingsForSave({
       defaultProvider: 'nvidia',
@@ -116,6 +131,31 @@ describe('IPC origin and payload validation', () => {
       nvidiaKey: 'nvapi-****************',
     }, { nvidiaKey: 'nvapi-real-secret' })
     expect(merged.nvidiaKey).toBe('nvapi-real-secret')
+  })
+
+  it('settings save preserves masked cloud provider secrets', () => {
+    const merged = mergeSettingsForSave({
+      defaultProvider: 'openai',
+      anthropicKey: 'sk-ant****************',
+      openaiKey: 'sk-pro****************',
+      deepseekKey: '',
+      openrouterKey: '',
+      kimiKey: '',
+      geminiKey: '',
+      xaiKey: '',
+      openaiCompatibleKey: '',
+      ollamaUrl: 'http://localhost:11434/v1',
+      compatibleUrl: 'http://localhost:1234/v1',
+      model: '',
+      autoApply: true,
+      permissionMode: 'auto-review',
+      maxIterations: 5,
+    }, {
+      anthropicKey: 'sk-ant-real',
+      openaiKey: 'sk-proj-real',
+    })
+    expect(merged.anthropicKey).toBe('sk-ant-real')
+    expect(merged.openaiKey).toBe('sk-proj-real')
   })
 })
 

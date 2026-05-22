@@ -29,13 +29,15 @@ export function useSessionPersistence(opts: {
   onCreatedRef.current = onSessionIdCreated
 
   useEffect(() => {
-    if (!projectRoot || messages.length === 0 || isThinking) return
+    if (messages.length === 0 || isThinking) return
     const id = sessionId || Date.now().toString()
     if (!sessionId) onCreatedRef.current(id)
 
     const title = messages.find(m => m.role === 'user')?.content.slice(0, 30) || 'New Session'
     const session = {
       id, title, updatedAt: new Date().toISOString(),
+      scope: 'global',
+      projectRoot,
       messages, task, sessionUsage, executionState, events: executionEvents, todos,
     }
     window.kova.saveSession(projectRoot, session).catch(console.error)

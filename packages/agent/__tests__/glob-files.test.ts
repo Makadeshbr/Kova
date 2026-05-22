@@ -268,6 +268,18 @@ describe('globFiles — abort signal', () => {
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/abort/i)
   })
+
+  it('stops predictably when abort fires during candidate statting', async () => {
+    for (let i = 0; i < 900; i++) write(`src/file-${i}.ts`)
+    const ac = new AbortController()
+    const start = Date.now()
+    const promise = run({ pattern: '**/*.ts', headLimit: 900 }, ac.signal)
+    setTimeout(() => ac.abort(), 0)
+    const result = await promise
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/abort/i)
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
 })
 
 describe('globFiles — only files (no directories)', () => {

@@ -7,7 +7,13 @@
  *   - autoResolveModel returns the first model from /models endpoint
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { tryFallbackProvider, autoResolveModel } from '../src/main/provider-resolver'
+import {
+  tryFallbackProvider,
+  autoResolveModel,
+  isLocalProvider,
+  resolveProviderBaseUrl,
+  resolveProviderDefaultModel,
+} from '../src/main/provider-resolver'
 import type { ProviderResolution } from '../src/main/provider-resolver'
 import type { AgentProvider } from '@kova/agent'
 import { KovaProviderError } from '@kova/agent'
@@ -105,3 +111,41 @@ describe('autoResolveModel', () => {
     expect(await autoResolveModel('http://nowhere/v1')).toBeUndefined()
   })
 })
+
+describe('provider catalog defaults', () => {
+  it('resolves base URLs and models from the shared provider catalog', () => {
+    expect(resolveProviderBaseUrl('openai')).toBe('https://api.openai.com/v1')
+    expect(resolveProviderDefaultModel('deepseek')).toBe('deepseek-chat')
+  })
+
+  it('keeps environment overrides constrained to local/NVIDIA endpoints', () => {
+    const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL
+    const originalNvidiaBaseUrl = process.env.NVIDIA_BASE_URL
+    try {
+      process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+      process.env.NVIDIA_BASE_URL = 'https://nvidia.example/v1'
+
+      expect(resolveProviderBaseUrl('ollama')).toBe('http://127.0.0.1:11434/v1')
+      expect(resolveProviderBaseUrl('nvidia')).toBe('https://nvidia.example/v1')
+    } finally {
+      restoreEnv('OLLAMA_BASE_URL', originalOllamaBaseUrl)
+      restoreEnv('NVIDIA_BASE_URL', originalNvidiaBaseUrl)
+    }
+  })
+
+  it('detects local providers from provider defaults instead of a duplicate set', () => {
+    expect(isLocalProvider('ollama')).toBe(true)
+    expect(isLocalProvider('lmstudio')).toBe(true)
+    expect(isLocalProvider('openai-compatible')).toBe(true)
+    expect(isLocalProvider('openai')).toBe(false)
+    expect(isLocalProvider('unknown')).toBe(false)
+  })
+})
+
+function restoreEnv(name: 'OLLAMA_BASE_URL' | 'NVIDIA_BASE_URL', value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name]
+    return
+  }
+  process.env[name] = value
+}

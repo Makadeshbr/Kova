@@ -71,9 +71,9 @@ const kovaAPI = {
   readFile: (path: string): Promise<string | null> => ipcRenderer.invoke('kova:read-file', path),
   writeFile: (path: string, content: string): Promise<void> => ipcRenderer.invoke('kova:write-file', path, content),
 
-  listSessions: (root: string): Promise<any[]> => ipcRenderer.invoke('kova:list-sessions', root),
-  saveSession: (root: string, session: any): Promise<void> => ipcRenderer.invoke('kova:save-session', root, session),
-  deleteSession: (root: string, id: string): Promise<void> => ipcRenderer.invoke('kova:delete-session', root, id),
+  listSessions: (root?: string | null): Promise<any[]> => ipcRenderer.invoke('kova:list-sessions', root ?? null),
+  saveSession: (root: string | null, session: any): Promise<void> => ipcRenderer.invoke('kova:save-session', root, session),
+  deleteSession: (root: string | null, id: string): Promise<void> => ipcRenderer.invoke('kova:delete-session', root, id),
 
   // ─── Terminal / PTY ───────────────────────────────────────────────────────
   terminalOpen: (id: string, command: string, cwd: string) => ipcRenderer.invoke('kova:terminal-open', id, command, cwd),

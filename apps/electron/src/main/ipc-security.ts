@@ -33,17 +33,21 @@ export function assertTrustedIpcSender(event: EventLike, isDev = !app.isPackaged
 export function sanitizeStartTaskParams(value: unknown): StartTaskParams {
   if (!isRecord(value)) throw new Error('Invalid task params')
   const objective = stringField(value.objective, 'objective', 20_000)
-  const projectRoot = stringField(value.projectRoot, 'projectRoot', 2_000)
+  const mode = oneOf(value.mode, ['chat', 'plan', 'patch', 'review']) ?? 'patch'
+  const projectRoot = optionalString(value.projectRoot, 2_000)
+  const maxIterations = optionalNumber(value.maxIterations, 1, 20)
+  if (!projectRoot && mode !== 'chat') throw new Error('Project folder required for this mode')
   return {
     objective,
     projectRoot,
+    sessionId: optionalString(value.sessionId, 200),
     provider: optionalString(value.provider, 80),
     apiKey: optionalString(value.apiKey, 4_000),
     model: optionalString(value.model, 300),
     baseUrl: optionalString(value.baseUrl, 2_000),
     autoApply: optionalBoolean(value.autoApply),
-    maxIterations: optionalNumber(value.maxIterations, 1, 20),
-    mode: oneOf(value.mode, ['chat', 'plan', 'patch', 'review']),
+    maxIterations,
+    mode,
     permissionMode: oneOf(value.permissionMode, ['auto-review', 'ask', 'full-access']),
     includeProjectContext: optionalBoolean(value.includeProjectContext),
     queuedCount: optionalNumber(value.queuedCount, 0, 1_000),
@@ -84,9 +88,39 @@ export function mergeSettingsForSave(incoming: unknown, existing: Partial<KovaSe
     nvidiaKey: optionalString(settings.nvidiaKey, 4_000),
     nvidiaEnableThinking: optionalBoolean(settings.nvidiaEnableThinking),
   }
-  if (!merged.nvidiaKey || merged.nvidiaKey.includes('****')) merged.nvidiaKey = existing.nvidiaKey
+  for (const key of SECRET_SETTING_KEYS) {
+    const value = merged[key]
+    if (!value || value.includes('****')) {
+      const existingValue = existing[key]
+      const writable = merged as unknown as Record<string, string | boolean | number | undefined>
+      writable[key] = typeof existingValue === 'string' ? existingValue : ''
+    }
+  }
   return merged
 }
+
+const SECRET_SETTING_KEYS: Array<keyof Pick<
+  KovaSettings,
+  | 'anthropicKey'
+  | 'openaiKey'
+  | 'deepseekKey'
+  | 'openrouterKey'
+  | 'kimiKey'
+  | 'geminiKey'
+  | 'xaiKey'
+  | 'openaiCompatibleKey'
+  | 'nvidiaKey'
+>> = [
+  'anthropicKey',
+  'openaiKey',
+  'deepseekKey',
+  'openrouterKey',
+  'kimiKey',
+  'geminiKey',
+  'xaiKey',
+  'openaiCompatibleKey',
+  'nvidiaKey',
+]
 
 export function sanitizeAttachments(value: unknown): Attachment[] | undefined {
   if (value === undefined || value === null) return undefined

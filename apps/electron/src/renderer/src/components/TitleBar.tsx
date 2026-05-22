@@ -9,9 +9,11 @@ interface Props {
   settings: KovaSettings | null
   activeModel: string | null
   modelConnected: boolean
+  inspectorOpen: boolean
   onOpenFolder: () => void
   onOpenSettings: () => void
   onSelectModel: (model: string) => void
+  onToggleInspector: () => void
 }
 
 // Electron drag region requires vendor-prefixed CSS not known to React types
@@ -28,7 +30,18 @@ const isActive = (s: string | null) => s && !['completed', 'failed', 'paused'].i
 
 const isMac = (window as Window & { kova?: { platform?: string } }).kova?.platform === 'darwin'
 
-export function TitleBar({ projectRoot, status, settings, activeModel, modelConnected, onOpenFolder, onOpenSettings, onSelectModel }: Props): React.ReactElement {
+export function TitleBar({
+  projectRoot,
+  status,
+  settings,
+  activeModel,
+  modelConnected,
+  inspectorOpen,
+  onOpenFolder,
+  onOpenSettings,
+  onSelectModel,
+  onToggleInspector,
+}: Props): React.ReactElement {
   const [showPicker, setShowPicker] = useState(false)
   const modelBtnRef = useRef<HTMLButtonElement>(null)
   const projectName = projectRoot?.split(/[/\\]/).at(-1) ?? null
@@ -123,6 +136,16 @@ export function TitleBar({ projectRoot, status, settings, activeModel, modelConn
           )}
         </div>
 
+        <button
+          onClick={onToggleInspector}
+          className="kova-title-icon-button"
+          data-active={inspectorOpen ? 'true' : 'false'}
+          title={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: 17 }}>
+            {inspectorOpen ? 'right_panel_close' : 'right_panel_open'}
+          </span>
+        </button>
         <button onClick={onOpenSettings} style={{ background: 'transparent', color: 'var(--text-3)', padding: '4px 8px', fontSize: 14 }} title="Settings">⚙</button>
         {!isMac && <>
           <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />

@@ -1,5 +1,5 @@
 import type {
-  AgentContext, AgentMode, AgentOutput, CommandOutputCallback, DecisionResult, ExecutionContract,
+  AgentContext, AgentMode, AgentOutput, CommandOutputCallback, CompletionStopReason, DecisionResult, ExecutionContract,
   DiffReviewSelection, ExecutionEvent, ExecutionState, FileChange, HarnessError, HarnessResult,
   IterationRecord, Learning, TaskDefinition, AgentMessage, ProofPack, ProofPackValidation, Todo, ServerSessionInfo
 } from '@kova/shared'
@@ -20,6 +20,7 @@ import {
 import { generateProofPack } from './proof-pack'
 import { buildCompletionProof, type CompletionTrace } from './completion-contract'
 import { buildContextCacheKey, shouldReuseContext, type ContextCacheKey } from './context-cache'
+import { consolidateIterationChanges, consolidateWithPendingChanges } from './changes'
 
 type InteractiveCommandRunner = (command: string, cwd: string, reason: string, options?: { previewChanges?: FileChange[] }) => Promise<{
   exitCode: number
@@ -40,6 +41,26 @@ interface ProviderUsageReport {
   outputTokens: number
 }
 
+interface ProviderRetryReport {
+  attempt: number
+  nextAttempt: number
+  maxAttempts: number
+  delayMs: number
+  code: NonNullable<ExecutionEvent['providerError']>
+  status?: number
+  provider?: string
+  model?: string
+  safeMessage: string
+}
+
+interface ProviderBlocker {
+  code: NonNullable<ExecutionEvent['providerError']>
+  safeMessage: string
+  status?: number
+  provider?: string
+  model?: string
+}
+
 type AgentPermissionPolicy = Record<string, unknown>
 
 interface IAgent {
@@ -48,6 +69,7 @@ interface IAgent {
     onToken?: (token: string) => void
     onToolCall?: (name: string, input: Record<string, unknown>) => void
     onToolResult?: (name: string, result: string) => void
+    onProviderRetry?: (event: ProviderRetryReport) => void
     interactiveRunner?: InteractiveCommandRunner
     onCommandOutput?: CommandOutputCallback
     onUsageReport?: (report: ProviderUsageReport) => void
@@ -189,10 +211,11 @@ export class ExecutionEngine {
   async forceApply(selection?: DiffReviewSelection): Promise<void> {
     const last = this.state?.iterationHistory.at(-1)
     if (!last || !this.task) throw new Error('No changes to apply')
-    if (last.changes.length === 0) throw new Error('No changes to apply')
+    const changes = consolidateIterationChanges(this.state!.iterationHistory)
+    if (changes.length === 0) throw new Error('No changes to apply')
 
     const score = last.harnessResult.score
-    const result = await this.deps.applicationEngine.apply(last.changes, this.task.id, score, selection)
+    const result = await this.deps.applicationEngine.apply(changes, this.task.id, score, selection)
 
     if (result.applied) {
       this.lastCheckpointId = result.checkpointId
@@ -241,8 +264,9 @@ export class ExecutionEngine {
           // decision.score: the decision score is capped at 55 in the soft-reject
           // path, but the underlying harness score still reflects code quality.
           const last = this.state!.iterationHistory.at(-1)
+          const changes = consolidateIterationChanges(this.state!.iterationHistory)
           const hasReviewableChanges = !!last
-            && last.changes.length > 0
+            && changes.length > 0
             && (last.harnessResult?.score ?? 0) >= 70
           this.state = withStatus(this.state!, hasReviewableChanges ? 'paused' : 'failed')
           this.emit()
@@ -360,6 +384,7 @@ export class ExecutionEngine {
     const reasoning = createReasoningEvents((event) => this.event(event))
     reasoning.start()
     const completionTrace: CompletionTrace = { toolCalls: [], toolResults: [], events: [] }
+    let emittedResponseText = false
 
     const agentOptions = {
       history: this.options.history,
@@ -380,6 +405,20 @@ export class ExecutionEngine {
           outputTokens: report.outputTokens,
         } as Omit<ExecutionEvent, 'taskId' | 'timestamp' | 'iteration'>)
       },
+      onProviderRetry: (retry: ProviderRetryReport) => {
+        this.event({
+          type: 'provider_retry',
+          message: `Provider retry ${retry.nextAttempt}/${retry.maxAttempts} in ${retry.delayMs}ms: ${retry.safeMessage}`,
+          providerError: retry.code,
+          providerStatus: retry.status,
+          provider: retry.provider,
+          model: retry.model,
+          providerRetryAttempt: retry.attempt,
+          providerRetryNextAttempt: retry.nextAttempt,
+          providerRetryMaxAttempts: retry.maxAttempts,
+          providerRetryDelayMs: retry.delayMs,
+        })
+      },
       // FIX-018: pass the current session-scoped todo list to the agent so plans
       // persist across the code → harness → fix repair cycle. Replacement after
       // todo_write happens via the callback below + the AgentOutput.todos read.
@@ -391,6 +430,7 @@ export class ExecutionEngine {
       },
       onToken: (token: string) => {
         reasoning.end()
+        if (token.trim()) emittedResponseText = true
         this.event({ type: 'token', token })
       },
       onReasoningStart: () => reasoning.start(),
@@ -433,8 +473,10 @@ export class ExecutionEngine {
     }
 
     let codeOutput!: AgentOutput
+    let activeMode: AgentMode = isFirst && !this.options.skipPlan ? 'plan' : isFirst ? 'unified' : 'fix'
     try {
       if (isFirst && !this.options.skipPlan) {
+        activeMode = 'plan'
         this.state = withStatus(this.state!, 'planning')
         this.emit()
         this.event({ type: 'agent_started', mode: 'plan', message: 'Planning started' })
@@ -446,8 +488,10 @@ export class ExecutionEngine {
 
       this.state = withStatus(this.state!, 'coding')
       this.emit()
-      const mode: AgentMode = isFirst ? (this.options.skipPlan ? 'unified' : 'code') : 'fix'
-      if (!isFirst) {
+      const continuingImplementation = isContinuationDecision(this.state!.iterationHistory.at(-1)?.decision)
+      const mode: AgentMode = isFirst ? (this.options.skipPlan ? 'unified' : 'code') : continuingImplementation ? 'code' : 'fix'
+      activeMode = mode
+      if (!isFirst && !continuingImplementation) {
         this.state = withStatus(this.state!, 'repairing')
         this.emit()
       }
@@ -456,6 +500,32 @@ export class ExecutionEngine {
       reasoning.end()
       this.event({ type: 'stream_end', message: '' })
       this.event({ type: 'agent_completed', mode, changes: codeOutput.changes, message: `${mode} completed` })
+    } catch (err: unknown) {
+      const providerBlocker = normalizeProviderBlocker(err)
+      if (!providerBlocker || this.aborted || (err instanceof Error && err.name === 'AbortError')) throw err
+      reasoning.end()
+      this.event({
+        type: 'provider_error',
+        providerError: providerBlocker.code,
+        providerStatus: providerBlocker.status,
+        provider: providerBlocker.provider,
+        model: providerBlocker.model,
+        message: providerBlocker.safeMessage,
+      })
+      this.event({ type: 'stream_end', message: '' })
+      const output = buildProviderBlockedOutput(activeMode, providerBlocker.safeMessage)
+      const harnessResult = buildProviderBlockedHarness(this.state!.currentIteration + 1, providerBlocker)
+      const decision = buildNeedsUserDecision(providerBlocker.safeMessage, 'Provider blocked the turn before code could complete.')
+      this.state = withStatus(this.state!, 'deciding')
+      this.emit()
+      this.event({ type: 'decision_made', decision, message: decision.reason })
+      this.state = withIteration(
+        this.state!,
+        buildRecord(this.state!.currentIteration, output, harnessResult, decision, context, iterStart),
+      )
+      this.emit()
+      this.event({ type: 'iteration_recorded', decision, harnessResult, changes: [] })
+      return decision
     } finally {
       reasoning.end()
     }
@@ -533,6 +603,9 @@ export class ExecutionEngine {
       this.emit()
 
       if (textOnlyAllowed) {
+        if (!emittedResponseText && responseText) {
+          this.event({ type: 'token', token: responseText })
+        }
         this.state = withStatus(this.state!, 'completed')
         this.emit()
       } else if (hallucinated) {
@@ -550,10 +623,34 @@ export class ExecutionEngine {
       return emptyDecision
     }
 
+    const previousChanges = consolidateIterationChanges(this.state!.iterationHistory)
+    const validationChanges = consolidateWithPendingChanges(this.state!.iterationHistory, codeOutput.changes)
+    if (isProgressButIncomplete(codeOutput)) {
+      const continuationHarness = hasReviewableProgress(previousChanges, validationChanges)
+        ? buildContinuationHarness(this.state!.currentIteration + 1, validationChanges)
+        : buildStalledContinuationHarness(this.state!.currentIteration + 1, validationChanges)
+      const continuationDecision = hasReviewableProgress(previousChanges, validationChanges)
+        ? buildContinuationDecision()
+        : buildNeedsUserDecision(
+            'Agent reported an incomplete turn but produced no new reviewable changes. Stopping instead of retrying the same work.',
+            'Continuation made no progress.',
+          )
+      this.state = withStatus(this.state!, 'deciding')
+      this.emit()
+      this.event({ type: 'decision_made', decision: continuationDecision, message: continuationDecision.reason })
+      this.state = withIteration(
+        this.state!,
+        buildRecord(this.state!.currentIteration, codeOutput, continuationHarness, continuationDecision, context, iterStart),
+      )
+      this.emit()
+      this.event({ type: 'iteration_recorded', decision: continuationDecision, harnessResult: continuationHarness, changes: validationChanges })
+      return continuationDecision
+    }
+
     this.state = withStatus(this.state!, 'validating')
     this.emit()
-    this.event({ type: 'validation_started', changes: codeOutput.changes, message: 'Validation started' })
-    const harnessResult = await this.validateOutput(codeOutput, task, completionTrace)
+    this.event({ type: 'validation_started', changes: validationChanges, message: 'Validation started' })
+    const harnessResult = await this.validateOutput(codeOutput, task, completionTrace, validationChanges)
     this.event({ type: 'validation_completed', harnessResult, message: 'Validation completed' })
 
     this.state = withStatus(this.state!, 'deciding')
@@ -570,11 +667,14 @@ export class ExecutionEngine {
     // For modifications: suggest — stop the loop, let the user decide.
     const envErrors = collectEnvironmentErrors(harnessResult)
     const decision = envErrors.length > 0
-      ? buildEnvFailureDecision(envErrors, codeOutput.changes)
-      : decide(harnessResult, this.state!.iterationHistory, {
-          changes: codeOutput.changes,
-          contract: this.contract ?? undefined,
-        })
+      ? buildEnvFailureDecision(envErrors, validationChanges)
+      : normalizeCompletionDecision(
+          decide(harnessResult, this.state!.iterationHistory, {
+            changes: validationChanges,
+            contract: this.contract ?? undefined,
+          }),
+          harnessResult,
+        )
     if (envErrors.length > 0) {
       this.event({
         type: 'agent_completed',
@@ -605,15 +705,16 @@ export class ExecutionEngine {
         return decision
       }
 
+      const finalChanges = consolidateWithPendingChanges(this.state!.iterationHistory, codeOutput.changes)
       this.state = withStatus(this.state!, 'applying')
       this.emit()
-      this.event({ type: 'apply_started', changes: codeOutput.changes, message: 'Apply started' })
-      const applyResult = await this.deps.applicationEngine.apply(codeOutput.changes, task.id, harnessResult.score)
+      this.event({ type: 'apply_started', changes: finalChanges, message: 'Apply started' })
+      const applyResult = await this.deps.applicationEngine.apply(finalChanges, task.id, harnessResult.score)
       if (applyResult.applied) {
         this.lastCheckpointId = applyResult.checkpointId
         this.state = withStatus(this.state!, 'completed')
         this.emit()
-        this.event({ type: 'apply_completed', changes: codeOutput.changes, message: 'Apply completed' })
+        this.event({ type: 'apply_completed', changes: finalChanges, message: 'Apply completed' })
         // Auto-record verified learnings after successful apply — best-effort, never blocks
         try {
           this.deps.memory?.recordFromIteration(task, this.state!.iterationHistory)
@@ -627,9 +728,14 @@ export class ExecutionEngine {
     return decision
   }
 
-  private async validateOutput(output: AgentOutput, task: TaskDefinition, completionTrace: CompletionTrace): Promise<HarnessResult> {
+  private async validateOutput(
+    output: AgentOutput,
+    task: TaskDefinition,
+    completionTrace: CompletionTrace,
+    changesForValidation = output.changes,
+  ): Promise<HarnessResult> {
     const iteration = this.state!.currentIteration + 1
-    if (output.changes.length === 0) {
+    if (changesForValidation.length === 0) {
       return {
         score: 75,
         layers: [],
@@ -642,12 +748,12 @@ export class ExecutionEngine {
     }
 
     const contract = this.contract ?? createExecutionContract(task)
-    const violations = validateContractChanges(output.changes, contract)
+    const violations = validateContractChanges(changesForValidation, contract)
     if (violations.length > 0) {
       return contractViolationsToHarnessResult(violations, iteration)
     }
 
-    const missingRequiredPaths = findMissingRequiredPaths(task, output.changes, this.options.projectRoot)
+    const missingRequiredPaths = findMissingRequiredPaths(task, changesForValidation, this.options.projectRoot)
     if (missingRequiredPaths.length > 0) {
       return buildMissingRequiredPathsHarness(missingRequiredPaths, iteration)
     }
@@ -658,7 +764,7 @@ export class ExecutionEngine {
     // the files and let the user run their own validation when they're ready.
     // Combined with the pure-create auto_apply rule in @kova/decision, this
     // produces score 90 → auto_apply → files committed.
-    const completionProof = buildCompletionProof(task, output.changes, completionTrace, output.thought)
+    const completionProof = buildCompletionProof(task, changesForValidation, completionTrace, output.thought)
     if (output.maxTurnsReached || output.incompleteReason) {
       completionProof.requirements.push({
         id: 'agent:finished',
@@ -681,10 +787,10 @@ export class ExecutionEngine {
     const config = createOrchestratorConfig(
       this.options.projectRoot,
       iteration,
-      output.changes.map(c => c.path),
+      changesForValidation.map(c => c.path),
     )
     const signal = this.abortController?.signal
-    const orchResult = await this.deps.orchestrator.run(output.changes, {
+    const orchResult = await this.deps.orchestrator.run(changesForValidation, {
       ...config,
       signal,
       onLayerStart: (layer, command) => {
@@ -767,6 +873,156 @@ function serverSessionFromToolResult(result: string): ServerSessionInfo | undefi
   }
 }
 
+const CONTINUATION_REASON = 'Agent turn budget reached; continuing implementation before validation.'
+
+function isProgressButIncomplete(output: AgentOutput): boolean {
+  return output.changes.length > 0 && Boolean(output.maxTurnsReached || output.incompleteReason)
+}
+
+function isContinuationDecision(decision: DecisionResult | undefined): boolean {
+  return decision?.decision === 'reject'
+    && (decision.completion?.reason === 'continue_next_turn' || decision.reason === CONTINUATION_REASON)
+}
+
+function buildContinuationDecision(): DecisionResult {
+  return {
+    decision: 'reject',
+    score: 75,
+    reason: CONTINUATION_REASON,
+    feedback: [],
+    completion: buildCompletionStop(
+      'continue_next_turn',
+      'The model produced reviewable progress but reached its per-turn budget before a natural final response. Continue in code mode before validation.',
+      true,
+    ),
+  }
+}
+
+function buildNeedsUserDecision(reason: string, detail: string): DecisionResult {
+  return {
+    decision: 'human_required',
+    score: 0,
+    reason,
+    feedback: [],
+    completion: buildCompletionStop('needs_user', detail, false),
+  }
+}
+
+function buildCompletionStop(reason: CompletionStopReason, detail: string, retryable: boolean): NonNullable<DecisionResult['completion']> {
+  return { reason, detail, retryable }
+}
+
+function normalizeCompletionDecision(decision: DecisionResult, harnessResult: HarnessResult): DecisionResult {
+  if (decision.completion) return decision
+  if (decision.decision === 'suggest' && hasFailedValidationLayer(harnessResult)) {
+    return {
+      ...decision,
+      completion: buildCompletionStop(
+        'completed_with_warnings',
+        'The implementation produced reviewable changes, but validation reported warnings or failures. Stop the agent loop and let the user decide.',
+        false,
+      ),
+    }
+  }
+  if (decision.decision === 'human_required') {
+    return {
+      ...decision,
+      completion: buildCompletionStop(
+        'needs_user',
+        'The engine reached a condition that requires user action instead of another automatic retry.',
+        false,
+      ),
+    }
+  }
+  return decision
+}
+
+function hasFailedValidationLayer(harnessResult: HarnessResult): boolean {
+  return harnessResult.layers.some(layer =>
+    ['completion', 'build', 'typecheck', 'tests', 'lint'].includes(layer.name)
+    && !layer.skipped
+    && !layer.passed
+  )
+}
+
+function hasReviewableProgress(previous: FileChange[], next: FileChange[]): boolean {
+  if (next.length > previous.length) return true
+
+  const previousByPath = new Map(previous.map(change => [change.path, changeSignature(change)]))
+  return next.some(change => previousByPath.get(change.path) !== changeSignature(change))
+}
+
+function changeSignature(change: FileChange): string {
+  return JSON.stringify({
+    path: change.path,
+    type: change.type,
+    before: change.before ?? null,
+    diff: change.diff,
+  })
+}
+
+function buildContinuationHarness(iteration: number, changes: FileChange[]): HarnessResult {
+  return {
+    passed: false,
+    score: 75,
+    duration: 0,
+    iteration,
+    validationConfidence: 'none',
+    skippedLayers: ['build', 'typecheck', 'tests', 'rules'],
+    layers: [{
+      name: 'completion',
+      passed: false,
+      errors: [{
+        layer: 'completion',
+        type: 'architecture',
+        severity: 'high',
+        fixable: true,
+        message: 'Agent reached the per-loop turn budget after producing changes.',
+        humanMessage: 'The model produced progress but stopped before a natural final response. Continue implementing the remaining plan before running validation.',
+        file: changes[0]?.path ?? '',
+        rule: 'completion_continue_implementation',
+        suggestion: 'Continue from the existing files and the current todo list; do not restart the task.',
+      }],
+      warnings: [],
+      duration: 0,
+      durationMs: 0,
+      skipped: false,
+      command: 'agent-continuation',
+    }],
+  }
+}
+
+function buildStalledContinuationHarness(iteration: number, changes: FileChange[]): HarnessResult {
+  return {
+    passed: false,
+    score: 0,
+    duration: 0,
+    iteration,
+    validationConfidence: 'none',
+    skippedLayers: ['build', 'typecheck', 'tests', 'rules'],
+    layers: [{
+      name: 'completion',
+      passed: false,
+      errors: [{
+        layer: 'completion',
+        type: 'architecture',
+        severity: 'high',
+        fixable: false,
+        message: 'Agent reported incomplete work without producing new reviewable changes.',
+        humanMessage: 'The agent reached its turn budget again but the consolidated diff did not change. Automatic retry stopped to avoid an infinite loop.',
+        file: changes[0]?.path ?? '',
+        rule: 'completion_stalled',
+        suggestion: 'Ask for a narrower follow-up or inspect the current diff before continuing.',
+      }],
+      warnings: [],
+      duration: 0,
+      durationMs: 0,
+      skipped: false,
+      command: 'agent-continuation',
+    }],
+  }
+}
+
 /**
  * FIX-007: Compute the dynamic maxIterations for the repair loop.
  *
@@ -821,6 +1077,82 @@ function collectEnvironmentErrors(harnessResult: HarnessResult): HarnessError[] 
   return errors
 }
 
+function normalizeProviderBlocker(err: unknown): ProviderBlocker | null {
+  if (err === null || typeof err !== 'object') return null
+  const record = err as Record<string, unknown>
+  if (record.name !== 'KovaProviderError') return null
+  const code = record.code
+  if (!isProviderErrorCode(code)) return null
+
+  return {
+    code,
+    safeMessage: typeof record.safeMessage === 'string'
+      ? record.safeMessage
+      : err instanceof Error
+      ? err.message
+      : 'Provider blocked the request.',
+    status: typeof record.status === 'number' ? record.status : undefined,
+    provider: typeof record.provider === 'string' ? record.provider : undefined,
+    model: typeof record.model === 'string' ? record.model : undefined,
+  }
+}
+
+function isProviderErrorCode(value: unknown): value is NonNullable<ExecutionEvent['providerError']> {
+  return value === 'provider_rate_limited'
+    || value === 'provider_unavailable'
+    || value === 'provider_auth'
+    || value === 'provider_model_not_found'
+    || value === 'provider_unknown'
+}
+
+function buildProviderBlockedOutput(mode: AgentMode, reason: string): AgentOutput {
+  return {
+    mode,
+    thought: reason,
+    changes: [],
+    tokensUsed: 0,
+  }
+}
+
+function buildProviderBlockedHarness(iteration: number, blocker: ProviderBlocker): HarnessResult {
+  return {
+    passed: false,
+    score: 0,
+    duration: 0,
+    iteration,
+    validationConfidence: 'none',
+    skippedLayers: ['build', 'typecheck', 'tests', 'rules'],
+    layers: [{
+      name: 'completion',
+      passed: false,
+      errors: [{
+        layer: 'completion',
+        type: 'environment',
+        severity: blocker.code === 'provider_auth' ? 'critical' : 'high',
+        fixable: false,
+        message: blocker.safeMessage,
+        humanMessage: blocker.safeMessage,
+        file: '',
+        rule: blocker.code,
+        suggestion: providerBlockerSuggestion(blocker.code),
+      }],
+      warnings: [],
+      duration: 0,
+      durationMs: 0,
+      skipped: false,
+      command: 'provider-call',
+    }],
+  }
+}
+
+function providerBlockerSuggestion(code: NonNullable<ExecutionEvent['providerError']>): string {
+  if (code === 'provider_rate_limited') return 'Wait for quota reset, reduce context, or switch provider before retrying.'
+  if (code === 'provider_auth') return 'Fix the provider API key in Settings before retrying.'
+  if (code === 'provider_model_not_found') return 'Choose an available model in Settings before retrying.'
+  if (code === 'provider_unavailable') return 'Check provider connectivity or local model server before retrying.'
+  return 'Review the provider error before retrying.'
+}
+
 /**
  * Decision when the validation environment is missing required tooling.
  * Auto-apply for scaffolds (all creates) so the user gets the files and a
@@ -839,6 +1171,11 @@ function buildEnvFailureDecision(envErrors: HarnessError[], changes: FileChange[
     score: 75,
     reason,
     feedback: [],
+    completion: buildCompletionStop(
+      'environment_blocked',
+      uniqueHints.join(' ') || 'Validation stopped because the local environment is blocked.',
+      false,
+    ),
   }
 }
 

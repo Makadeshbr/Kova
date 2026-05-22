@@ -79,7 +79,12 @@ export async function globFiles(
   // bounds N in practice, and we already filtered binary trees via ignores.
   type Entry = { path: string; mtimeMs: number }
   const entries: Entry[] = []
-  for (const rel of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    if (i % 100 === 0) {
+      const aborted = await abortCheckpoint(signal, 'Aborted during glob')
+      if (aborted) return failure(aborted)
+    }
+    const rel = candidates[i]
     const abs = join(searchRoot, rel)
     let mtimeMs = 0
     try {
@@ -99,6 +104,7 @@ export async function globFiles(
     if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs
     return a.path.localeCompare(b.path)
   })
+  if (signal?.aborted) return failure('Aborted during glob')
 
   const truncated = entries.length > headLimit
   const paths = truncated ? entries.slice(0, headLimit).map(e => e.path) : entries.map(e => e.path)
@@ -135,4 +141,26 @@ function validateOptions(
 
 function failure(error: string): GlobResult {
   return { ok: false, paths: [], truncated: false, error }
+}
+
+function abortCheckpoint(signal: AbortSignal | undefined, message: string): Promise<string | null> {
+  if (!signal) return Promise.resolve(null)
+  if (signal?.aborted) return Promise.resolve(message)
+  return new Promise(resolvePromise => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise(null)
+    }, 0)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise(message)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }

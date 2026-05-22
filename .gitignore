@@ -5,6 +5,7 @@ Thumbs.db
 node_modules/
 .build/
 /out*/
+apps/*/out/
 build/node_modules
 coverage/
 test_data/
@@ -25,4 +26,4 @@ product.overrides.json
 .turbo/
 **/.turbo/
 packages/*/dist/
-apps/cli/dist/
+apps/*/dist/

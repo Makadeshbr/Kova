@@ -48,7 +48,7 @@ describe('provider error normalization', () => {
 
   it('OpenAI-compatible joga erro normalizado em HTTP failure', async () => {
     mockHttp(429, 'Too Many Requests')
-    const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm' })
+    const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'm', retryPolicy: { maxAttempts: 1 } })
     await expect(provider.generate([{ role: 'user', content: 'hi' }])).rejects.toMatchObject({
       code: 'provider_rate_limited',
       status: 429,
@@ -58,7 +58,7 @@ describe('provider error normalization', () => {
 
   it('SSE interrompido por status HTTP retorna erro normalizado', async () => {
     mockHttp(404, 'model not found')
-    const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'missing' })
+    const provider = new OpenAICompatibleProvider({ baseUrl: 'http://local/v1', model: 'missing', retryPolicy: { maxAttempts: 1 } })
     await expect(provider.runAgentLoop([{ role: 'user', content: 'hi' }], {
       system: 'sys',
       tools: [],

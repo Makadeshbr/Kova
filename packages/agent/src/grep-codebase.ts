@@ -304,6 +304,7 @@ interface JsRun {
   ok: boolean
   lines: string[]
   truncated: boolean
+  error?: string
 }
 
 async function runJsFallback(
@@ -314,7 +315,7 @@ async function runJsFallback(
   outputMode: GrepOutputMode,
   signal: AbortSignal | undefined,
 ): Promise<JsRun> {
-  if (signal?.aborted) return { ok: false, lines: [], truncated: false }
+  if (signal?.aborted) return abortedRun('Aborted during grep')
 
   let regex: RegExp
   try {
@@ -351,8 +352,12 @@ async function runJsFallback(
   const lines: string[] = []
   let truncated = false
 
-  for (const rel of candidates) {
-    if (signal?.aborted) return { ok: false, lines: [], truncated: false }
+  for (let i = 0; i < candidates.length; i++) {
+    if (i % 100 === 0) {
+      const aborted = await abortCheckpoint(signal, 'Aborted during grep')
+      if (aborted) return abortedRun(aborted)
+    }
+    const rel = candidates[i]
     if (lines.length >= headLimit) { truncated = true; break }
 
     const absPath = join(searchRoot, rel)
@@ -371,7 +376,8 @@ async function runJsFallback(
     const text = bytes.toString('utf-8')
     const relFromRoot = relative(projectRoot, absPath).replace(/\\/g, '/')
 
-    const outcome = matchInFile(text, regex, relFromRoot, outputMode, headLimit - lines.length)
+    const outcome = await matchInFile(text, regex, relFromRoot, outputMode, headLimit - lines.length, signal)
+    if (outcome.aborted) return abortedRun('Aborted during grep')
     for (const out of outcome.lines) lines.push(out)
     if (outcome.fileTruncated) { truncated = true; break }
   }
@@ -383,15 +389,18 @@ interface FileMatchOutcome {
   lines: string[]
   /** True when this file alone caused the global headLimit to be hit. */
   fileTruncated: boolean
+  /** True when AbortSignal fired while scanning this file. */
+  aborted?: boolean
 }
 
-function matchInFile(
+async function matchInFile(
   text: string,
   regex: RegExp,
   relPath: string,
   outputMode: GrepOutputMode,
   remainingSlots: number,
-): FileMatchOutcome {
+  signal: AbortSignal | undefined,
+): Promise<FileMatchOutcome> {
   if (outputMode === 'files_with_matches') {
     if (regex.test(text)) return { lines: [relPath], fileTruncated: false }
     return { lines: [], fileTruncated: false }
@@ -409,10 +418,40 @@ function matchInFile(
   const out: string[] = []
   const fileLines = text.split('\n')
   for (let i = 0; i < fileLines.length; i++) {
+    if (i % 100 === 0) {
+      const aborted = await abortCheckpoint(signal, 'Aborted during grep')
+      if (aborted) return { lines: out, fileTruncated: false, aborted: true }
+    }
     if (out.length >= remainingSlots) return { lines: out, fileTruncated: true }
     if (regex.test(fileLines[i])) {
       out.push(`${relPath}:${i + 1}:${fileLines[i]}`)
     }
   }
   return { lines: out, fileTruncated: false }
+}
+
+function abortedRun(error: string): JsRun {
+  return { ok: false, lines: [], truncated: false, error }
+}
+
+function abortCheckpoint(signal: AbortSignal | undefined, message: string): Promise<string | null> {
+  if (!signal) return Promise.resolve(null)
+  if (signal?.aborted) return Promise.resolve(message)
+  return new Promise(resolvePromise => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise(null)
+    }, 0)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise(message)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }

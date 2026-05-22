@@ -11,34 +11,22 @@ import type { AgentProvider, ProviderId } from '@kova/agent'
 import type { StartTaskParams } from './engine-manager'
 import { getSettingsInternal } from './ipc-handlers'
 
-/**
- * Base URLs and default models are sourced from the shared @kova/agent catalog
- * so the renderer dropdown, capability detection, and provider resolution all
- * agree on the same 2026 IDs. Env vars still override for NVIDIA/Ollama where
- * users self-host on non-default ports.
- */
-export const PRESET_URLS: Record<string, string> = {
-  openai:     PROVIDER_DEFAULTS.openai.baseUrl,
-  deepseek:   PROVIDER_DEFAULTS.deepseek.baseUrl,
-  openrouter: PROVIDER_DEFAULTS.openrouter.baseUrl,
-  kimi:       PROVIDER_DEFAULTS.kimi.baseUrl,
-  gemini:     PROVIDER_DEFAULTS.gemini.baseUrl,
-  xai:        PROVIDER_DEFAULTS.xai.baseUrl,
-  nvidia:     process.env.NVIDIA_BASE_URL ?? PROVIDER_DEFAULTS.nvidia.baseUrl,
-  ollama:     process.env.OLLAMA_BASE_URL ?? PROVIDER_DEFAULTS.ollama.baseUrl,
-  lmstudio:   PROVIDER_DEFAULTS.lmstudio.baseUrl,
+export function isProviderId(providerName: string): providerName is ProviderId {
+  return providerName in PROVIDER_DEFAULTS
 }
 
-export const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio', 'openai-compatible'])
+export function resolveProviderBaseUrl(providerName: string): string {
+  if (providerName === 'nvidia') return process.env.NVIDIA_BASE_URL ?? PROVIDER_DEFAULTS.nvidia.baseUrl
+  if (providerName === 'ollama') return process.env.OLLAMA_BASE_URL ?? PROVIDER_DEFAULTS.ollama.baseUrl
+  return isProviderId(providerName) ? PROVIDER_DEFAULTS[providerName].baseUrl : ''
+}
 
-export const PRESET_MODELS: Record<string, string> = {
-  openai:     PROVIDER_DEFAULTS.openai.defaultModel,
-  deepseek:   PROVIDER_DEFAULTS.deepseek.defaultModel,
-  kimi:       PROVIDER_DEFAULTS.kimi.defaultModel,
-  gemini:     PROVIDER_DEFAULTS.gemini.defaultModel,
-  xai:        PROVIDER_DEFAULTS.xai.defaultModel,
-  openrouter: PROVIDER_DEFAULTS.openrouter.defaultModel,
-  nvidia:     PROVIDER_DEFAULTS.nvidia.defaultModel,
+export function resolveProviderDefaultModel(providerName: string): string {
+  return isProviderId(providerName) ? PROVIDER_DEFAULTS[providerName].defaultModel : ''
+}
+
+export function isLocalProvider(providerName: string): boolean {
+  return isProviderId(providerName) && PROVIDER_DEFAULTS[providerName].local === true
 }
 
 export const INVALID_MODEL_VALUES = new Set([
@@ -80,11 +68,11 @@ export async function buildProvider(
 ): Promise<ProviderResolution | null> {
   const providerName = params.provider ?? 'anthropic'
   const requestedModel = params.model?.trim() || undefined
-  let apiKey = params.apiKey ?? ''
+  const settings = getSettingsInternal()
+  let apiKey = params.apiKey ?? resolveProviderApiKey(providerName, settings)
   let extraBody: Record<string, unknown> | undefined = undefined
 
   if (providerName === 'nvidia') {
-    const settings = getSettingsInternal()
     apiKey = process.env.NVIDIA_API_KEY || settings.nvidiaKey || ''
     if (!apiKey) throw new Error('NVIDIA_API_KEY is missing. Configure it via .env or Settings.')
     if (settings.nvidiaEnableThinking !== false) {
@@ -102,11 +90,11 @@ export async function buildProvider(
     }
   }
 
-  const baseUrl = params.baseUrl ?? PRESET_URLS[providerName] ?? ''
+  const baseUrl = params.baseUrl ?? resolveProviderBaseUrl(providerName)
   if (!baseUrl) return null
-  if (!apiKey && !LOCAL_PROVIDERS.has(providerName)) return null
+  if (!apiKey && !isLocalProvider(providerName)) return null
 
-  const presetFallback = PRESET_MODELS[providerName] ?? ''
+  const presetFallback = resolveProviderDefaultModel(providerName)
   const safeConfigured = requestedModel && !INVALID_MODEL_VALUES.has(requestedModel) ? requestedModel : undefined
   const resolved = await autoResolveModel(baseUrl, safeConfigured, onModelDetected)
   const model = resolved || presetFallback
@@ -185,17 +173,24 @@ export async function tryFallbackProvider(ctx: FallbackContext): Promise<Provide
   }
 }
 
+function resolveProviderApiKey(
+  providerName: string,
+  settings: ReturnType<typeof getSettingsInternal>,
+): string {
+  return providerName === 'anthropic' ? settings.anthropicKey
+    : providerName === 'openai' ? settings.openaiKey
+    : providerName === 'deepseek' ? settings.deepseekKey
+    : providerName === 'openrouter' ? settings.openrouterKey
+    : providerName === 'kimi' ? settings.kimiKey
+    : providerName === 'gemini' ? settings.geminiKey
+    : providerName === 'xai' ? settings.xaiKey
+    : providerName === 'openai-compatible' ? settings.openaiCompatibleKey
+    : ''
+}
+
 function resolveFallbackApiKey(
   fallbackProvider: string,
   settings: ReturnType<typeof getSettingsInternal>,
 ): string {
-  return fallbackProvider === 'anthropic' ? settings.anthropicKey
-    : fallbackProvider === 'openai' ? settings.openaiKey
-    : fallbackProvider === 'deepseek' ? settings.deepseekKey
-    : fallbackProvider === 'openrouter' ? settings.openrouterKey
-    : fallbackProvider === 'kimi' ? settings.kimiKey
-    : fallbackProvider === 'gemini' ? settings.geminiKey
-    : fallbackProvider === 'xai' ? settings.xaiKey
-    : fallbackProvider === 'openai-compatible' ? settings.openaiCompatibleKey
-    : ''
+  return resolveProviderApiKey(fallbackProvider, settings)
 }

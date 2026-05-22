@@ -82,39 +82,55 @@ describe('decide thresholds', () => {
     expect(d.score).toBe(82)
   })
 
-  it('rejects failed tests even when proportional score would be reviewable', () => {
+  it('suggests review when tests fail because harness is informative', () => {
     const r = result([
       layer('build', true), layer('tests', false), layer('rules', true),
       layer('security', true), layer('lint', true),
     ])
     const d = decide(r, emptyHistory)
-    expect(d.decision).toBe('reject')
-    expect(d.score).toBeLessThanOrEqual(55)
-    expect(d.reason).toContain('repair loop')
+    expect(d.decision).toBe('suggest')
+    expect(d.score).toBeGreaterThanOrEqual(70)
+    expect(d.reason).toContain('harness warning')
   })
 
-  it('returns reject when score < 70', () => {
+  it('still rejects low score when there is no concrete harness warning to review', () => {
     const r = result([
-      layer('build', true), layer('tests', false), layer('rules', false),
+      layer('build', true), layer('tests', true), layer('rules', true),
       layer('security', true), layer('lint', true),
     ])
+    r.evidenceScore = {
+      score: 40,
+      validationConfidence: 'full',
+      validation: {
+        executedLayers: ['build', 'tests', 'rules', 'security', 'lint'],
+        passedLayers: ['build', 'tests', 'rules', 'security', 'lint'],
+        failedLayers: [],
+        skippedLayers: [],
+        totalWeight: 100,
+        passedWeight: 100,
+      },
+      risk: { filesChanged: 12, changedLines: 900, patchSize: 'large', riskLevel: 'high', penalty: 40, reasons: ['large patch'] },
+      completeness: { hasCompilationCheck: true, hasTestEvidence: true, hasSecurityEvidence: true, partial: false, penalty: 20, reasons: ['missing proof'] },
+      blockers: [],
+      notes: [],
+    }
     expect(decide(r, emptyHistory).decision).toBe('reject')
   })
 
-  it('returns reject with score 0 on build hard fail', () => {
+  it('suggests review on build failure instead of blocking apply', () => {
     const r = result([layer('build', false), layer('lint', true)])
     const d = decide(r, emptyHistory)
-    expect(d.decision).toBe('reject')
-    expect(d.score).toBe(0)
+    expect(d.decision).toBe('suggest')
+    expect(d.score).toBe(70)
     expect(d.reason).toContain('Build')
   })
 
-  it('requires repair when lint fails', () => {
+  it('surfaces lint failures as harness warnings', () => {
     const r = result([layer('build', true), layer('lint', false)])
     const d = decide(r, emptyHistory)
-    expect(d.decision).toBe('reject')
-    expect(d.score).toBeLessThanOrEqual(55)
-    expect(d.reason).toContain('repair loop')
+    expect(d.decision).toBe('suggest')
+    expect(d.score).toBeGreaterThanOrEqual(70)
+    expect(d.reason).toContain('harness warning')
   })
 })
 
@@ -224,12 +240,12 @@ describe('config error classification', () => {
     }
   }
 
-  it('first iteration of "no inputs were found" stays as reject (gives agent one chance)', () => {
+  it('first iteration of "no inputs were found" becomes a reviewable harness warning', () => {
     const r = result([
       buildLayer('build', 'tsc --noEmit', "error TS18003: No inputs were found in config file 'tsconfig.json'."),
     ])
     const d = decide(r, emptyHistory)
-    expect(d.decision).toBe('reject')
+    expect(d.decision).toBe('suggest')
   })
 
   it('repeated tsc misconfig escalates to human_required instead of looping', () => {
@@ -273,7 +289,7 @@ describe('config error classification', () => {
     const history = [historyEntry(result([codeErr]), fd)]
 
     const d = decide(r, history)
-    expect(d.decision).toBe('reject') // stays in repair loop, not human_required
+    expect(d.decision).toBe('suggest')
   })
 
   it('config error after different command does NOT escalate (agent changed approach)', () => {
@@ -283,6 +299,6 @@ describe('config error classification', () => {
     const history = [historyEntry(result([prevLayer]), fd)]
 
     const d = decide(result([currentLayer]), history)
-    expect(d.decision).toBe('reject') // different command, classified differently
+    expect(d.decision).toBe('suggest')
   })
 })

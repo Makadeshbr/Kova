@@ -9,3 +9,4 @@ export { createExecutionContract, validateContractChanges, contractViolationsToH
 export { buildCompletionProof, inferCompletionRequirements } from './completion-contract'
 export type { CompletionTrace } from './completion-contract'
 export { detectExplicitLanguage, resolveTaskStack } from './language-detection'
+export { consolidateIterationChanges, consolidateWithPendingChanges } from './changes'

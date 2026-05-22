@@ -8,9 +8,9 @@ import { terminalManager } from './terminal-manager'
 import { createPreviewWorkspace } from './preview-manager'
 import { CodeApplicationEngine, createDiffReviewDecision } from '@kova/application'
 import { ContextEngine } from '@kova/context'
-import { ExecutionEngine } from '@kova/execution'
+import { ExecutionEngine, consolidateIterationChanges, structureTask } from '@kova/execution'
 import { HarnessOrchestrator } from '@kova/orchestrator'
-import type { AgentContext, Attachment, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage, Todo } from '@kova/shared'
+import type { AgentContext, Attachment, DiffReviewSelection, ExecutionEvent, ExecutionState, TaskDefinition, AgentMessage, Todo, ProofPack, AgentResultMessage } from '@kova/shared'
 import { basename } from 'node:path'
 import { readdirSync } from 'node:fs'
 import { MemorySystem } from '@kova/memory'
@@ -18,7 +18,7 @@ import { adapterFromProjectProfile, detectStack } from '@kova/adapters'
 import { buildProjectProfile } from '@kova/project'
 import { resolveAtRefs, shouldShortCircuitDeniedRefs, deniedRefsMessage } from './at-refs'
 import type { ResolvedAtRefs } from './at-refs'
-import { chatOnlyPrompt, reviewOnlyPrompt, planOnlyPrompt, resolveRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
+import { chatOnlyPrompt, globalChatPrompt, reviewOnlyPrompt, planOnlyPrompt, resolveRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
 import type { KovaRunMode } from './session-prompts'
 import {
   buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
@@ -35,6 +35,13 @@ import { buildProvider, tryFallbackProvider } from './provider-resolver'
 import type { ProviderFactory, ProviderResolution } from './provider-resolver'
 import { buildPatchTask } from './task-structurer'
 import { LruCache } from './lru-cache'
+import {
+  createRunSnapshot,
+  finalizeRunSnapshot,
+  recordSnapshotEvent,
+  recordSnapshotState,
+  writeRunSnapshot,
+} from './run-snapshot-store'
 
 // Re-export provider types so existing consumers of engine-manager keep working unchanged.
 export { autoResolveModel, buildProvider } from './provider-resolver'
@@ -45,7 +52,8 @@ export type KovaPermissionMode = 'auto-review' | 'ask' | 'full-access'
 
 export interface StartTaskParams {
   objective: string
-  projectRoot: string
+  projectRoot?: string
+  sessionId?: string
   provider?: string
   apiKey?: string
   model?: string
@@ -191,13 +199,24 @@ export class EngineManager {
     this.sessionAbort = new AbortController()
     if (this.engine) { await this.engine.abort().catch(() => null); this.engine = null }
 
-    const { projectRoot } = params
-    const profile = buildProjectProfile(projectRoot)
-    const adapter = profile.confidence > 0 ? adapterFromProjectProfile(profile) : detectStack(projectRoot)
     const mode = resolveRunMode(message, params.mode)
     // Strip the leading slash command so the model receives the actual request,
     // not the routing token. Done uniformly for all slash-routed modes.
     const rawContent = stripModeSlash(message, mode)
+
+    if (!params.projectRoot) {
+      if (mode !== 'chat') {
+        this.emit({ type: 'token', token: workspaceRequiredMessage(mode) })
+        this.emit({ type: 'stream_end' })
+        return
+      }
+      await this.runGlobalChatSession(rawContent, history, params, this.sessionAbort.signal, attachments)
+      return
+    }
+
+    const { projectRoot } = params
+    const profile = buildProjectProfile(projectRoot)
+    const adapter = profile.confidence > 0 ? adapterFromProjectProfile(profile) : detectStack(projectRoot)
     const resolution = resolveAtRefs(rawContent, projectRoot)
 
     if (resolution.refs.length) this.emit({ type: 'tool_result', message: `@ ${resolution.refs.map(r => r.path).join(', ')}` })
@@ -305,6 +324,88 @@ export class EngineManager {
     )
   }
 
+  private async runGlobalChatSession(
+    userContent: string,
+    history: AgentMessage[],
+    params: StartTaskParams,
+    signal?: AbortSignal,
+    attachments?: Attachment[],
+  ): Promise<void> {
+    let streamEndEmitted = false
+    const reasoning = createReasoningEmitter((event) => this.emit(event))
+    try {
+      const deterministicReply = buildTestingFollowupReply(userContent, history)
+      if (deterministicReply) {
+        const tokens = estimateMessagesTokens([{ role: 'assistant', content: deterministicReply }])
+        this.emit({ type: 'token', token: deterministicReply })
+        this.emit({ type: 'token_usage', message: `${tokens} tokens`, tokensUsed: tokens })
+        this.emit({ type: 'stream_end' })
+        streamEndEmitted = true
+        return
+      }
+
+      let resolution: ProviderResolution | null
+      try {
+        resolution = await this.providerFactory(params, this.onModelDetected ?? undefined)
+      } catch (err) {
+        const fallback = await this.resolveFallbackProvider(params, err)
+        if (!fallback) {
+          this.emitProviderError(err)
+          if (!signal?.aborted) this.onChatResponse?.(formatProviderError(err))
+          this.emit({ type: 'stream_end' })
+          streamEndEmitted = true
+          return
+        }
+        resolution = fallback
+      }
+
+      if (!resolution) {
+        const fallback = await this.resolveFallbackProvider(params, new Error('Primary provider not configured'))
+        if (!fallback) {
+          this.onChatResponse?.('Provider not configured. Open Settings.')
+          this.emit({ type: 'stream_end' })
+          streamEndEmitted = true
+          return
+        }
+        resolution = fallback
+      }
+
+      this.emit({
+        type: 'provider_session_start',
+        message: resolution.fallback
+          ? `Provider: ${resolution.resolvedProvider} / model: ${resolution.resolvedModel} (fallback - ${resolution.fallbackReason ?? 'configured model unavailable'})`
+          : `Provider: ${resolution.resolvedProvider} / model: ${resolution.resolvedModel ?? 'auto'}`,
+        providerMeta: {
+          requestedProvider: params.provider ?? 'anthropic',
+          requestedModel: params.model || undefined,
+          resolvedProvider: resolution.resolvedProvider,
+          resolvedModel: resolution.resolvedModel,
+          fallback: resolution.fallback,
+          fallbackReason: resolution.fallbackReason,
+        },
+      })
+
+      const messages: AgentMessage[] = [...history, { role: 'user', content: userContent, ...(attachments ? { attachments } : {}) }]
+      reasoning.start()
+      const output = await resolution.provider.generate(messages, { system: globalChatPrompt() })
+      reasoning.end()
+      if (output.thought.trim()) this.emit({ type: 'token', token: output.thought })
+      const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
+      this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+    } catch (err) {
+      if (!signal?.aborted) {
+        this.emitProviderError(err)
+        this.onChatResponse?.(formatProviderError(err))
+      }
+    } finally {
+      reasoning.end()
+      if (!streamEndEmitted) {
+        this.emit({ type: 'stream_end' })
+        streamEndEmitted = true
+      }
+    }
+  }
+
 
   private async runChatSession(
     userContent: string,
@@ -348,13 +449,18 @@ export class EngineManager {
       // session remains side-effect-free. Without tools the model would refuse
       // honestly ("I cannot inspect files") even when context promised access —
       // a UX bug that surfaced as "ele me disse que não pode rodar comandos".
+      let emittedText = false
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
         tools: READ_ONLY_TOOLS,
         executor: new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY),
         maxTurns: 6,
         signal,
-        onToken: t => { reasoning.end(); this.emit({ type: 'token', token: t }) },
+        onToken: t => {
+          reasoning.end()
+          if (t.trim()) emittedText = true
+          this.emit({ type: 'token', token: t })
+        },
         onReasoningStart: () => reasoning.start(),
         onReasoningDelta: delta => reasoning.delta(delta),
         onReasoningEnd: () => reasoning.end(),
@@ -375,6 +481,7 @@ export class EngineManager {
       })
       const turnTokens = output.tokensUsed || estimateMessagesTokens([...messages, { role: 'assistant', content: output.thought }])
       if (!usageReported) this.emit({ type: 'token_usage', message: `${turnTokens} tokens`, tokensUsed: turnTokens })
+      if (!emittedText && output.thought.trim()) this.emit({ type: 'token', token: output.thought })
     } catch (err) {
       if (!signal?.aborted) {
         this.emitProviderError(err)
@@ -603,6 +710,29 @@ export class EngineManager {
     attachments?: Attachment[],
   ): Promise<void> {
     const appEngine = new CodeApplicationEngine(projectRoot)
+    let snapshot = createRunSnapshot({
+      sessionId: params.sessionId ?? task.id,
+      projectRoot,
+      objective,
+      mode: params.mode,
+      task,
+    })
+    const persistSnapshot = (final = false): void => {
+      try {
+        if (final) finalizeRunSnapshot(projectRoot, snapshot)
+        else writeRunSnapshot(projectRoot, snapshot)
+      } catch (err) {
+        console.warn('[Kova recovery] failed to persist run snapshot', err)
+      }
+    }
+    const captureState = (state: ExecutionState): void => {
+      snapshot = recordSnapshotState(snapshot, state)
+      persistSnapshot()
+    }
+    const captureEvent = (event: ExecutionEvent): void => {
+      snapshot = recordSnapshotEvent(snapshot, event)
+      if (event.type !== 'token' && event.type !== 'reasoning_delta') persistSnapshot()
+    }
 
     // FIX-002: Reuse cached ContextEngine + MemorySystem (single instance per project)
     // so learnings persist across patch turns and disk scans are not repeated.
@@ -630,7 +760,10 @@ export class EngineManager {
         permissionPolicy: permissionPolicyFor(params.permissionMode),
         explicitFiles,
         openedFiles: params.openedFiles ?? [],
-        onStateChange: (state) => this.onUpdate?.(state),
+        onStateChange: (state) => {
+          captureState(state)
+          this.onUpdate?.(state)
+        },
         onEvent: (event) => this.onExecutionEvent?.(event),
         interactiveRunner: (command, cwd, reason, options) => {
           if (options?.previewChanges?.length) {
@@ -657,11 +790,16 @@ export class EngineManager {
     let engineStreamEndObserved = false
     let finalStreamEndEmitted = false
     const origEventHandler = this.onExecutionEvent
+    const emitOriginalWithSnapshot = (event: ExecutionEvent): void => {
+      captureEvent(event)
+      origEventHandler?.(event)
+    }
     const emitFinal = (event: Omit<ExecutionEvent, 'taskId' | 'timestamp'>): void => {
       finalStreamEndEmitted = true
-      origEventHandler?.({ taskId: 'chat', timestamp: new Date().toISOString(), ...event })
+      emitOriginalWithSnapshot({ taskId: 'chat', timestamp: new Date().toISOString(), ...event })
     }
     this.onExecutionEvent = (event) => {
+      captureEvent(event)
       if (event.type === 'stream_end') {
         engineStreamEndObserved = true
         return
@@ -672,12 +810,12 @@ export class EngineManager {
     try {
       const state = await this.engine.run(task)
       const last = state.iterationHistory.at(-1)
-      const files = last?.changes ?? []
+      const files = consolidateIterationChanges(state.iterationHistory)
       const score = last?.decision.score ?? last?.harnessResult.score ?? 0
       const proof = state.proofPack
 
       if (files.length > 0) {
-        origEventHandler?.({
+        emitOriginalWithSnapshot({
           taskId: task.id,
           timestamp: new Date().toISOString(),
           iteration: last?.iteration,
@@ -706,6 +844,7 @@ export class EngineManager {
           kind: 'agent_result',
           title,
           summary,
+          report: proof ? buildRunReport(task.objective, state.status, proof) : undefined,
           filesChanged: files.map(c => ({
             path: c.path,
             displayName: basename(c.path),
@@ -745,6 +884,8 @@ export class EngineManager {
       // Restore original event handler
       this.onExecutionEvent = origEventHandler
       if (!finalStreamEndEmitted && !engineStreamEndObserved) emitFinal({ type: 'stream_end' })
+      const status = snapshot.executionState?.status
+      persistSnapshot(status === 'completed' || status === 'paused' || status === 'failed')
       if (this.engine?.getState()?.status !== 'paused') this.engine = null
     }
   }
@@ -778,6 +919,11 @@ export class EngineManager {
     }
     this.onChatResponse?.('No pending changes to apply.')
   }
+}
+
+function workspaceRequiredMessage(mode: KovaRunMode): string {
+  const label = mode === 'patch' ? 'Code' : mode.charAt(0).toUpperCase() + mode.slice(1)
+  return `${label} mode needs an attached project. Open or attach a folder first, then send the request again.`
 }
 
 // ——— Error helpers ——————————————————————————————————————————————————————————
@@ -896,6 +1042,49 @@ function mapResultDecision(
   if (decision === 'human_required' || status === 'paused') return 'needs_review'
   if (decision === 'reject') return 'reject'
   return 'reject'
+}
+
+function buildRunReport(
+  objective: string,
+  status: ExecutionState['status'],
+  proof: ProofPack,
+): NonNullable<AgentResultMessage['report']> {
+  const commands = unique([
+    ...(proof.completionProof?.commandsRun ?? []),
+    ...proof.validationsRun.map(validation => validation.command).filter((command): command is string => Boolean(command)),
+  ])
+  const contextFiles = unique((proof.contextUsed?.files ?? proof.analyzedFiles).map(file => file.path))
+  const evidence = [
+    `${proof.iterations} iteration${proof.iterations === 1 ? '' : 's'} recorded`,
+    `${proof.changes.length} file${proof.changes.length === 1 ? '' : 's'} changed`,
+    `final decision ${proof.finalDecision}; score ${proof.finalScore}`,
+    proof.results?.validationConfidence ? `validation confidence ${proof.results.validationConfidence}` : undefined,
+  ].filter((item): item is string => Boolean(item))
+  const nextSteps = unique([
+    proof.nextStepRecommended,
+    ...proof.residualRisk.map(risk => `Review risk: ${risk}`),
+  ].filter((item): item is string => Boolean(item)))
+
+  return {
+    objective: proof.understoodRequest || proof.objective || objective,
+    status: status === 'completed' ? 'completed' : status === 'paused' ? 'awaiting_review' : 'failed',
+    outcome: proof.summary ?? (status === 'completed' ? 'Task completed.' : 'Task stopped before completion.'),
+    files: proof.changes.map(change => ({
+      path: change.path,
+      status: change.type === 'create' ? 'created' : change.type === 'delete' ? 'deleted' : 'modified',
+      reason: change.reason,
+    })),
+    commandsRun: commands,
+    validationsNotRun: proof.validationsNotRun,
+    contextFiles,
+    evidence,
+    nextSteps,
+    completedAt: proof.completedAt,
+  }
+}
+
+function unique(items: string[]): string[] {
+  return [...new Set(items)]
 }
 
 export { toRelative, structureTask, ContextEngine, MemorySystem, ExecutionEngine }

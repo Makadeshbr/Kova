@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+﻿import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useEngineEvents } from './hooks/useEngineEvents'
 import { useSessionPersistence } from './hooks/useSessionPersistence'
 import type { ExecutionEvent, ExecutionState, TaskDefinition, StartTaskParams } from './types'
@@ -10,7 +10,6 @@ import { detectVisionSupport } from './lib/vision-detection'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { ChatArea } from './components/ChatArea'
-import { HarnessDashboard } from './components/HarnessDashboard'
 import { FilesViewer } from './components/FilesViewer'
 import { FileEditor } from './components/FileEditor'
 import { StatusBar } from './components/StatusBar'
@@ -22,7 +21,7 @@ import type { TerminalSessionInfo, PendingApproval } from './app-state'
 // All shared state types live in app-state.ts to avoid circular imports with hooks
 import type {
   AppState, ChatMessage, ChatMode, QueuedMessage,
-  SessionUsage, ReasoningState, PermissionMode,
+  SessionUsage, ReasoningState, PermissionMode, PersistedSession,
 } from './app-state'
 export type { AppState, ChatMessage, ChatMode, PermissionMode, QueuedMessage, SessionUsage, ReasoningState }
 
@@ -39,7 +38,7 @@ function localServerUrl(s: KovaSettings): string | null {
   return null
 }
 
-// AppState is defined in app-state.ts — imported and re-exported above
+// AppState is defined in app-state.ts â€” imported and re-exported above
 
 const EMPTY_USAGE: SessionUsage = {
   contextTokens: 0,
@@ -109,7 +108,7 @@ export function App(): React.ReactElement {
   const [state, setState] = useState<AppState>({
     projectRoot: null, task: null, executionState: null, settings: null,
     messages: [], executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING,
-    isThinking: false, showSettings: false, showDiff: false,
+    isThinking: false, showSettings: false,
     activeModel: null, modelConnected: false, openFilePath: null, fileRefreshKey: 0,
     sessionId: null,
     sessionUsage: EMPTY_USAGE,
@@ -174,69 +173,112 @@ export function App(): React.ReactElement {
     todos: state.todos,
     onSessionIdCreated: (id) => setState(prev => ({ ...prev, sessionId: id })),
   })
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [reviewWidth, setReviewWidth] = useState(520)
+  const canApplyReviewSelection = state.executionState?.status === 'paused'
+
+  const startReviewResize = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    const onMove = (moveEvent: PointerEvent): void => {
+      const max = Math.round(window.innerWidth * 0.72)
+      const nextWidth = Math.min(max, Math.max(360, window.innerWidth - moveEvent.clientX))
+      setReviewWidth(nextWidth)
+    }
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [])
 
   // Command Pattern (race-free): once a UserCommand is created at submission time,
   // it carries the full intent (text + mode) atomically through the pipeline.
-  // No downstream code reads `state.activeMode` to "guess" mode — eliminates the
+  // No downstream code reads `state.activeMode` to "guess" mode â€” eliminates the
   // entire class of stale-closure bugs that affected slash command dispatch.
-  const buildTaskParams = useCallback((cmd: UserCommand): StartTaskParams => {
+  const buildTaskParams = useCallback((cmd: UserCommand, sessionId: string): StartTaskParams => {
     const s = state.settings!
-    const apiKeyMap: Record<string, string> = {
-      anthropic: s.anthropicKey,
-      openai: s.openaiKey,
-      deepseek: s.deepseekKey,
-      gemini: s.geminiKey,
-      openrouter: s.openrouterKey,
-      kimi: s.kimiKey,
-      'openai-compatible': s.openaiCompatibleKey,
-    }
     return {
       objective: cmd.text,
-      projectRoot: state.projectRoot!,
+      projectRoot: state.projectRoot ?? undefined,
+      sessionId,
       provider: s.defaultProvider as never,
-      apiKey: apiKeyMap[s.defaultProvider] || undefined,
+      apiKey: undefined,
       baseUrl: s.defaultProvider === 'ollama' ? s.ollamaUrl
              : (s.defaultProvider === 'lmstudio' || s.defaultProvider === 'openai-compatible') ? s.compatibleUrl
              : undefined,
       model: state.activeModel || s.model || undefined,
       autoApply: s.autoApply,
       maxIterations: s.maxIterations,
-      mode: cmd.mode,                  // ← from atomic command, never stale
+      mode: cmd.mode,                  // â† from atomic command, never stale
       permissionMode: s.permissionMode ?? 'auto-review',
-      includeProjectContext: true,
+      includeProjectContext: Boolean(state.projectRoot),
       queuedCount: state.queuedMessages.length,
       openedFiles: state.openFilePath ? [state.openFilePath] : [],
     }
   }, [state.settings, state.projectRoot, state.activeModel, state.queuedMessages.length, state.openFilePath])
 
   const sendNow = useCallback(async (cmd: UserCommand) => {
-    if (!state.settings || !state.projectRoot) return
+    if (!state.settings) return
+    if (!state.projectRoot && cmd.mode !== 'chat') {
+      setState(prev => ({
+        ...prev,
+        isThinking: false,
+        messages: [...prev.messages, {
+          id: createChatMessageId('assistant'), role: 'assistant',
+          content: 'Open or attach a project folder before using Code, Plan, or Review mode.',
+          isTask: false,
+        }],
+      }))
+      return
+    }
     const taskOnly = cmd.mode === 'review' || cmd.mode === 'plan'
     const history = buildTokenBudgetedHistory(state.messages, { taskOnly })
+    const sessionId = state.sessionId ?? createChatMessageId('session')
     setState(prev => ({
       ...prev, isThinking: true, executionState: null, task: null,
-      executionEvents: [], showDiff: false, streamingText: '', reasoning: EMPTY_REASONING,
+      executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING,
       todos: [],
+      sessionId,
       messages: [...prev.messages, {
         id: createChatMessageId('user'), role: 'user', content: cmd.text, isTask: false,
         attachments: cmd.attachments,
       }],
     }))
-    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd), cmd.attachments)
-  }, [state.settings, state.projectRoot, state.messages, buildTaskParams])
+    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd, sessionId), cmd.attachments)
+  }, [state.settings, state.projectRoot, state.messages, state.sessionId, buildTaskParams])
 
   const handleSend = useCallback(async (rawText: string, modeOverride?: ChatMode, attachments?: import('@kova/shared').Attachment[]) => {
-    if (!state.settings || !state.projectRoot) return
-    // Single source of truth for user intent — parsed once, frozen, propagated.
-    const cmd = parseUserInput(rawText, modeOverride ?? state.activeMode, attachments)
+    if (!state.settings) return
+    // Single source of truth for user intent â€” parsed once, frozen, propagated.
+    const cmd = parseUserInput(rawText, modeOverride ?? (state.projectRoot ? state.activeMode : 'chat'), attachments)
     const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
     if (isBusy) {
+      const shouldInterrupt = state.executionState?.status === 'repairing' && window.confirm(
+        'Kova is repairing the current task. Cancel it and send this message now?',
+      )
+      if (shouldInterrupt) {
+        await window.kova.abort()
+        setState(prev => ({
+          ...prev,
+          executionState: null,
+          task: null,
+          isThinking: false,
+          executionEvents: [],
+          streamingText: '',
+          reasoning: EMPTY_REASONING,
+          queuedMessages: [],
+          todos: [],
+        }))
+        await sendNow(cmd)
+        return
+      }
       const queued: QueuedMessage = {
         id: createChatMessageId('queue'),
         content: cmd.text,
         mode: cmd.mode,
         permissionMode: state.settings.permissionMode ?? 'auto-review',
-        includeProjectContext: true,
+        includeProjectContext: Boolean(state.projectRoot),
       }
       setState(prev => ({ ...prev, queuedMessages: [...prev.queuedMessages, queued] }))
       return
@@ -246,36 +288,59 @@ export function App(): React.ReactElement {
 
   useEffect(() => {
     const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
-    if (isBusy || state.queuedMessages.length === 0 || !state.settings || !state.projectRoot) return
+    if (isBusy || state.queuedMessages.length === 0 || !state.settings) return
     const [next, ...rest] = state.queuedMessages
     setState(prev => ({ ...prev, queuedMessages: rest }))
-    // Reconstruct an atomic UserCommand from the queued message — the queued mode
+    // Reconstruct an atomic UserCommand from the queued message â€” the queued mode
     // was captured at submission time, not now, so it's race-free by construction.
     void sendNow({ text: next.content, mode: next.mode, fromSlashCommand: false })
-  }, [state.isThinking, state.executionState?.status, state.queuedMessages, state.settings, state.projectRoot, sendNow])
+  }, [state.isThinking, state.executionState?.status, state.queuedMessages, state.settings, sendNow])
 
   const handleOpenFolder = useCallback(async () => {
     const folder = await window.kova.openFolder()
     if (folder) setState(prev => ({
       ...prev, projectRoot: folder, openFilePath: null,
-      executionEvents: [], executionState: null, task: null,
-      isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false,
-      messages: [], sessionId: null,
-      sessionUsage: EMPTY_USAGE,
-      queuedMessages: [],
-      todos: [],
+      fileRefreshKey: prev.fileRefreshKey + 1,
+      activeMode: prev.messages.length === 0 ? 'patch' : prev.activeMode,
     }))
   }, [])
 
-  const handleLoadSession = useCallback((session: any) => {
+  const handleNewChat = useCallback(async () => {
+    const isBusy = state.isThinking || (!!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status))
+    if (isBusy) {
+      const shouldCancel = window.confirm('Cancel the current run and start a new chat?')
+      if (!shouldCancel) return
+      await window.kova.abort()
+    }
+    setState(prev => ({
+      ...prev,
+      task: null,
+      executionState: null,
+      messages: [],
+      executionEvents: [],
+      streamingText: '',
+      reasoning: EMPTY_REASONING,
+      isThinking: false,
+      openFilePath: null,
+      sessionId: null,
+      sessionUsage: EMPTY_USAGE,
+      queuedMessages: [],
+      todos: [],
+      activeMode: prev.projectRoot ? 'patch' : 'chat',
+    }))
+    setReviewOpen(false)
+  }, [state.isThinking, state.executionState])
+
+  const handleLoadSession = useCallback((session: PersistedSession) => {
     setState(prev => ({
       ...prev,
       sessionId: session.id,
+      projectRoot: session.projectRoot || prev.projectRoot,
       messages: session.messages || [],
       task: session.task || null,
       executionState: session.executionState || null,
       executionEvents: session.events || [],
-      isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, showDiff: false, openFilePath: null,
+      isThinking: false, streamingText: '', reasoning: EMPTY_REASONING, openFilePath: null,
       sessionUsage: normalizeSessionUsage(session.sessionUsage),
       todos: session.todos || [],
     }))
@@ -323,8 +388,10 @@ export function App(): React.ReactElement {
     return paths
   }, [state.executionState, state.executionEvents])
 
-  const lastIteration = state.executionState?.iterationHistory?.at(-1) ?? null
-  const hasChanges = (lastIteration?.changes?.length ?? 0) > 0
+  const reviewChanges = useMemo(() => (
+    state.executionState?.iterationHistory.flatMap(iteration => iteration.changes) ?? []
+  ), [state.executionState])
+  const hasChanges = reviewChanges.length > 0
   const isRunning = !!state.executionState && !['completed', 'failed', 'paused'].includes(state.executionState.status)
 
   return (
@@ -332,17 +399,22 @@ export function App(): React.ReactElement {
       <TitleBar
         projectRoot={state.projectRoot} status={state.executionState?.status ?? null}
         settings={state.settings} activeModel={state.activeModel} modelConnected={state.modelConnected}
+        inspectorOpen={reviewOpen}
         onOpenFolder={handleOpenFolder} onOpenSettings={() => setState(prev => ({ ...prev, showSettings: true }))}
         onSelectModel={handleSelectModel}
+        onToggleInspector={() => setReviewOpen(open => !open)}
       />
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div className="kova-workbench">
         <Sidebar
           executionState={state.executionState} projectRoot={state.projectRoot}
           sessionUsage={state.sessionUsage}
           changedPaths={changedPaths} refreshKey={state.fileRefreshKey} onOpenFile={handleOpenFile}
           onLoadSession={handleLoadSession}
+          onNewChat={handleNewChat}
+          onOpenFolder={handleOpenFolder}
+          currentSessionId={state.sessionId}
         />
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="kova-main-stage">
           {state.openFilePath ? (
             <FileEditor path={state.openFilePath} onClose={() => setState(prev => ({ ...prev, openFilePath: null }))} />
           ) : (
@@ -359,35 +431,67 @@ export function App(): React.ReactElement {
               activeModel={state.activeModel}
               supportsVision={state.activeModel ? detectVisionSupport(state.activeModel) : undefined}
               todos={state.todos}
+              reviewChangeCount={reviewChanges.length}
+              onReviewChanges={hasChanges ? () => setReviewOpen(true) : undefined}
+              onApplyChanges={hasChanges ? () => window.kova.forceApply() : undefined}
+              onPauseRun={() => window.kova.pause()}
+              onCancelRun={() => {
+                window.kova.abort()
+                setState(prev => ({
+                  ...prev,
+                  executionState: null,
+                  task: null,
+                  isThinking: false,
+                  executionEvents: [],
+                  streamingText: '',
+                  reasoning: EMPTY_REASONING,
+                  queuedMessages: [],
+                  todos: [],
+                }))
+              }}
               onModeChange={(activeMode) => setState(prev => ({ ...prev, activeMode }))}
               onClearQueue={() => setState(prev => ({ ...prev, queuedMessages: [] }))}
             />
           )}
-          {hasChanges && state.showDiff && !state.openFilePath && (
-            <FilesViewer
-              changes={lastIteration!.changes}
-              onClose={() => setState(prev => ({ ...prev, showDiff: false }))}
-              onApplySelection={(selection) => window.kova.forceApply(selection)}
-            />
-          )}
         </div>
-        <HarnessDashboard
-          executionState={state.executionState}
-          events={state.executionEvents}
-          sessionUsage={state.sessionUsage}
-          isThinking={state.isThinking}
-          onViewDiff={hasChanges ? () => setState(prev => ({ ...prev, showDiff: !prev.showDiff })) : undefined}
-          onPause={() => window.kova.pause()}
-          onAbort={() => {
-            window.kova.abort()
-            // Reset renderer state immediately — don't wait for main process confirmation
-            setState(prev => ({ ...prev, executionState: null, isThinking: false, executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING, todos: [] }))
-          }}
-          onApply={() => window.kova.forceApply()}
-          onRepair={() => {
-            void handleSend('Validation failed. Investigate the cause, make the smallest possible fix, and run validation again. Do not change the architecture.')
-          }}
-        />
+        {reviewOpen && (
+          <aside className="kova-inspector" aria-label="Workspace inspector" style={{ width: reviewWidth }}>
+            <div
+              className="kova-inspector-resize"
+              onPointerDown={startReviewResize}
+              role="separator"
+              aria-label="Resize review panel"
+              aria-orientation="vertical"
+            />
+            <div className="kova-inspector-tabs" role="tablist" aria-label="Inspector sections">
+              <button className="active" role="tab" aria-selected="true">
+                <span className="material-symbols-outlined">difference</span>
+                Review changes
+              </button>
+              <span className="kova-inspector-count">{reviewChanges.length}</span>
+              <button className="kova-inspector-close" onClick={() => setReviewOpen(false)} title="Close review">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="kova-inspector-body">
+              {hasChanges ? (
+                <FilesViewer
+                  embedded
+                  canApplyActions={canApplyReviewSelection}
+                  changes={reviewChanges}
+                  onClose={() => setReviewOpen(false)}
+                  onApplySelection={(selection) => window.kova.forceApply(selection)}
+                />
+              ) : (
+                <div className="kova-inspector-empty">
+                  <span className="material-symbols-outlined">difference</span>
+                  <strong>No changes to review</strong>
+                  <p>When Kova creates or edits files, diffs will appear here.</p>
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
       </div>
       <React.Suspense fallback={null}>
         <TerminalPanel
@@ -400,7 +504,11 @@ export function App(): React.ReactElement {
           }}
         />
       </React.Suspense>
-      <StatusBar executionState={state.executionState} sessionUsage={state.sessionUsage} events={state.executionEvents} />
+      <StatusBar
+        executionState={state.executionState}
+        sessionUsage={state.sessionUsage}
+        events={state.executionEvents}
+      />
       {state.showSettings && state.settings && (
         <ProviderModal settings={state.settings} onSave={handleSaveSettings} onClose={() => setState(prev => ({ ...prev, showSettings: false }))} />
       )}

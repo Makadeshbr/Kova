@@ -344,6 +344,18 @@ describe('buildTokenBudgetedHistory — structured assistant cards', () => {
       risk: 'low',
       decision: 'apply',
       notes: ['Created calculator helpers.'],
+      report: {
+        objective: 'create calculator',
+        status: 'completed',
+        outcome: 'Changes applied after harness validation.',
+        files: [{ path: 'src/calc.ts', status: 'created', reason: 'File created by iteration.' }],
+        commandsRun: ['npm test'],
+        validationsNotRun: [{ kind: 'lint', reason: 'No lint script found.' }],
+        contextFiles: ['package.json'],
+        evidence: ['1 iteration recorded', '1 file changed'],
+        nextSteps: ['No required action.'],
+        completedAt: '2026-05-22T00:00:00.000Z',
+      },
     }
 
     const result = buildTokenBudgetedHistory([
@@ -354,6 +366,8 @@ describe('buildTokenBudgetedHistory — structured assistant cards', () => {
 
     expect(result.map(m => m.content).join('\n')).toContain('src/calc.ts (created)')
     expect(result.map(m => m.content).join('\n')).toContain('Created calculator helpers.')
+    expect(result.map(m => m.content).join('\n')).toContain('Commands run: npm test')
+    expect(result.map(m => m.content).join('\n')).toContain('Context used: package.json')
   })
 
   it('prefers structured summary over raw content when both are present', () => {

@@ -382,4 +382,23 @@ describe('grepCodebase — AbortSignal', () => {
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/abort/i)
   })
+
+  it('stops predictably when abort fires during JS fallback traversal', async () => {
+    const files: Record<string, string> = {}
+    const content = Array.from({ length: 400 }, (_, index) => `line ${index} match`).join('\n')
+    for (let i = 0; i < 600; i++) files[`src/f${i}.ts`] = content
+    seed(files)
+    const ac = new AbortController()
+    const start = Date.now()
+    const promise = grepCodebase(
+      root,
+      { pattern: 'match', outputMode: 'content', headLimit: 20_000, forceEngine: 'js' },
+      ac.signal,
+    )
+    setTimeout(() => ac.abort(), 0)
+    const result = await promise
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/abort/i)
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
 })

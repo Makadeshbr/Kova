@@ -185,6 +185,8 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
   }
 
   const executable = normalizeExecutableName(parsed.tokens[0])
+  const manifestCwd = resolveManifestCwdForCommand(executable, parsed.tokens, cwd, workspaceRoot)
+  if (!manifestCwd.ok) return manifestCwd
 
   // PERMISSIVE POLICY (Claude Code / Cursor / Codex parity): any binary is
   // allowed unless it matches a DANGEROUS_PATTERN. The runtime approval gate
@@ -192,7 +194,7 @@ export function normalizeCommandInvocation(input: CommandInvocationInput): Comma
   // 'ask' to require per-command approval.
 
   const manifestError = validateManifestRequirement(
-    executable, parsed.tokens, cwd, workspaceRoot, input.additionalManifests,
+    executable, parsed.tokens, manifestCwd.cwd, workspaceRoot, input.additionalManifests,
   )
   if (manifestError) return block(manifestError)
 
@@ -563,22 +565,61 @@ function classifyLongRunningCommandTokens(tokens: string[]): LongRunningCommandM
 
 function packageManagerScriptName(exe: string, tokens: string[]): string | null {
   if (!['npm', 'pnpm', 'yarn', 'bun', 'npx'].includes(exe)) return null
+  const commandTokens = stripPackageManagerCwdTokens(tokens)
   if (exe === 'npm') {
-    if (tokens[1] === 'run') return tokens[2] ?? null
-    if (tokens[1] === 'start') return 'start'
+    if (commandTokens[1] === 'run') return commandTokens[2] ?? null
+    if (commandTokens[1] === 'start') return 'start'
     return null
   }
   if (exe === 'npx') {
-    const command = packageCommandName(tokens[1] ?? '')
-    const commandSub = tokens[2] ?? ''
+    const command = packageCommandName(commandTokens[1] ?? '')
+    const commandSub = commandTokens[2] ?? ''
     if (['serve', 'http-server', 'webpack-dev-server'].includes(command)) return command
     if (command === 'vite' && (!commandSub || ['dev', 'serve', 'preview', '--host'].includes(commandSub))) return command
-    if (command === 'next' && ['dev', 'start'].includes(tokens[2] ?? '')) return tokens[2]
-    if (command === 'astro' && ['dev', 'preview'].includes(tokens[2] ?? '')) return tokens[2]
+    if (command === 'next' && ['dev', 'start'].includes(commandTokens[2] ?? '')) return commandTokens[2]
+    if (command === 'astro' && ['dev', 'preview'].includes(commandTokens[2] ?? '')) return commandTokens[2]
     return null
   }
-  if (tokens[1] === 'run') return tokens[2] ?? null
-  return tokens[1] ?? null
+  if (commandTokens[1] === 'run') return commandTokens[2] ?? null
+  return commandTokens[1] ?? null
+}
+
+function stripPackageManagerCwdTokens(tokens: string[]): string[] {
+  const stripped = [tokens[0]]
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    const lower = token.toLowerCase()
+    if (lower === '--prefix' || lower === '-c' || lower === '--cwd') {
+      index += 1
+      continue
+    }
+    if (lower.startsWith('--prefix=') || lower.startsWith('--cwd=')) continue
+    stripped.push(token)
+  }
+  return stripped
+}
+
+function resolveManifestCwdForCommand(
+  executable: string,
+  tokens: string[],
+  cwd: string,
+  workspaceRoot: string,
+): { ok: true; cwd: string } | CommandPolicyBlock {
+  const cwdArg = packageManagerCwdArg(executable, tokens)
+  if (!cwdArg) return { ok: true, cwd }
+  return resolveCommandCwd(workspaceRoot, relative(workspaceRoot, resolve(cwd, cwdArg)))
+}
+
+function packageManagerCwdArg(executable: string, tokens: string[]): string | null {
+  if (!['npm', 'pnpm', 'yarn', 'bun'].includes(executable)) return null
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    const lower = token.toLowerCase()
+    if (lower === '--prefix' || lower === '-c' || lower === '--cwd') return tokens[index + 1] ?? null
+    if (lower.startsWith('--prefix=')) return token.slice('--prefix='.length)
+    if (lower.startsWith('--cwd=')) return token.slice('--cwd='.length)
+  }
+  return null
 }
 
 function isLongRunningScriptName(value: string): boolean {

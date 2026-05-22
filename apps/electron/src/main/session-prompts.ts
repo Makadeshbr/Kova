@@ -2,6 +2,18 @@ import type { PlanResultMessage } from '@kova/shared'
 
 export type KovaRunMode = 'chat' | 'plan' | 'patch' | 'review'
 
+export function globalChatPrompt(): string {
+  return `You are Kova, a concise senior engineering assistant in a desktop app.
+
+Behavior:
+- Reply in the same language the user writes in.
+- Answer directly and naturally. Never introduce yourself, list capabilities, or use emojis.
+- This conversation has no attached project. You cannot inspect local files, edit files, run commands, or apply patches.
+- If the user asks you to build, create, modify, review project code, or run validation, briefly say that a project folder must be attached first.
+- Do not pretend work was done. Do not invent file contents or runtime evidence.
+- For greetings or general questions, respond normally in one short helpful answer.`
+}
+
 export function chatOnlyPrompt(stack: string): string {
   return `You are a senior software engineer answering questions about this project.
 Stack adapter: ${stack}.
@@ -13,11 +25,11 @@ Behavior:
 - Use provided file context when present. If a file reference was denied, say why briefly.
 - If conversation history says files were changed/applied, treat that as the real workspace state.
 
-Tools available in this mode (read-only — no file writes, no shell commands):
-- read_file — inspect a file before answering when the answer depends on its contents.
-- list_files — list a directory to orient the user.
-- grep_codebase — locate a symbol, usage, or pattern. ALWAYS prefer this over describing where something "should" be.
-- glob_files — list files matching a glob.
+Tools available in this mode (read-only - no file writes, no shell commands):
+- read_file - inspect a file before answering when the answer depends on its contents.
+- list_files - list a directory to orient the user.
+- grep_codebase - locate a symbol, usage, or pattern. ALWAYS prefer this over describing where something "should" be.
+- glob_files - list files matching a glob.
 
 How to use tools:
 - Use a tool when the user's question depends on actual code state. Don't guess.
@@ -27,7 +39,7 @@ How to use tools:
 When the user asks you to BUILD, CREATE, MODIFY, or RUN something:
 - You are in read-only mode and cannot do that here.
 - Briefly say so in one sentence and suggest they rephrase as a direct request
-  ("crie X", "adicione Y", "rode Z") — Kova will route that to the implementation engine.
+  ("crie X", "adicione Y", "rode Z") - Kova will route that to the implementation engine.
 
 Do not resume older tasks unless the user explicitly asks.`
 }
@@ -103,26 +115,18 @@ Now produce the plan for the user's request. Respond with ONLY the <plan_result>
 }
 
 /**
- * Mode resolution — Claude Code / Cursor / Codex parity.
+ * Mode resolution - Claude Code / Cursor / Codex parity.
  *
- * Mode is a SESSION property, not inferred per-message. The renderer pins a
- * mode (default 'patch') and only changes it on explicit slash commands.
- * Follow-up questions in a patch session stay in patch mode — the agent
- * has tools and decides via tool use whether to read, answer, or write.
+ * Slash commands and pinned read-only modes win first. Plain greetings,
+ * acknowledgements, and meta chat stay in chat so the execution engine does
+ * not open a run for normal conversation. Engineering requests fall through
+ * to patch so implementation work keeps tool access.
  *
  * Resolution order (first match wins):
- *
- *   1. Slash prefix in the message text (`/plan`, `/review`, `/chat`)
- *      — always wins; lets users override the pinned mode for a single turn.
- *   2. Explicit `params.mode` from the UI — respects the pinned mode the
- *      renderer is showing.
- *   3. Default — `patch` (unified, all tools). This is the safe choice for
- *      everything except read-only modes, because the agent decides via
- *      tools and prompt whether to write files or just respond.
- *
- * The prior `isConversationalMessage` heuristic that routed questions to
- * chat-mode is no longer used here — it caused follow-ups to lose tool
- * access exactly when context-grounded answers were needed.
+ *   1. Slash prefix in the message text (`/plan`, `/review`, `/chat`).
+ *   2. Explicit read-only `params.mode` from the UI.
+ *   3. Conversational message - `chat`, no execution overlay.
+ *   4. Default - `patch` (unified, all tools).
  */
 export function resolveRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
   const trimmed = message.trim()
@@ -130,19 +134,18 @@ export function resolveRunMode(message: string, explicit?: KovaRunMode): KovaRun
   if (/^\/review(\s|$)/i.test(trimmed)) return 'review'
   if (/^\/chat(\s|$)/i.test(trimmed))   return 'chat'
   if (explicit === 'plan' || explicit === 'review' || explicit === 'chat') return explicit
+  if (isConversationalMessage(trimmed)) return 'chat'
   return 'patch'
 }
 
-/** @deprecated Kept for tests of the old contract — use {@link resolveRunMode}. */
+/** @deprecated Kept for compatibility - use {@link resolveRunMode}. */
 export function inferRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
   return resolveRunMode(message, explicit)
 }
 
 /**
- * Best-effort detection of "the user is just chatting" — not used for mode
- * routing anymore (mode is sticky). Still exported because other parts of
- * the system (e.g. memory ranking, telemetry) may want a soft signal of
- * conversational vs implementation intent.
+ * Best-effort detection of "the user is just chatting". Kept conservative so
+ * implementation requests still route to patch.
  *
  * Conservative: returns true only for unambiguous greetings, affirmations,
  * meta-instructions, and definitional questions with no engineering noun.

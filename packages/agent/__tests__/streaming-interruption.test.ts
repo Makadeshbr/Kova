@@ -363,7 +363,7 @@ describe('OpenAICompatibleProvider — SSE tool call streaming', () => {
 
 describe('AnthropicProvider — streaming path errors', () => {
   function makeAnthropicProvider() {
-    return new AnthropicProvider({ apiKey: 'test-key' })
+    return new AnthropicProvider({ apiKey: 'test-key', retryPolicy: { maxAttempts: 1 } })
   }
 
   function makeMockStream(opts: {

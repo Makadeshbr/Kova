@@ -1,5 +1,6 @@
 import type { AgentMessage, FileChange } from '@kova/shared'
 import type { KovaTool, ToolExecutor } from '../tools'
+import type { ProviderRetryEvent } from './retry'
 
 export interface ProviderUsageReport {
   cacheReadInputTokens: number
@@ -42,6 +43,8 @@ export interface AgentLoopOptions {
   onReasoningEnd?: () => void
   onToolCall?: (name: string, input: Record<string, unknown>) => void
   onToolResult?: (name: string, output: string) => void
+  /** Emitted before a recoverable provider/API failure is retried. */
+  onProviderRetry?: (event: ProviderRetryEvent) => void
   /**
    * Receives a token-usage report after every API call. Used by product
    * surfaces to measure prompt-cache hit rate and cost.

@@ -144,9 +144,9 @@ describe('decide — failed real validation requires repair', () => {
       validationConfidence: 'full',
     }
     const d = decide(r, [])
-    expect(d.decision).toBe('reject')
-    expect(d.score).toBeLessThan(70)
-    expect(d.reason).toContain('repair loop')
+    expect(d.decision).toBe('suggest')
+    expect(d.score).toBeGreaterThanOrEqual(70)
+    expect(d.reason).toContain('harness warning')
   })
 })
 

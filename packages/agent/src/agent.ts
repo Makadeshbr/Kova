@@ -1,5 +1,5 @@
 import type { TaskDefinition, AgentContext, AgentOutput, AgentMode, AgentMessage, CommandOutputCallback, Todo } from '@kova/shared'
-import type { AgentProvider, LLMResponse, ProviderUsageReport } from './providers/provider'
+import type { AgentProvider, LLMResponse, ProviderUsageReport, AgentLoopOptions } from './providers/provider'
 import { AGENT_TOOLS, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
 import type { InteractiveRunner, PermissionPolicy } from './tools'
 import { MODE_PROMPTS } from './modes'
@@ -39,6 +39,7 @@ export class Agent {
       onReasoningEnd?: () => void
       onToolCall?: (name: string, input: Record<string, unknown>) => void
       onToolResult?: (name: string, result: string) => void
+      onProviderRetry?: AgentLoopOptions['onProviderRetry']
       interactiveRunner?: InteractiveRunner
       /** FIX-003: forwarded to ToolExecutor for live stdout/stderr streaming. */
       onCommandOutput?: CommandOutputCallback
@@ -98,6 +99,7 @@ export class Agent {
         onReasoningEnd: options?.onReasoningEnd,
         onToolCall: options?.onToolCall,
         onToolResult: options?.onToolResult,
+        onProviderRetry: options?.onProviderRetry,
         onUsageReport: options?.onUsageReport,
       })
     } catch (err) {

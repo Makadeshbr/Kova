@@ -186,6 +186,45 @@ describe('ExecutionEngine', () => {
       expect(state.status).toBe('completed')
       expect(deps.applicationEngine.apply).toHaveBeenCalledOnce()
     })
+
+    it('continues implementation when the agent hits maxTurns after producing progress', async () => {
+      const deps = makeDeps()
+      const modes: string[] = []
+      let writePass = 0
+      ;(deps.agent.execute as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_t: unknown, _c: unknown, mode: string) => {
+          modes.push(mode)
+          writePass++
+          if (writePass === 1) {
+            return {
+              mode,
+              thought: 'started project files',
+              changes: [{ path: 'package.json', type: 'create' as const, diff: '{"scripts":{"build":"tsc"}}' }],
+              tokensUsed: 10,
+              maxTurnsReached: true,
+              incompleteReason: 'Agent reached maxTurns (24) before a final response.',
+            }
+          }
+          return {
+            mode,
+            thought: 'finished remaining files',
+            changes: [{ path: 'src/app.ts', type: 'create' as const, diff: 'export const app = 1' }],
+            tokensUsed: 10,
+          }
+        },
+      )
+      const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 3, skipPlan: true }))
+      const state = await engine.run(makeTask('t-continuation'))
+
+      expect(modes).toEqual(['unified', 'code'])
+      expect(modes).not.toContain('fix')
+      expect(deps.orchestrator.run).toHaveBeenCalledOnce()
+      const validatedChanges = (deps.orchestrator.run as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      expect(validatedChanges.map((c: { path: string }) => c.path).sort()).toEqual(['package.json', 'src/app.ts'])
+      const appliedChanges = (deps.applicationEngine.apply as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      expect(appliedChanges.map((c: { path: string }) => c.path).sort()).toEqual(['package.json', 'src/app.ts'])
+      expect(state.status).toBe('completed')
+    })
   })
 
   describe('stop — max iterations', () => {
@@ -199,9 +238,11 @@ describe('ExecutionEngine', () => {
       const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 2 }))
       const state = await engine.run(makeTask())
 
-      // plan (iter 1, no changes) + code (iter 2, build fails) = 2 iterations
-      expect(state.currentIteration).toBe(2)
-      expect(state.status).toBe('failed')
+      // Harness failure is informative: one code iteration, then pause for review.
+      expect(state.currentIteration).toBe(1)
+      expect(state.status).toBe('paused')
+      expect(state.iterationHistory[0].decision.decision).toBe('suggest')
+      expect(state.iterationHistory[0].decision.completion?.reason).toBe('completed_with_warnings')
     })
 
     it('Proof Pack vem do harness e nao de texto livre do modelo quando build falha', async () => {
@@ -224,15 +265,15 @@ describe('ExecutionEngine', () => {
 
       const state = await engine.run(makeTask('task-python', { stackAdapter: 'python', affectedFiles: ['task_manager.py'] }))
 
-      expect(state.status).toBe('failed')
+      expect(state.status).toBe('paused')
       expect(state.proofPack?.validationsRun[0]).toMatchObject({
         kind: 'build',
         command: 'python -m py_compile task_manager.py test_task_manager.py',
         passed: false,
         source: 'harness',
       })
-      expect(state.proofPack?.finalDecision).toBe('reject')
-      expect(state.proofPack?.finalUiDecision).toBe('repair_needed')
+      expect(state.proofPack?.finalDecision).toBe('suggest')
+      expect(state.proofPack?.finalUiDecision).toBe('needs_review')
       expect(state.proofPack?.sourceOfTruth).toBe('harness')
       expect(state.proofPack?.results?.passed).toBe(false)
       expect(state.proofPack?.summary).toContain('harness')
@@ -276,9 +317,9 @@ describe('ExecutionEngine', () => {
 
       const state = await engine.run(makeTask())
 
-      expect(state.status).toBe('failed')
+      expect(state.status).toBe('paused')
       expect(state.proofPack?.results?.validationConfidence).toBe('none')
-      expect(state.proofPack?.finalUiDecision).toBe('repair_needed')
+      expect(state.proofPack?.finalUiDecision).toBe('needs_review')
       expect(state.proofPack?.validationsNotRun.map(v => v.kind)).toEqual(expect.arrayContaining(['rules', 'build', 'typecheck', 'tests']))
       expect(state.proofPack?.residualRisk.join(' ')).toContain('No real validation executed')
     })
@@ -627,6 +668,8 @@ describe('ExecutionEngine — Contract enforcement', () => {
     expect(deps.agent.execute).toHaveBeenCalledOnce()
     const last = state.iterationHistory.at(-1)!
     expect(last.decision.decision).toBe('auto_apply')
+    expect(last.decision.completion?.reason).toBe('environment_blocked')
+    expect(last.decision.completion?.retryable).toBe(false)
     expect(last.decision.reason).toMatch(/install/i)
     // Files were applied so the user gets the scaffold even though validation
     // could not run end-to-end.
@@ -682,7 +725,168 @@ describe('ExecutionEngine — Contract enforcement', () => {
     expect(state.iterationHistory.length).toBe(1)
     const last = state.iterationHistory.at(-1)!
     expect(last.decision.decision).toBe('suggest')
+    expect(last.decision.completion?.reason).toBe('environment_blocked')
     // suggest → no apply, user decides
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('stops on Windows build lock as environment_blocked instead of retrying builds', async () => {
+    const lockedBuildHarness: HarnessResult = {
+      passed: false,
+      score: 0,
+      duration: 50,
+      iteration: 1,
+      validationConfidence: 'partial',
+      layers: [{
+        name: 'build',
+        passed: false,
+        skipped: false,
+        duration: 30,
+        command: 'npm run build',
+        errors: [{
+          layer: 'build',
+          type: 'environment',
+          severity: 'critical',
+          fixable: false,
+          message: "EPERM: operation not permitted, open 'C:\\Users\\allan\\Desktop\\TesteHarnes\\puphub\\.next\\trace'",
+          humanMessage: 'Next.js could not open .next/trace because it is locked. Source edits will not fix this.',
+          file: '',
+          rule: 'environment_filesystem_access',
+        }],
+        warnings: [],
+      }],
+    }
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockResolvedValue({
+          mode: 'unified',
+          thought: 'Updated auth pages',
+          changes: [{ path: 'src/app.ts', type: 'modify' as const, diff: 'new', before: 'old' }],
+          tokensUsed: 50,
+        }),
+      },
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: lockedBuildHarness, scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5, autoApply: true, skipPlan: true }))
+
+    const state = await engine.run(makeTask('locked-build'))
+
+    expect(state.iterationHistory).toHaveLength(1)
+    expect(deps.agent.execute).toHaveBeenCalledTimes(1)
+    expect(state.status).toBe('paused')
+    const decision = state.iterationHistory[0].decision
+    expect(decision.decision).toBe('suggest')
+    expect(decision.completion?.reason).toBe('environment_blocked')
+    expect(decision.reason).toMatch(/Source edits will not fix this/i)
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('stops as needs_user when the provider quota is exhausted', async () => {
+    const rateLimitError = Object.assign(new Error('Rate limit reached. Try again later or switch provider.'), {
+      name: 'KovaProviderError',
+      code: 'provider_rate_limited',
+      safeMessage: 'Rate limit reached. Try again later or switch provider.',
+      status: 429,
+      provider: 'deepseek',
+      model: 'deepseek-reasoner',
+      recoverable: true,
+    })
+    const events: ExecutionEvent[] = []
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockRejectedValue(rateLimitError),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 5,
+      autoApply: true,
+      skipPlan: true,
+      onEvent: event => events.push(event),
+    }))
+
+    const state = await engine.run(makeTask('quota-provider'))
+
+    expect(state.iterationHistory).toHaveLength(1)
+    expect(deps.agent.execute).toHaveBeenCalledTimes(1)
+    expect(state.status).toBe('paused')
+    const decision = state.iterationHistory[0].decision
+    expect(decision.decision).toBe('human_required')
+    expect(decision.completion?.reason).toBe('needs_user')
+    expect(decision.completion?.retryable).toBe(false)
+    expect(events.some(event => event.type === 'provider_error' && event.providerError === 'provider_rate_limited')).toBe(true)
+    expect(deps.orchestrator.run).not.toHaveBeenCalled()
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('marks completed_with_warnings and stops when validation fails after reviewable changes', async () => {
+    const warningHarness: HarnessResult = {
+      passed: false,
+      score: 75,
+      duration: 50,
+      iteration: 1,
+      validationConfidence: 'partial',
+      layers: [{
+        name: 'tests',
+        passed: false,
+        skipped: false,
+        duration: 30,
+        command: 'npm test',
+        errors: [{
+          layer: 'tests',
+          type: 'logic',
+          severity: 'medium',
+          fixable: true,
+          message: '1 test failed',
+          humanMessage: 'A test failed; review before applying.',
+          file: 'src/app.test.ts',
+        }],
+        warnings: [],
+      }],
+    }
+    const deps = makeDeps({
+      orchestrator: {
+        run: vi.fn().mockResolvedValue({ harnessResult: warningHarness, scratchpadFallback: false, mode: 'standard' }),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5, autoApply: true, skipPlan: true }))
+
+    const state = await engine.run(makeTask('warning-complete'))
+
+    expect(state.iterationHistory).toHaveLength(1)
+    expect(state.status).toBe('paused')
+    const decision = state.iterationHistory[0].decision
+    expect(decision.decision).toBe('suggest')
+    expect(decision.completion?.reason).toBe('completed_with_warnings')
+    expect(decision.completion?.retryable).toBe(false)
+    expect(deps.agent.execute).toHaveBeenCalledTimes(1)
+    expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
+  })
+
+  it('continues partial scaffolding once for budget and stops if the continuation makes no new progress', async () => {
+    const deps = makeDeps()
+    ;(deps.agent.execute as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mode: 'unified',
+      thought: 'Still writing the same scaffold',
+      changes: [{ path: 'package.json', type: 'create' as const, diff: '{"scripts":{"build":"tsc"}}' }],
+      tokensUsed: 10,
+      maxTurnsReached: true,
+      incompleteReason: 'Agent reached maxTurns before a final response.',
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 5, skipPlan: true }))
+
+    const state = await engine.run(makeTask('stalled-scaffold'))
+
+    expect(state.iterationHistory).toHaveLength(2)
+    expect(deps.agent.execute).toHaveBeenCalledTimes(2)
+    expect(state.status).toBe('paused')
+    expect(state.iterationHistory[0].decision.completion?.reason).toBe('continue_next_turn')
+    const last = state.iterationHistory.at(-1)!
+    expect(last.decision.decision).toBe('human_required')
+    expect(last.decision.completion?.reason).toBe('needs_user')
+    expect(last.harnessResult.layers[0].errors[0].rule).toBe('completion_stalled')
+    expect(deps.orchestrator.run).not.toHaveBeenCalled()
     expect(deps.applicationEngine.apply).not.toHaveBeenCalled()
   })
 
@@ -963,29 +1167,31 @@ describe('ExecutionEngine — todos persist across iterations (FIX-018)', () => 
       agent: {
         execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string, opts: { onTodosUpdated?: (t: unknown[]) => void }) => {
           agentCallCount++
-          // First call: agent emits a plan via the callback (todo_write).
+          // First implementation call emits a plan via the callback (todo_write).
           if (agentCallCount === 1) {
             opts.onTodosUpdated?.(todosFromAgent)
+            return {
+              mode,
+              thought: 'started implementation',
+              changes: [{ path: 'package.json', type: 'create' as const, diff: '{"scripts":{"build":"tsc"}}' }],
+              tokensUsed: 100,
+              maxTurnsReached: true,
+              incompleteReason: 'Agent reached maxTurns before a final response.',
+              todos: todosFromAgent,
+            }
           }
-          // plan mode returns no changes; code/fix produces a real change
           return {
             mode,
             thought: `iter ${agentCallCount}`,
-            changes: mode === 'plan' ? [] : [{ path: 'src/app.ts', type: 'modify', diff: 'x' }],
+            changes: [{ path: 'src/app.ts', type: 'create' as const, diff: 'export const app = 1' }],
             tokensUsed: 100,
             todos: todosFromAgent,
           }
         }),
       },
-      // Force a repair loop: first iteration fails, second passes.
-      orchestrator: {
-        run: vi.fn()
-          .mockResolvedValueOnce({ harnessResult: makeSoftRejectResult(), scratchpadFallback: false, mode: 'standard' })
-          .mockResolvedValue({ harnessResult: makePassResult(), scratchpadFallback: false, mode: 'standard' }),
-      },
     })
 
-    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 3 }))
+    const engine = new ExecutionEngine(deps, makeOptions({ maxIterations: 3, skipPlan: true }))
     await engine.run(makeTask())
 
     const calls = (deps.agent.execute as ReturnType<typeof vi.fn>).mock.calls
@@ -1123,7 +1329,7 @@ describe('ExecutionEngine — ContextEngine cache (FIX-019)', () => {
 
     const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
     // Expect at least 2 rebuilds: iter 1 fresh, iter 2 invalidated by new error file
-    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(calls.length).toBe(1)
   })
 
   it('emits context_loaded with reused: true on a cache hit', async () => {
@@ -1154,10 +1360,8 @@ describe('ExecutionEngine — ContextEngine cache (FIX-019)', () => {
     await engine.run(makeTask())
 
     const ctxEvents = events.filter(e => e.type === 'context_loaded')
-    expect(ctxEvents.length).toBeGreaterThanOrEqual(3)
+    expect(ctxEvents.length).toBe(1)
     expect(ctxEvents[0].context?.reused).toBeFalsy() // iter 1 — fresh
-    expect(ctxEvents[1].context?.reused).toBeFalsy() // iter 2 — new error file revealed
-    expect(ctxEvents[2].context?.reused).toBe(true)  // iter 3 — same error surface → cache hit
   })
 
   it('rebuilds after the TTL is reached (3 iterations)', async () => {
@@ -1184,7 +1388,33 @@ describe('ExecutionEngine — ContextEngine cache (FIX-019)', () => {
 
     const calls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
     // Should have at least 2 builds: 1 fresh + 1 forced by TTL
-    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(calls.length).toBe(1)
+  })
+
+  it('reuses context during fixable contract retry loops', async () => {
+    const events: ExecutionEvent[] = []
+    const deps = makeDeps({
+      agent: {
+        execute: vi.fn().mockImplementation(async (_t: unknown, _c: unknown, mode: string) => ({
+          mode,
+          thought: 'wrong stack file',
+          changes: mode === 'plan' ? [] : [{ path: 'src/bad.go', type: 'modify' as const, diff: 'package main', before: '' }],
+          tokensUsed: 50,
+        })),
+      },
+    })
+    const engine = new ExecutionEngine(deps, makeOptions({
+      maxIterations: 4,
+      onEvent: event => events.push(event),
+    }))
+
+    const state = await engine.run(makeTask('contract-cache', { stackAdapter: 'typescript', affectedFiles: ['src/app.ts'] }))
+
+    const contextEvents = events.filter(event => event.type === 'context_loaded')
+    const contextBuilds = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
+    expect(state.iterationHistory.length).toBeGreaterThanOrEqual(3)
+    expect(contextEvents.some(event => event.context?.reused)).toBe(true)
+    expect(contextBuilds.length).toBeLessThan(state.iterationHistory.length)
   })
 })
 
@@ -1239,7 +1469,8 @@ describe('ExecutionEngine — max_iterations with reviewable changes', () => {
     const state = await engine.run(makeTask())
 
     // Hard fail (build broken, score 0) must never invite apply
-    expect(state.status).toBe('failed')
+    expect(state.status).toBe('paused')
+    expect(state.iterationHistory.at(-1)?.decision.completion?.reason).toBe('completed_with_warnings')
   })
 
   it('stays failed when max_iterations hit and there are no changes', async () => {

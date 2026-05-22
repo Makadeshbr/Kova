@@ -5,12 +5,14 @@ import type { KovaTool } from '../tools'
 import { extractChangesFromXml, extractChangesFromTools, extractChangesFromText, type OpenAIToolCall } from './openai-text-parser'
 import { normalizeProviderError } from './errors'
 import { detectCapabilities } from './model-catalog'
+import { withProviderRetry, type ProviderRetryPolicyInput } from './retry'
 
 export interface OpenAICompatibleProviderOptions {
   apiKey?: string
   baseUrl: string
   model: string
   extraBody?: Record<string, unknown>
+  retryPolicy?: ProviderRetryPolicyInput
 }
 
 // OpenAI multimodal content parts — used when a user message includes images.
@@ -173,14 +175,14 @@ export class OpenAICompatibleProvider implements AgentProvider {
   private async streamingTurn(
     messages: ChatMessage[],
     tools: ReturnType<typeof toOpenAITool>[],
-    options: { model?: string; maxTokens?: number },
+    options: { model?: string; maxTokens?: number; onProviderRetry?: AgentLoopOptions['onProviderRetry'] },
     onToken?: (token: string) => void,
     signal?: AbortSignal,
     reasoning?: ReasoningCallbacks,
   ): Promise<{ text: string; toolCalls: ToolCall[]; finishReason: string; tokens: number; reasoningContent?: string }> {
     // Non-streaming fallback (tests, models without SSE support)
     if (!onToken) {
-      const response = await this.callApi(messages, tools, options)
+      const response = await this.callApi(messages, tools, options, signal)
       const choice = response.choices?.[0]
       const rawContent = typeof choice?.message?.content === 'string' ? choice.message.content : ''
       const parsed = stripThinkBlocks(rawContent)
@@ -201,18 +203,17 @@ export class OpenAICompatibleProvider implements AgentProvider {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.options.apiKey) headers['Authorization'] = `Bearer ${this.options.apiKey}`
     let response: Response
-    try {
-      response = await fetch(`${trimSlash(this.options.baseUrl)}/chat/completions`, {
+    response = await this.withRetry(async () => {
+      const httpResponse = await fetch(`${trimSlash(this.options.baseUrl)}/chat/completions`, {
         method: 'POST', headers, body: JSON.stringify(body), signal,
       })
-    } catch (err) {
-      throw normalizeProviderError(err, { provider: 'openai-compatible', model: String(body.model ?? '') })
-    }
-    if (!response.ok) throw normalizeProviderError(new Error(`LLM request failed: ${response.status} ${await response.text()}`), {
-      provider: 'openai-compatible',
-      model: String(body.model ?? ''),
-      status: response.status,
-    })
+      if (!httpResponse.ok) throw normalizeProviderError(new Error(`LLM request failed: ${httpResponse.status} ${await httpResponse.text()}`), {
+        provider: 'openai-compatible',
+        model: String(body.model ?? ''),
+        status: httpResponse.status,
+      })
+      return httpResponse
+    }, String(body.model ?? ''), signal, options.onProviderRetry)
 
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
@@ -290,7 +291,12 @@ export class OpenAICompatibleProvider implements AgentProvider {
     }
   }
 
-  private async callApi(messages: ChatMessage[], tools: ReturnType<typeof toOpenAITool>[], options: { model?: string; maxTokens?: number }): Promise<ChatResponse> {
+  private async callApi(
+    messages: ChatMessage[],
+    tools: ReturnType<typeof toOpenAITool>[],
+    options: { model?: string; maxTokens?: number; onProviderRetry?: AgentLoopOptions['onProviderRetry'] },
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
     const body: Record<string, unknown> = {
       ...this.options.extraBody,
       model: (options.model ?? this.options.model) || undefined,
@@ -301,20 +307,31 @@ export class OpenAICompatibleProvider implements AgentProvider {
     if (tools.length > 0) body.tools = tools
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.options.apiKey) headers['Authorization'] = `Bearer ${this.options.apiKey}`
-    let response: Response
-    try {
-      response = await fetch(`${trimSlash(this.options.baseUrl)}/chat/completions`, {
-        method: 'POST', headers, body: JSON.stringify(body),
+    return this.withRetry(async () => {
+      const response = await fetch(`${trimSlash(this.options.baseUrl)}/chat/completions`, {
+        method: 'POST', headers, body: JSON.stringify(body), signal,
       })
-    } catch (err) {
-      throw normalizeProviderError(err, { provider: 'openai-compatible', model: String(body.model ?? '') })
-    }
-    if (!response.ok) throw normalizeProviderError(new Error(`LLM request failed: ${response.status} ${await response.text()}`), {
+      if (!response.ok) throw normalizeProviderError(new Error(`LLM request failed: ${response.status} ${await response.text()}`), {
+        provider: 'openai-compatible',
+        model: String(body.model ?? ''),
+        status: response.status,
+      })
+      return response.json() as Promise<ChatResponse>
+    }, String(body.model ?? ''), signal, options.onProviderRetry)
+  }
+
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    model: string,
+    signal?: AbortSignal,
+    onProviderRetry?: AgentLoopOptions['onProviderRetry'],
+  ): Promise<T> {
+    return withProviderRetry(operation, {
       provider: 'openai-compatible',
-      model: String(body.model ?? ''),
-      status: response.status,
-    })
-    return response.json() as Promise<ChatResponse>
+      model,
+      signal,
+      onRetry: onProviderRetry,
+    }, this.options.retryPolicy)
   }
 }
 

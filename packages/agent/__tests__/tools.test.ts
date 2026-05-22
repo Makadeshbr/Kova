@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ASK_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, ToolExecutor } from '../src/tools'
+import { ASK_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, ToolExecutor, formatCommandEnvironmentFailureForAgent } from '../src/tools'
 import { normalizeCommandInvocation } from '@kova/shared'
 
 let projectRoot: string
@@ -365,6 +365,28 @@ describe('list_files', () => {
   })
 })
 
+describe('formatCommandEnvironmentFailureForAgent', () => {
+  it('turns Next.js .next trace EPERM into a stop signal for the model', () => {
+    const output = `uncaughtException [Error: EPERM: operation not permitted, open 'C:\\Users\\allan\\Desktop\\TesteHarnes\\puphub\\.next\\trace']`
+
+    const message = formatCommandEnvironmentFailureForAgent(output)
+
+    expect(message).not.toBeNull()
+    expect(message).toContain('Environment blocked')
+    expect(message).toContain('.next/trace')
+    expect(message).toContain('Source edits will not fix this')
+    expect(message).toContain('Do not retry this command')
+  })
+
+  it('keeps normal source build failures on the repair path', () => {
+    const message = formatCommandEnvironmentFailureForAgent(
+      `src/app.ts(42,10): error TS2304: Cannot find name 'foo'.`,
+    )
+
+    expect(message).toBeNull()
+  })
+})
+
 // ─── run_command ──────────────────────────────────────────────────────────────
 
 describe('run_command', () => {
@@ -480,13 +502,11 @@ describe('run_command', () => {
     })
 
     it('allows bootstrap subcommands (npm init, cargo new, go mod init) without any manifest', async () => {
-      // We only assert the validator does NOT block — we never execute these
-      // for real here (would scaffold a project on disk).
-      const npmInit = await executor.execute('run_command', { command: 'npm init -y' })
-      const cargoNew = await executor.execute('run_command', { command: 'cargo new myapp' })
-      const goModInit = await executor.execute('run_command', { command: 'go mod init example.com/app' })
-      // None of these should match the manifest-block message — they may fail
-      // for other reasons (binary missing) but not for manifest validation.
+      const mockRunner = async (cmd: string) => ({ exitCode: 0, output: `mocked ${cmd}` })
+      const localExecutor = new ToolExecutor(projectRoot, undefined, ASK_PERMISSION_POLICY, mockRunner)
+      const npmInit = await localExecutor.execute('run_command', { command: 'npm init -y' })
+      const cargoNew = await localExecutor.execute('run_command', { command: 'cargo new myapp' })
+      const goModInit = await localExecutor.execute('run_command', { command: 'go mod init example.com/app' })
       expect(npmInit).not.toMatch(/manifest\/build file/)
       expect(cargoNew).not.toMatch(/manifest\/build file/)
       expect(goModInit).not.toMatch(/manifest\/build file/)

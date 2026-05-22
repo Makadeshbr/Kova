@@ -66,6 +66,23 @@ export interface ReasoningState {
   endedAt: number | null
 }
 
+export interface PersistedSession {
+  id: string
+  title?: string
+  updatedAt?: string
+  scope?: string
+  projectRoot?: string | null
+  messages?: ChatMessage[]
+  task?: TaskDefinition | null
+  executionState?: ExecutionState | null
+  events?: ExecutionEvent[]
+  sessionUsage?: Partial<SessionUsage> | null
+  todos?: Todo[]
+  recoveredFromSnapshot?: boolean
+  recoveryStatus?: 'running' | 'paused' | 'completed' | 'failed'
+  recoveryNote?: string
+}
+
 export interface AppState {
   projectRoot: string | null
   task: TaskDefinition | null
@@ -77,7 +94,6 @@ export interface AppState {
   reasoning: ReasoningState
   isThinking: boolean
   showSettings: boolean
-  showDiff: boolean
   activeModel: string | null
   modelConnected: boolean
   openFilePath: string | null

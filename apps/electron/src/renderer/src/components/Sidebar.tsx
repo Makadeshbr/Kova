@@ -1,8 +1,8 @@
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import type { ExecutionState } from '../types'
 import type { SessionUsage } from '../App'
+import type { PersistedSession } from '../app-state'
 import { ProjectFiles } from './ProjectFiles'
-import { MemoryPanel } from './MemoryPanel'
 
 interface Props {
   executionState: ExecutionState | null
@@ -10,176 +10,143 @@ interface Props {
   sessionUsage: SessionUsage
   changedPaths: Set<string>
   refreshKey: number
+  currentSessionId: string | null
   onOpenFile: (path: string) => void
-  onLoadSession: (session: any) => void
+  onLoadSession: (session: PersistedSession) => void
+  onNewChat: () => void
+  onOpenFolder: () => void
 }
 
-type Tab = 'files' | 'history' | 'sessions'
+type Section = 'chats' | 'project'
 
-export function Sidebar({ executionState, projectRoot, sessionUsage, changedPaths, refreshKey, onOpenFile, onLoadSession }: Props): React.ReactElement {
-  const [tab, setTab] = useState<Tab>('files')
-  const [sessions, setSessions] = useState<any[]>([])
-  
+function projectName(root: string | null): string {
+  return root?.replace(/\\/g, '/').split('/').at(-1) || 'No project attached'
+}
+
+function sessionTitle(session: PersistedSession): string {
+  return String(session.title || session.messages?.find(message => message.role === 'user')?.content || 'New chat')
+}
+
+export function Sidebar({
+  executionState,
+  projectRoot,
+  sessionUsage,
+  changedPaths,
+  refreshKey,
+  currentSessionId,
+  onOpenFile,
+  onLoadSession,
+  onNewChat,
+  onOpenFolder,
+}: Props): React.ReactElement {
+  const [section, setSection] = useState<Section>('chats')
+  const [sessions, setSessions] = useState<PersistedSession[]>([])
+
   const history = executionState?.iterationHistory ?? []
-  const totalTokens = Math.max(executionState?.totalTokens ?? 0, sessionUsage.contextTokens + sessionUsage.completionTokens)
-  const contextPercent = sessionUsage.maxContextTokens
-    ? Math.min(100, Math.round((sessionUsage.contextTokens / sessionUsage.maxContextTokens) * 100))
-    : 0
+  const contextSummary = useMemo(() => {
+    if (sessionUsage.contextFiles.length === 0 && sessionUsage.contextTokens === 0) return null
+    const tokens = sessionUsage.contextTokens >= 1000
+      ? `${(sessionUsage.contextTokens / 1000).toFixed(1)}k`
+      : String(sessionUsage.contextTokens)
+    return `${sessionUsage.contextFiles.length} files / ${tokens} ctx`
+  }, [sessionUsage.contextFiles.length, sessionUsage.contextTokens])
 
   useEffect(() => {
-    if (tab === 'sessions' && projectRoot) {
-      window.kova.listSessions(projectRoot).then(setSessions)
-    }
-  }, [tab, projectRoot])
-
-  const filesTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
-    color: tab === 'files' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'files' ? '2px solid var(--cyan)' : '2px solid transparent',
-    fontSize: 11, fontWeight: tab === 'files' ? 600 : 400,
-    borderRadius: 0, transition: 'color 0.15s',
-  }), [tab])
-
-  const historyTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
-    color: tab === 'history' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'history' ? '2px solid var(--cyan)' : '2px solid transparent',
-    fontSize: 11, fontWeight: tab === 'history' ? 600 : 400,
-    borderRadius: 0, transition: 'color 0.15s',
-  }), [tab])
-
-  const sessionsTabStyle = useMemo((): React.CSSProperties => ({
-    flex: 1, padding: '7px 0', background: 'transparent', display: 'flex', gap: 6, justifyContent: 'center', alignItems: 'center',
-    color: tab === 'sessions' ? 'var(--text-1)' : 'var(--text-3)',
-    borderBottom: tab === 'sessions' ? '2px solid var(--cyan)' : '2px solid transparent',
-    fontSize: 11, fontWeight: tab === 'sessions' ? 600 : 400,
-    borderRadius: 0, transition: 'color 0.15s',
-  }), [tab])
+    window.kova.listSessions(projectRoot).then(setSessions).catch(() => setSessions([]))
+  }, [currentSessionId, projectRoot, refreshKey])
 
   return (
-    <div style={{ width: 220, background: 'var(--bg-2)', borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
-      {projectRoot && (
-        <div style={{ padding: '10px 12px 6px', borderBottom: '1px solid var(--border)' }}>
-          <p style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.05em', marginBottom: 4 }}>EXPLORER</p>
-          <p style={{ fontSize: 11, color: 'var(--text-1)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {projectRoot.replace(/\\/g, '/').split('/').at(-1)}
-          </p>
-          {(sessionUsage.contextTokens > 0 || sessionUsage.contextFiles.length > 0) && (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                <span style={{ fontSize: 10, color: 'var(--text-3)' }}>Context</span>
-                <span style={{ fontSize: 10, color: 'var(--amber)', fontFamily: 'var(--font-mono)' }}>
-                  {sessionUsage.contextFiles.length} files · {(sessionUsage.contextTokens / 1000).toFixed(1)}k
-                </span>
-              </div>
-              <div style={{ height: 4, background: 'var(--bg-active)', borderRadius: 3, overflow: 'hidden' }}>
-                <div style={{ width: `${contextPercent || 3}%`, height: '100%', background: 'var(--cyan)', borderRadius: 3 }} />
-              </div>
-              {sessionUsage.contextFiles.length > 0 && (
-                <p style={{ marginTop: 5, fontSize: 10, color: 'var(--text-ghost)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {sessionUsage.contextFiles.slice(0, 2).map(path => path.split('/').at(-1)).join(', ')}
-                  {sessionUsage.contextFiles.length > 2 ? ` +${sessionUsage.contextFiles.length - 2}` : ''}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+    <aside className="kova-sidebar">
+      <div className="kova-sidebar-top">
+        <button className="kova-new-chat" onClick={onNewChat}>
+          <span className="material-symbols-outlined">edit_square</span>
+          New chat
+        </button>
 
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg-3)' }}>
-        <button style={filesTabStyle} onClick={() => setTab('files')}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>folder_open</span> Files
-        </button>
-        <button style={historyTabStyle} onClick={() => setTab('history')}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>history</span> Log {history.length > 0 && `(${history.length})`}
-        </button>
-        <button style={sessionsTabStyle} onClick={() => setTab('sessions')}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>dataset</span> Sessions
+        <button className="kova-workspace-button" onClick={onOpenFolder} title={projectRoot ?? 'Attach project'}>
+          <span className="material-symbols-outlined">folder_open</span>
+          <span>
+            <strong>{projectName(projectRoot)}</strong>
+            <small>{projectRoot ? 'Workspace attached' : 'Chat works without a folder'}</small>
+          </span>
         </button>
       </div>
 
-      {tab === 'files' && (
-        projectRoot
-          ? <ProjectFiles projectRoot={projectRoot} changedPaths={changedPaths} onOpenFile={onOpenFile} refreshKey={refreshKey} />
-          : <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '16px 14px' }}>Open a project to view files</p>
-      )}
+      <div className="kova-sidebar-tabs" role="tablist" aria-label="Sidebar sections">
+        <button className={section === 'chats' ? 'active' : ''} onClick={() => setSection('chats')}>
+          <span className="material-symbols-outlined">forum</span>
+          Chats
+        </button>
+        <button className={section === 'project' ? 'active' : ''} onClick={() => setSection('project')}>
+          <span className="material-symbols-outlined">terminal</span>
+          Project
+        </button>
+      </div>
 
-      {tab === 'history' && (
-        <div style={{ flex: 1, overflow: 'auto', padding: '8px 0' }}>
-          {history.length === 0 && (
-            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>No iterations yet</p>
+      {section === 'chats' && (
+        <div className="kova-sidebar-scroll">
+          {sessions.length === 0 && (
+            <div className="kova-sidebar-empty">
+              <span className="material-symbols-outlined">chat</span>
+              <p>No saved chats yet.</p>
+            </div>
           )}
-          {history.map((iter, i) => {
-            const scoreColor = iter.harnessResult.score >= 90 ? 'var(--teal)' : iter.harnessResult.score >= 70 ? 'var(--yellow)' : 'var(--red)'
+          {sessions.map(session => {
+            const active = session.id === currentSessionId
             return (
-              <div key={i} style={{ margin: '4px 6px', padding: '8px 10px', background: 'var(--bg-1)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 11, color: 'var(--text-2)' }}>#{iter.iteration + 1} · {iter.agentMode}</span>
-                  <span style={{ fontSize: 11, color: scoreColor, fontWeight: 600 }}>{iter.harnessResult.score}</span>
-                </div>
-                <p style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 3 }}>
-                  {iter.changes.length} file{iter.changes.length !== 1 ? 's' : ''} · {Math.round(iter.duration / 1000)}s
-                </p>
-                {iter.changes.slice(0, 3).map((c, ci) => (
-                  <button key={ci} onClick={() => onOpenFile(c.path)} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', color: 'var(--teal)', fontSize: 10, padding: '1px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {c.path.split('/').at(-1)}
-                  </button>
-                ))}
-                {iter.changes.length > 3 && (
-                  <span style={{ fontSize: 10, color: 'var(--text-3)' }}>+ {iter.changes.length - 3} file{iter.changes.length - 3 !== 1 ? 's' : ''}</span>
-                )}
+              <div key={session.id} className={`kova-chat-row ${active ? 'active' : ''}`}>
+                <button onClick={() => onLoadSession(session)} title={sessionTitle(session)}>
+                  <span className="material-symbols-outlined">chat_bubble</span>
+                  <span>
+                    <strong>{sessionTitle(session)}</strong>
+                    <small>
+                      {session.recoveredFromSnapshot ? 'Recovered' : session.projectRoot ? projectName(session.projectRoot) : 'Global chat'} / {session.messages?.length || 0} msgs
+                    </small>
+                    {session.recoveryNote && <small className="kova-recovery-note">{session.recoveryNote}</small>}
+                  </span>
+                </button>
+                <button
+                  className="kova-chat-delete"
+                  title="Delete chat"
+                  onClick={async () => {
+                    await window.kova.deleteSession(projectRoot, session.id)
+                    setSessions(prev => prev.filter(item => item.id !== session.id))
+                  }}
+                >
+                  <span className="material-symbols-outlined">close</span>
+                </button>
               </div>
             )
           })}
         </div>
       )}
 
-      {tab === 'sessions' && (
-        <div style={{ flex: 1, overflow: 'auto', padding: '8px 0' }}>
-          {sessions.length === 0 && (
-            <p style={{ fontSize: 11, color: 'var(--text-ghost)', padding: '8px 14px' }}>No saved sessions</p>
-          )}
-          {sessions.map(s => (
-            <div key={s.id} style={{ margin: '4px 6px', padding: '8px 10px', background: 'var(--bg-1)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-                <span style={{ fontSize: 12, color: 'var(--text-1)', fontWeight: 500, wordBreak: 'break-word', paddingRight: 6 }}>
-                  {s.title}
-                </span>
-                <button 
-                  onClick={async () => {
-                    await window.kova.deleteSession(projectRoot!, s.id)
-                    setSessions(sessions.filter(sess => sess.id !== s.id))
-                  }}
-                  style={{ background: 'transparent', color: 'var(--text-3)', padding: 2 }}
-                >
-                  ✕
-                </button>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 10, color: 'var(--text-3)' }}>
-                  {new Date(s.updatedAt).toLocaleDateString()} · {s.messages?.length || 0} msgs
-                </span>
-                <button 
-                  onClick={() => onLoadSession(s)}
-                  style={{ background: 'var(--amber-dim)', color: 'var(--amber)', fontSize: 10, padding: '2px 8px', borderRadius: 4, fontWeight: 600 }}
-                >
-                  Load
-                </button>
-              </div>
+      {section === 'project' && (
+        <div className="kova-sidebar-scroll">
+          <div className="kova-project-summary">
+            <span className={`kova-status-dot ${projectRoot ? 'online' : ''}`} />
+            <div>
+              <strong>{projectName(projectRoot)}</strong>
+              <small>{contextSummary ?? (projectRoot ? 'Ready for code mode' : 'Attach a folder to edit files')}</small>
             </div>
-          ))}
+          </div>
+
+          {projectRoot ? (
+            <>
+              <div className="kova-sidebar-section-title">
+                <span>Files</span>
+                {history.length > 0 && <small>{history.length} runs</small>}
+              </div>
+              <ProjectFiles projectRoot={projectRoot} changedPaths={changedPaths} onOpenFile={onOpenFile} refreshKey={refreshKey} />
+            </>
+          ) : (
+            <button className="kova-attach-empty" onClick={onOpenFolder}>
+              <span className="material-symbols-outlined">create_new_folder</span>
+              Attach project folder
+            </button>
+          )}
         </div>
       )}
-
-      <MemoryPanel projectRoot={projectRoot} refreshKey={refreshKey} />
-
-      {totalTokens > 0 && (
-        <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
-          <span style={{ fontSize: 10, color: 'var(--text-3)' }}>
-            {totalTokens >= 1_000_000 ? `${(totalTokens / 1_000_000).toFixed(1)}M` : `${(totalTokens / 1_000).toFixed(1)}k`} tokens
-          </span>
-        </div>
-      )}
-    </div>
+    </aside>
   )
 }

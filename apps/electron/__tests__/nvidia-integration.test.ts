@@ -16,6 +16,11 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/mock/userData') },
   ipcMain: { handle: vi.fn(), on: vi.fn() },
   dialog: { showOpenDialog: vi.fn() },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => false),
+    encryptString: vi.fn(),
+    decryptString: vi.fn(),
+  },
 }))
 
 describe('NVIDIA Integration', () => {
