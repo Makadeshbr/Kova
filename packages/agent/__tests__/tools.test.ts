@@ -520,6 +520,53 @@ describe('run_command', () => {
       expect(result.ok).toBe(true)
     })
   })
+
+  describe('fragile inline-script materialization', () => {
+    it('materializes long node -e to temp script and cleans up after run', async () => {
+      const longScript = [
+        'node -e',
+        '"const msg=\\"hello\\";',
+        'console.log(msg.replace(/foo/g, \\"bar\\"));',
+        'console.log(\\"done\\");"',
+      ].join(' ')
+      const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+        stackAdapter: 'javascript',
+      })
+
+      const result = await exec.execute('run_command', { command: longScript })
+      expect(result).toMatch(/done/)
+
+      const tempDir = join(projectRoot, '.kova', 'tmp', 'validation')
+      const remaining = existsSync(tempDir)
+        ? (await import('node:fs')).readdirSync(tempDir)
+        : []
+      expect(remaining).toHaveLength(0)
+      expect(exec.getChanges()).toHaveLength(0)
+    })
+
+    it('does not materialize blocked shell composition', async () => {
+      const exec = new ToolExecutor(projectRoot, undefined, undefined, undefined, undefined, {
+        stackAdapter: 'javascript',
+      })
+      const longBody = 'x'.repeat(120)
+      const result = await exec.execute('run_command', {
+        command: `node -e "${longBody}" && echo ok`,
+      })
+      expect(result).toMatch(/^Blocked:/)
+      expect(existsSync(join(projectRoot, '.kova', 'tmp', 'validation'))).toBe(false)
+    })
+  })
+
+  describe('validation temp path guard', () => {
+    it('blocks write_file/edit_file/delete_file under .kova/tmp/validation', async () => {
+      const path = '.kova/tmp/validation/evil.js'
+      expect(await executor.execute('write_file', { path, content: 'hack' })).toMatch(/^Blocked:/)
+      mkdirSync(join(projectRoot, '.kova', 'tmp', 'validation'), { recursive: true })
+      writeFileSync(join(projectRoot, path), 'original', 'utf-8')
+      expect(await executor.execute('edit_file', { path, old_string: 'original', new_string: 'changed' })).toMatch(/^Blocked:/)
+      expect(await executor.execute('delete_file', { path })).toMatch(/^Blocked:/)
+    })
+  })
 })
 
 // ─── run_command streaming output (FIX-003) ───────────────────────────────────

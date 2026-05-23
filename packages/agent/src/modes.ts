@@ -53,7 +53,7 @@ Tools:
 - edit_file — surgical change to an existing file (exact old_string → new_string).
 - write_file — new file, or complete rewrite when most of the file changes.
 - delete_file — remove a file.
-- run_command — build, test, lint, typecheck, dependency install (npm/pnpm/pip/cargo/go install), one-shot scripts. 2-minute timeout — do not use for servers.
+- run_command — build, test, lint, install (2 min). Prefer short validation; long node -e may auto-materialize. No servers.
 - run_interactive_command — long-running processes that need a real terminal: dev servers (npm run dev, next dev, vite, rails s, python manage.py runserver), watch modes, REPLs, anything that does not exit.
 
 Workflow: read what you need, apply complete changes, run validation, fix any failures, repeat until clean. When the user asks for installs or to start the app, finish the full implementation first, then run those commands before reporting done.
@@ -135,7 +135,7 @@ Tools:
 - glob_files — list files matching a path glob. ALWAYS prefer this over run_command find/ls.
 - read_file / list_files — inspect before editing.
 - edit_file — surgical change. write_file — new file or full rewrite.
-- run_command — build, test, lint, typecheck, dependency install (npm/pnpm/pip/cargo/go install), one-shot scripts. 2-minute timeout — do not use for servers.
+- run_command — build, test, lint, install (2 min). Prefer short validation; long node -e may auto-materialize. No servers.
 - run_interactive_command — long-running processes that need a real terminal: dev servers (npm run dev, next dev, vite, rails s, python manage.py runserver), watch modes, REPLs, anything that does not exit.
 
 Respond in the user's language. End with a concise summary (1–3 sentences) when files were modified.`,

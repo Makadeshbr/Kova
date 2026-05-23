@@ -76,11 +76,11 @@ export class Agent {
       WRITE_MODES.has(mode) ? options?.permissionPolicy : READ_ONLY_PERMISSION_POLICY,
       options?.interactiveRunner,
       options?.onCommandOutput,
-      // FIX-018: seed + listener for the multi-step todo list
-      (options?.initialTodos || options?.onTodosUpdated) ? {
-        initialTodos: options.initialTodos,
-        onTodosUpdated: options.onTodosUpdated,
-      } : undefined,
+      {
+        initialTodos: options?.initialTodos,
+        onTodosUpdated: options?.onTodosUpdated,
+        stackAdapter: task.stackAdapter,
+      },
     )
 
     const timeoutId = setTimeout(

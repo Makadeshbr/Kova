@@ -124,16 +124,20 @@ Now produce the plan for the user's request. Respond with ONLY the <plan_result>
  *
  * Resolution order (first match wins):
  *   1. Slash prefix in the message text (`/plan`, `/review`, `/chat`).
- *   2. Explicit read-only `params.mode` from the UI.
- *   3. Conversational message - `chat`, no execution overlay.
- *   4. Default - `patch` (unified, all tools).
+ *   2. Explicit `plan` / `review` from the UI pill.
+ *   3. Explicit `chat` — unless the message is an engineering task, then `patch`.
+ *   4. Conversational message → `chat`.
+ *   5. Default → `patch`.
  */
 export function resolveRunMode(message: string, explicit?: KovaRunMode): KovaRunMode {
   const trimmed = message.trim()
   if (/^\/plan(\s|$)/i.test(trimmed))   return 'plan'
   if (/^\/review(\s|$)/i.test(trimmed)) return 'review'
   if (/^\/chat(\s|$)/i.test(trimmed))   return 'chat'
-  if (explicit === 'plan' || explicit === 'review' || explicit === 'chat') return explicit
+  if (explicit === 'plan' || explicit === 'review') return explicit
+  if (explicit === 'chat') {
+    return looksLikeEngineeringTask(trimmed) ? 'patch' : 'chat'
+  }
   if (isConversationalMessage(trimmed)) return 'chat'
   return 'patch'
 }

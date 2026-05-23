@@ -163,7 +163,12 @@ export function useEngineEvents(setState: SetState): void {
           const structured = event.structuredMessage
           const historyText = historyTextForStreamEnd(prev.streamingText, structured)
           const assistantMsg: ChatMessage = {
-            id: createChatMessageId('assistant'), role: 'assistant', content: historyText, isTask: !!structured, structured,
+            id: createChatMessageId('assistant'),
+            role: 'assistant',
+            content: historyText,
+            isTask: !!structured,
+            structured,
+            mode: event.mode === 'plan' ? 'plan' : event.mode === 'review' ? 'review' : event.mode === 'unified' || event.mode === 'code' || event.mode === 'fix' ? 'patch' : undefined,
           }
           const newMessages = historyText || structured
             ? [...prev.messages, assistantMsg]

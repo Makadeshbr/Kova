@@ -276,7 +276,7 @@ describe('ExecutionEngine', () => {
       expect(state.proofPack?.finalUiDecision).toBe('needs_review')
       expect(state.proofPack?.sourceOfTruth).toBe('harness')
       expect(state.proofPack?.results?.passed).toBe(false)
-      expect(state.proofPack?.summary).toContain('harness')
+      expect(state.proofPack?.summary).toContain('Alteracoes prontas')
       expect(JSON.stringify(state.proofPack)).not.toContain('unittest passed')
     })
 
@@ -321,7 +321,7 @@ describe('ExecutionEngine', () => {
       expect(state.proofPack?.results?.validationConfidence).toBe('none')
       expect(state.proofPack?.finalUiDecision).toBe('needs_review')
       expect(state.proofPack?.validationsNotRun.map(v => v.kind)).toEqual(expect.arrayContaining(['rules', 'build', 'typecheck', 'tests']))
-      expect(state.proofPack?.residualRisk.join(' ')).toContain('No real validation executed')
+      expect(state.proofPack?.residualRisk.join(' ')).toContain('Validacao nao configurada')
     })
   })
 

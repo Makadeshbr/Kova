@@ -2,7 +2,15 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, dirname, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { CommandOutputCallback, FileChange, Todo, TodoStatus, ValidationCommandKind } from '@kova/shared'
-import { classifyCommandEnvironmentIssue, isLongRunningCommand, normalizeCommandInvocation, runCommandInvocation } from '@kova/shared'
+import {
+  classifyCommandEnvironmentIssue,
+  classifyCommandFragility,
+  extractInlineScript,
+  isLongRunningCommand,
+  isValidationTempPath,
+  normalizeCommandInvocation,
+  runCommandInvocation,
+} from '@kova/shared'
 import { grepCodebase, type GrepOptions, type GrepOutputMode } from './grep-codebase'
 import { globFiles, type GlobOptions } from './glob-files'
 
@@ -287,12 +295,17 @@ export type InteractiveRunner = (command: string, cwd: string, reason: string, o
  * FIX-018: optional knobs for the multi-step todo list. Passed as the 6th
  * positional argument to keep existing 5-arg call sites backward compatible.
  */
-export interface TodoExecutorOptions {
+export interface ToolExecutorOptions {
   /** Seed the executor with a prior session's todos so plans persist across iterations. */
   initialTodos?: Todo[]
   /** Fired after every successful todo_write with the full new list. */
   onTodosUpdated?: (todos: Todo[]) => void
+  /** Stack adapter name — used for fragile inline-script materialization policy. */
+  stackAdapter?: string
 }
+
+/** @deprecated Use ToolExecutorOptions */
+export type TodoExecutorOptions = ToolExecutorOptions
 
 /**
  * Executes agent tools with in-memory staging for file writes.
@@ -335,6 +348,7 @@ export class ToolExecutor {
   private todos: Todo[] = []
   /** FIX-018: fired after every successful todo_write with the full new list. */
   private readonly onTodosUpdated?: (todos: Todo[]) => void
+  private readonly stackAdapter?: string
 
   constructor(
     private readonly projectRoot: string,
@@ -342,14 +356,15 @@ export class ToolExecutor {
     private readonly permissionPolicy: PermissionPolicy = DEFAULT_PERMISSION_POLICY,
     private readonly interactiveRunner?: InteractiveRunner,
     onCommandOutput?: CommandOutputCallback,
-    todoOptions?: TodoExecutorOptions,
+    executorOptions?: ToolExecutorOptions,
   ) {
     this.onCommandOutput = onCommandOutput
-    if (todoOptions?.initialTodos) {
+    if (executorOptions?.initialTodos) {
       // Defensive copy: mutating the source array must not leak into executor state.
-      this.todos = todoOptions.initialTodos.map(t => ({ ...t }))
+      this.todos = executorOptions.initialTodos.map(t => ({ ...t }))
     }
-    this.onTodosUpdated = todoOptions?.onTodosUpdated
+    this.onTodosUpdated = executorOptions?.onTodosUpdated
+    this.stackAdapter = executorOptions?.stackAdapter
   }
 
   /** FIX-018: read-only snapshot of the current todo list. Defensive copy. */
@@ -415,6 +430,7 @@ export class ToolExecutor {
   private writeFile(rawPath: string, content: string): string {
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
+    if (isValidationTempPath(path)) return `Blocked: ${path} is reserved for internal validation scripts`
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
     if (!content.trim()) return 'Error: content cannot be empty'
@@ -484,6 +500,7 @@ export class ToolExecutor {
   private editFile(rawPath: string, oldString: string, newString: string, replaceAll: boolean): string {
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
+    if (isValidationTempPath(path)) return `Blocked: ${path} is reserved for internal validation scripts`
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
 
@@ -612,6 +629,7 @@ export class ToolExecutor {
   private deleteFile(rawPath: string): string {
     const path = this.sanitizePath(rawPath)
     if (!path) return `Blocked: "${rawPath.slice(0, 80)}" is outside the project root`
+    if (isValidationTempPath(path)) return `Blocked: ${path} is reserved for internal validation scripts`
     const permission = this.requirePermission('edit', path)
     if (permission) return permission
 
@@ -799,7 +817,30 @@ export class ToolExecutor {
       if (!this.interactiveRunner) return `Approval required: bash ${command}`
       return this.runInteractiveCommand(command, `Kova wants to run this command: ${command}`, cwd)
     }
-    if (isGitDiffCommand(normalized.command) && !existsSync(join(normalized.cwd, '.git')) && !existsSync(join(this.projectRoot, '.git'))) {
+
+    let executionCommand = command
+    let tempScriptPath: string | null = null
+    if (classifyCommandFragility(command) === 'fragile') {
+      const extracted = extractInlineScript(command, this.stackAdapter)
+      if (extracted) {
+        tempScriptPath = this.writeValidationTempScript(extracted)
+        executionCommand = `${extracted.runner} ${tempScriptPath}`
+      }
+    }
+
+    const finalNormalized = normalizeCommandInvocation({
+      command: executionCommand,
+      workspaceRoot: this.projectRoot,
+      cwd,
+      kind,
+      additionalManifests: stagedManifests,
+    })
+    if (!finalNormalized.ok) {
+      this.removeValidationTempScript(tempScriptPath)
+      return `Blocked: ${finalNormalized.reason}${finalNormalized.hint ? ` ${finalNormalized.hint}` : ''}`
+    }
+    if (isGitDiffCommand(finalNormalized.command) && !existsSync(join(finalNormalized.cwd, '.git')) && !existsSync(join(this.projectRoot, '.git'))) {
+      this.removeValidationTempScript(tempScriptPath)
       return 'Info: diff unavailable — not a Git repository'
     }
     // FIX-003: when a streaming consumer is attached, generate a commandId and forward
@@ -809,25 +850,46 @@ export class ToolExecutor {
     const onLine = this.onCommandOutput && commandId
       ? (line: string, stream: 'stdout' | 'stderr') => this.onCommandOutput!(commandId, line, stream)
       : undefined
-    const result = await this.withStagedFilesOnDisk(() => runCommandInvocation({
-      command,
-      workspaceRoot: this.projectRoot,
-      cwd,
-      kind,
-      additionalManifests: stagedManifests,
-      timeoutMs: RUN_TIMEOUT_MS,
-      signal: this.signal,
-      onLine,
-    }))
-    this.throwIfAborted('Aborted: command cancelled by session abort')
-    if (result.timedOut) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
-    const out = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
-    if (result.exitCode !== 0) {
-      const environmentFailure = formatCommandEnvironmentFailureForAgent(out)
-      if (environmentFailure) return environmentFailure
-      return `Error:\n${out || 'command failed'}`
+    try {
+      const result = await this.withStagedFilesOnDisk(() => runCommandInvocation({
+        command: executionCommand,
+        workspaceRoot: this.projectRoot,
+        cwd,
+        kind,
+        additionalManifests: stagedManifests,
+        timeoutMs: RUN_TIMEOUT_MS,
+        signal: this.signal,
+        onLine,
+      }))
+      this.throwIfAborted('Aborted: command cancelled by session abort')
+      if (result.timedOut) return `Timeout: exceeded ${RUN_TIMEOUT_MS / 1000}s`
+      const out = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
+      if (result.exitCode !== 0) {
+        const environmentFailure = formatCommandEnvironmentFailureForAgent(out)
+        if (environmentFailure) return environmentFailure
+        return `Error:\n${out || 'command failed'}`
+      }
+      return out || 'OK: command completed with no output'
+    } finally {
+      this.removeValidationTempScript(tempScriptPath)
     }
-    return out || 'OK: command completed with no output'
+  }
+
+  private writeValidationTempScript(script: { body: string; extension: 'js' | 'py' }): string {
+    const relPath = `.kova/tmp/validation/validate-${randomUUID().slice(0, 8)}.${script.extension}`
+    const fullPath = join(this.projectRoot, relPath)
+    mkdirSync(dirname(fullPath), { recursive: true })
+    writeFileSync(fullPath, script.body, 'utf-8')
+    return relPath.replace(/\\/g, '/')
+  }
+
+  private removeValidationTempScript(relPath: string | null): void {
+    if (!relPath) return
+    try {
+      rmSync(join(this.projectRoot, relPath), { force: true })
+    } catch {
+      // Best-effort cleanup — temp dir is ephemeral.
+    }
   }
 
   private async withStagedFilesOnDisk<T>(run: () => Promise<T>): Promise<T> {

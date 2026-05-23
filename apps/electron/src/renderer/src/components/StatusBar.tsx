@@ -66,18 +66,6 @@ export function StatusBar({ executionState, sessionUsage, events }: Props): Reac
         </span>
       )}
 
-      {executionState && (
-        <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
-          iter {executionState.currentIteration + 1}/{executionState.maxIterations}
-        </span>
-      )}
-
-      {last?.harnessResult && (
-        <span style={{ fontSize: 11, color: last.harnessResult.score >= 90 ? 'var(--teal)' : last.harnessResult.score >= 70 ? 'var(--yellow)' : 'var(--text-3)' }}>
-          score {last.harnessResult.score}
-        </span>
-      )}
-
       {pendingChanges > 0 && (
         <span style={{
           fontSize: 11,

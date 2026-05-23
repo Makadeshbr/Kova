@@ -46,7 +46,7 @@ function result(passed: boolean, errors: HarnessError[] = []): HarnessResult {
 }
 
 describe('ExecutionEngine feedback loop', () => {
-  it('usa modo fix e injeta erros do harness apos uma falha', async () => {
+  it('deixa falha de harness como revisao recomendada em vez de loop de repair automatico', async () => {
     const deps: ExecutionDependencies = {
       agent: {
         execute: vi.fn(async (_task, _context, mode) => ({
@@ -75,8 +75,9 @@ describe('ExecutionEngine feedback loop', () => {
 
     const agentCalls = (deps.agent.execute as ReturnType<typeof vi.fn>).mock.calls
     const contextCalls = (deps.contextEngine.buildContext as ReturnType<typeof vi.fn>).mock.calls
-    expect(state.status).toBe('completed')
-    expect(agentCalls.map(call => call[2])).toEqual(['plan', 'code', 'fix'])
-    expect(contextCalls[1][2]).toEqual({ harnessErrors: [error] })
+    expect(state.status).toBe('paused')
+    expect(agentCalls.map(call => call[2])).toEqual(['plan', 'code'])
+    expect(contextCalls).toHaveLength(1)
+    expect(state.iterationHistory.at(-1)?.decision.decision).toBe('suggest')
   })
 })

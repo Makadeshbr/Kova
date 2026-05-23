@@ -264,8 +264,9 @@ export class HarnessOrchestrator {
       ? (line: string, stream: 'stdout' | 'stderr') => onHarnessLine(layer, line, stream)
       : undefined
 
+    // Build is evidence, not a gate — pipeline continues unless a layer reports critical severity.
     const build: LayerDef = {
-      name: 'build', hardFail: true, command: buildCommand,
+      name: 'build', hardFail: false, command: buildCommand,
       run: () => runBuildLayer({ command: buildCommand, projectRoot, cwd: buildCwd, signal, onLine: onLine('build') }),
     }
     const typecheck: LayerDef = {

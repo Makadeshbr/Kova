@@ -72,20 +72,18 @@ describe('Invariant: safe zone → human_required (needs human approval)', () =>
   })
 })
 
-describe('Invariant: scaffolding (pure-create) → auto_apply without harness (Claude Code parity)', () => {
-  it('Empty project + pure-create patch: harness bypassed, decision is auto_apply', async () => {
+describe('Invariant: scaffolding with missing validation is reviewable', () => {
+  it('Empty project + pure-create patch: missing validation pauses for review', async () => {
     const evalCase = { ...ALL_LIVE_CASES[2], projectRoot }
     const provider = new MockAgentProvider(mocksForCase(evalCase.id, projectRoot))
     const deps = buildDeps(projectRoot, provider)
 
     const result = await runLiveEval(evalCase, deps)
 
-    // Claude Code parity: when every change creates a brand-new file, there is
-    // no existing build command to validate against and no existing code to
-    // protect. Match CC/Codex/Cursor — let the agent materialize the project
-    // and apply immediately. The user runs their own validation afterwards.
-    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('reject')
-    expect(result.actualStatus, `notes: ${result.notes.join(', ')}`).toBe('failed')
+    // Product UX: missing validation is a warning that leaves useful changes
+    // reviewable. It must not show as failed.
+    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('suggest')
+    expect(result.actualStatus, `notes: ${result.notes.join(', ')}`).toBe('paused')
   })
 })
 
@@ -100,8 +98,9 @@ describe('Invariant: max files only applies to MODIFY patches', () => {
     // Claude Code parity: max_files_changed protects users from agents touching
     // dozens of EXISTING files unexpectedly. It does not apply to scaffolding
     // tasks where the agent is materializing a new project. Pure-create
-    // patches with many files must succeed.
-    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('reject')
+    // patches with many files must remain reviewable without max_files blocking them.
+    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('suggest')
+    expect(result.actualStatus, `notes: ${result.notes.join(', ')}`).toBe('paused')
     expect(result.notes.join(' ')).not.toContain('max_files_changed')
   })
 })
@@ -138,8 +137,8 @@ describe('Invariant: with build command → validation runs', () => {
   })
 })
 
-describe('Invariant: repair loop usa segunda tentativa', () => {
-  it('Primeira iteracao falha no build; segunda corrige e fica pronta para apply', async () => {
+describe('Invariant: harness warning pausa para revisao', () => {
+  it('Primeira iteracao falha no build e fica pronta para review sem repair automatico', async () => {
     const evalCase = { ...ALL_LIVE_CASES[6], projectRoot }
     setupProjectForCase(evalCase.id, projectRoot)
     const provider = new MockAgentProvider(mocksForCase(evalCase.id, projectRoot))
@@ -148,9 +147,9 @@ describe('Invariant: repair loop usa segunda tentativa', () => {
     const result = await runLiveEval(evalCase, deps)
 
     expect(result.actualStatus, `notes: ${result.notes.join(', ')}`).toBe('paused')
-    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('auto_apply')
-    expect(result.iterations).toBe(2)
-    expect(result.finalScore).toBeGreaterThanOrEqual(90)
+    expect(result.actualDecision, `notes: ${result.notes.join(', ')}`).toBe('suggest')
+    expect(result.iterations).toBe(1)
+    expect(result.finalScore).toBeLessThan(90)
   })
 })
 

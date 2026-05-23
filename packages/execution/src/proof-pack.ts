@@ -25,7 +25,7 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
         skippedKinds.add(layer.name)
         validationsNotRun.push({
           kind: layer.name,
-          reason: layer.skippedReason ?? layer.warnings[0]?.message ?? 'Validation skipped by harness.',
+          reason: normalizeValidationSkipReason(layer.skippedReason ?? layer.warnings[0]?.message),
         })
       } else if (layer.name !== 'completion') {
         validationsRun.push({
@@ -48,16 +48,18 @@ export function generateProofPack(state: ExecutionState, contract: ExecutionCont
     }
     for (const skipped of harness.skippedLayers ?? []) {
       if (!skippedKinds.has(skipped)) {
-        validationsNotRun.push({ kind: skipped, reason: 'Validation was not executed in this run.' })
+        validationsNotRun.push({ kind: skipped, reason: 'Nao configurado.' })
       }
     }
     if (harness.validationConfidence === 'none') {
-      residualRisk.push('No real validation executed; human review is required.')
+      residualRisk.push('Validacao nao configurada neste projeto.')
     } else if (harness.validationConfidence === 'partial') {
-      residualRisk.push('Only partial validation executed; do not claim complete safety.')
+      residualRisk.push('Validacao parcial; revise antes de tratar como totalmente verificado.')
     }
     for (const layer of harness.layers.filter(l => !l.skipped && !l.passed)) {
-      residualRisk.push(`${layer.name} failed with ${layer.errors.length} error(s).`)
+      residualRisk.push(layer.name === 'completion'
+        ? 'Evidencia de conclusao incompleta.'
+        : `${layer.name} precisa de revisao (${layer.errors.length} erro(s)).`)
     }
     for (const reason of harness.evidenceScore?.risk.reasons ?? []) residualRisk.push(reason)
     for (const reason of harness.evidenceScore?.completeness.reasons ?? []) notes.push(reason)
@@ -141,11 +143,15 @@ function buildDiffSummary(
 }
 
 function buildProofSummary(state: ExecutionState, harness?: HarnessResult): string {
-  if (state.status === 'completed') return 'Changes applied after harness validation.'
-  if (!harness) return 'Task ended without harness results.'
-  if (!harness.passed) return 'Task ended with harness validation failing.'
-  if (harness.validationConfidence !== 'full') return 'Task requires review — validation was partial or missing.'
-  return 'Task validated by harness, awaiting decision/apply.'
+  if (state.status === 'completed') {
+    if (harness?.validationConfidence === 'none') return 'Alteracoes concluidas; validacao nao configurada neste projeto.'
+    if (harness?.validationConfidence === 'partial') return 'Alteracoes concluidas com validacao parcial.'
+    return 'Alteracoes concluidas.'
+  }
+  if (!harness) return 'Tarefa encerrada sem resultado de validacao.'
+  if (!harness.passed && harness.validationConfidence === 'full') return 'Validacao encontrou falha real.'
+  if (harness.validationConfidence !== 'full') return 'Alteracoes prontas com validacao parcial ou ausente.'
+  return 'Alteracoes prontas para revisao/aplicacao.'
 }
 
 function mapProofPackDecision(
@@ -157,7 +163,8 @@ function mapProofPackDecision(
   if (decision === 'human_required' || status === 'paused') return 'needs_review'
   if (decision === 'suggest') return 'suggest'
   if (decision === 'auto_apply') return 'apply'
-  if (harness?.layers.some(l => !l.skipped && !l.passed)) return 'repair_needed'
+  if (harness?.layers.some(l => l.name === 'security' && !l.skipped && !l.passed && l.errors.some(error => error.severity === 'critical'))) return 'repair_needed'
+  if (harness?.layers.some(l => !l.skipped && !l.passed)) return 'suggest'
   return 'reject'
 }
 
@@ -166,10 +173,17 @@ function recommendNextStep(
   decision: NonNullable<ProofPack['finalUiDecision']>,
   harness?: HarnessResult,
 ): string {
-  if (decision === 'repair_needed') return 'Fix the harness failures and run validation again.'
-  if (decision === 'needs_review') return 'Review evidence, diff, and risks before applying.'
-  if (harness?.validationConfidence === 'partial') return 'Run additional validation before auto-apply.'
-  if (harness?.validationConfidence === 'none') return 'Configure real project validation before approving.'
-  if (status === 'completed') return 'No required action.'
-  return 'Review the Proof Pack and decide the next step.'
+  if (decision === 'repair_needed') return 'Revise os avisos do harness e rode validacao novamente quando existir.'
+  if (decision === 'needs_review') return 'Revise o diff e a evidencia antes de aplicar.'
+  if (harness?.validationConfidence === 'partial') return 'Valide manualmente o fluxo afetado se precisar de maior confianca.'
+  if (harness?.validationConfidence === 'none') return 'Sem validacao configurada; revise manualmente o resultado.'
+  if (status === 'completed') return 'Nenhuma acao obrigatoria.'
+  return 'Revise o Proof Pack e decida o proximo passo.'
+}
+
+function normalizeValidationSkipReason(reason: string | undefined): string {
+  if (!reason) return 'Nao configurado.'
+  if (reason === 'command_not_configured') return 'Nao configurado.'
+  if (reason === 'no_validation_layers_configured') return 'Validacao nao configurada.'
+  return reason.replace(/_/g, ' ')
 }

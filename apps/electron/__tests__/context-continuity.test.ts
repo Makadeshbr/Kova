@@ -31,6 +31,7 @@ describe('buildContextContinuitySummary', () => {
     expect(buildContextContinuitySummary(emptyUsage, [])).toMatchObject({
       visible: false,
       fileCount: 0,
+      headline: 'Projeto vazio detectado',
       memoryLabel: null,
       safetyLabel: null,
     })
@@ -60,6 +61,7 @@ describe('buildContextContinuitySummary', () => {
 
     expect(summary.visible).toBe(true)
     expect(summary.reused).toBe(true)
+    expect(summary.headline).toBe('2 arquivos usados como contexto')
     expect(summary.tokenLabel).toBe('1.4k ctx')
     expect(summary.memoryLabel).toBe('2 memories')
     expect(summary.safetyLabel).toBe('1 blocked / 1 skipped')
@@ -87,5 +89,15 @@ describe('buildContextContinuitySummary', () => {
     expect(summary.fileCount).toBe(1)
     expect(summary.tokenLabel).toBe('800 ctx')
     expect(summary.selectedFiles[0]).toMatchObject({ path: 'new.ts', source: 'open file' })
+  })
+
+  it('shows a product label when an empty project context was loaded', () => {
+    const summary = buildContextContinuitySummary(emptyUsage, [
+      contextEvent({ files: [], tokensUsed: 0, selectedFiles: [] }),
+    ])
+
+    expect(summary.visible).toBe(true)
+    expect(summary.headline).toBe('Projeto vazio detectado')
+    expect(summary.tokenLabel).toBe('0 ctx')
   })
 })

@@ -130,7 +130,7 @@ describe('Pipeline completo — sem mocks', () => {
 
     const result = await runPipeline([
       {
-        name: 'build', hardFail: true,
+        name: 'build', hardFail: false,
         run: () => runBuildLayer({ command: `"${TSC}" --noEmit`, projectRoot: dir }),
       },
       {
@@ -144,7 +144,7 @@ describe('Pipeline completo — sem mocks', () => {
     expect(result.layers.every(l => l.passed)).toBe(true)
   })
 
-  it('deve parar no build (hard fail) sem rodar rules', async () => {
+  it('deve continuar para rules após build falhar (evidência, não gate)', async () => {
     const dir = setup({
       'tsconfig.json': TSCONFIG,
       'src/bad.ts': 'const x: number = "erro"\nexport { x }',
@@ -153,7 +153,7 @@ describe('Pipeline completo — sem mocks', () => {
 
     const result = await runPipeline([
       {
-        name: 'build', hardFail: true,
+        name: 'build', hardFail: false,
         run: () => runBuildLayer({ command: `"${TSC}" --noEmit`, projectRoot: dir }),
       },
       {
@@ -163,7 +163,8 @@ describe('Pipeline completo — sem mocks', () => {
     ], { projectRoot: dir, iteration: 1 })
 
     expect(result.passed).toBe(false)
-    expect(result.layers).toHaveLength(1)
-    expect(rulesCalled.value).toBe(false)
+    expect(result.layers).toHaveLength(2)
+    expect(rulesCalled.value).toBe(true)
+    expect(result.score).toBeGreaterThan(0)
   })
 })

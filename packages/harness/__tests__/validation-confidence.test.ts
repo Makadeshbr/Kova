@@ -6,7 +6,7 @@ import type { LayerDef } from '../src/pipeline'
 function passedLayer(name: LayerResult['name']): LayerDef {
   return {
     name,
-    hardFail: name === 'build',
+    hardFail: false,
     run: vi.fn().mockResolvedValue({
       name, passed: true, errors: [], warnings: [], duration: 5, skipped: false,
     } satisfies LayerResult),
@@ -34,6 +34,28 @@ describe('runPipeline — validationConfidence', () => {
   it('returns none when all layers are skipped', async () => {
     const result = await runPipeline([skippedLayer('build'), skippedLayer('tests')], cfg)
     expect(result.validationConfidence).toBe('none')
+  })
+
+  it('treats command_not_configured as skipped instead of a fatal failure', async () => {
+    const result = await runPipeline([
+      {
+        ...skippedLayer('build'),
+        run: vi.fn().mockResolvedValue({
+          name: 'build',
+          passed: true,
+          errors: [],
+          warnings: [],
+          duration: 0,
+          skipped: true,
+          skippedReason: 'command_not_configured',
+        } satisfies LayerResult),
+      },
+    ], cfg)
+
+    expect(result.passed).toBe(true)
+    expect(result.validationConfidence).toBe('none')
+    expect(result.layers[0].status).toBe('skipped')
+    expect(result.layers[0].skippedReason).toBe('command_not_configured')
   })
 
   it('returns partial when only rules ran (no build or tests)', async () => {
@@ -191,7 +213,30 @@ describe('runPipeline - Evidence Score', () => {
     const result = await runPipeline([passedLayer('build'), failedTypecheck, passedLayer('tests')], cfg)
 
     expect(result.passed).toBe(false)
-    expect(result.score).toBeLessThanOrEqual(55)
+    expect(result.score).toBeLessThanOrEqual(75)
     expect(result.evidenceScore?.blockers).toContain('typecheck failed')
+  })
+
+  it('failed build does not zero score and continues pipeline', async () => {
+    const failedBuild: LayerDef = {
+      name: 'build',
+      hardFail: false,
+      run: vi.fn().mockResolvedValue({
+        name: 'build',
+        passed: false,
+        errors: [{ layer: 'build', type: 'syntax', severity: 'high', fixable: false, message: 'bad', humanMessage: 'bad', file: 'src/a.ts' }],
+        warnings: [],
+        duration: 3,
+        skipped: false,
+      } satisfies LayerResult),
+    }
+    const tests = passedLayer('tests')
+
+    const result = await runPipeline([failedBuild, tests], cfg)
+
+    expect(result.layers).toHaveLength(2)
+    expect(vi.mocked(tests.run)).toHaveBeenCalledOnce()
+    expect(result.score).toBeGreaterThan(0)
+    expect(result.score).toBeLessThanOrEqual(75)
   })
 })

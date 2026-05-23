@@ -50,6 +50,18 @@ describe('resolveRunMode - explicit pinned mode without slash', () => {
   it('keeps engineering work in patch when patch is pinned', () => {
     expect(resolveRunMode('crie um componente', 'patch')).toBe('patch')
   })
+
+  it('routes engineering task to patch when chat is pinned', () => {
+    expect(resolveRunMode('Crie uma landing page para barbearia', 'chat')).toBe('patch')
+    expect(resolveRunMode('adicione uma secao de FAQ nessa landing page', 'chat')).toBe('patch')
+  })
+})
+
+describe('resolveRunMode - explicit chat slash override', () => {
+  it('keeps /chat as chat even for engineering wording', () => {
+    expect(resolveRunMode('/chat crie uma landing page', 'patch')).toBe('chat')
+    expect(resolveRunMode('/chat crie uma landing page', 'chat')).toBe('chat')
+  })
 })
 
 describe('resolveRunMode - conversational turns stay chat', () => {
@@ -68,6 +80,10 @@ describe('resolveRunMode - conversational turns stay chat', () => {
       expect(resolveRunMode(message, 'patch')).toBe('chat')
     })
   }
+
+  it('keeps oi in chat when chat mode is pinned', () => {
+    expect(resolveRunMode('oi', 'chat')).toBe('chat')
+  })
 })
 
 describe('resolveRunMode - engineering commands stay patch', () => {

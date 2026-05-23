@@ -119,7 +119,7 @@ export const EVAL_SAFE_ZONE: LiveEvalCase = {
  */
 export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
   id: 'live-no-validation-suggests',
-  description: 'Empty project: pure-create must not auto-apply when harness validation fails',
+  description: 'Empty project: pure-create with missing validation pauses for review',
   task: task({
     objective: 'create a simple utility function',
     stackAdapter: 'generic',
@@ -127,8 +127,8 @@ export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
   }),
   projectRoot: '',
   maxIterations: 1,
-  expectedStatus: 'failed',
-  expectedDecision: 'reject',
+  expectedStatus: 'paused',
+  expectedDecision: 'suggest',
   dryRun: true,
 }
 
@@ -137,7 +137,7 @@ export const EVAL_NO_VALIDATION_SUGGESTS: LiveEvalCase = {
  */
 export const EVAL_MAX_FILES_EXCEEDED: LiveEvalCase = {
   id: 'live-max-files-exceeded',
-  description: 'Pure-create many files avoids max_files, but failed validation rejects',
+  description: 'Pure-create many files avoids max_files and missing validation is reviewable',
   task: task({
     objective: 'refactor utility functions',
     stackAdapter: 'generic',
@@ -146,8 +146,8 @@ export const EVAL_MAX_FILES_EXCEEDED: LiveEvalCase = {
   }),
   projectRoot: '',
   maxIterations: 1,
-  expectedStatus: 'failed',
-  expectedDecision: 'reject',
+  expectedStatus: 'paused',
+  expectedDecision: 'suggest',
   dryRun: true,
 }
 
@@ -192,7 +192,7 @@ export const EVAL_HARNESS_WITH_BUILD: LiveEvalCase = {
  */
 export const EVAL_MULTI_TURN_REPAIR: LiveEvalCase = {
   id: 'live-multi-turn-repair-loop',
-  description: 'Build failure on first iteration must feed repair loop and pass on second iteration',
+  description: 'Build failure on first iteration must pause for review as a harness warning',
   task: task({
     objective: 'create a valid JavaScript module',
     stackAdapter: 'generic',
@@ -202,7 +202,7 @@ export const EVAL_MULTI_TURN_REPAIR: LiveEvalCase = {
   projectRoot: '',
   maxIterations: 2,
   expectedStatus: 'paused',
-  expectedDecision: 'auto_apply',
+  expectedDecision: 'suggest',
   dryRun: true,
 }
 

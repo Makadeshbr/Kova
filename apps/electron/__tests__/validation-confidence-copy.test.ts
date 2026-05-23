@@ -19,15 +19,16 @@ describe('getValidationConfidenceCopy', () => {
     const copy = getValidationConfidenceCopy('none')
     expect(copy.show).toBe(true)
     expect(copy.tone).toBe('warning')
-    expect(copy.text.toLowerCase()).toContain('no build')
-    expect(copy.text.toLowerCase()).toMatch(/score.*cap|cap.*score|cap.*75/i)
+    expect(copy.text.toLowerCase()).toContain('validacao nao configurada')
+    expect(copy.text.toLowerCase()).not.toContain('score')
   })
 
   it('shows a different message when only partial validations ran', () => {
     const copy = getValidationConfidenceCopy('partial')
     expect(copy.show).toBe(true)
     expect(copy.tone).toBe('info')
-    expect(copy.text.toLowerCase()).toContain('partial')
+    expect(copy.text.toLowerCase()).toContain('validacao parcial')
+    expect(copy.text.toLowerCase()).not.toContain('score')
   })
 
   it('defaults to hiding when confidence is undefined', () => {

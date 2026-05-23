@@ -12,6 +12,7 @@ export interface ContextContinuitySummary {
   visible: boolean
   reused: boolean
   fileCount: number
+  headline: string
   tokenLabel: string
   memoryLabel: string | null
   safetyLabel: string | null
@@ -38,9 +39,12 @@ export function buildContextContinuitySummary(
   ]).slice(0, 3)
 
   return {
-    visible: fileCount > 0 || learnings > 0 || blockedCount > 0 || rejectedCount > 0 || warnings.length > 0,
+    visible: Boolean(latestContext) || fileCount > 0 || learnings > 0 || blockedCount > 0 || rejectedCount > 0 || warnings.length > 0,
     reused: Boolean(latestContext?.reused),
     fileCount,
+    headline: fileCount > 0
+      ? `${fileCount} arquivo${fileCount === 1 ? '' : 's'} usado${fileCount === 1 ? '' : 's'} como contexto`
+      : 'Projeto vazio detectado',
     tokenLabel: formatTokens(tokens),
     memoryLabel: learnings > 0 ? `${learnings} memor${learnings === 1 ? 'y' : 'ies'}` : null,
     safetyLabel: blockedCount > 0 || rejectedCount > 0

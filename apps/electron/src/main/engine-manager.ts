@@ -19,6 +19,7 @@ import { buildProjectProfile } from '@kova/project'
 import { resolveAtRefs, shouldShortCircuitDeniedRefs, deniedRefsMessage } from './at-refs'
 import type { ResolvedAtRefs } from './at-refs'
 import { chatOnlyPrompt, globalChatPrompt, reviewOnlyPrompt, planOnlyPrompt, resolveRunMode, parsePlanResultRobust, stripPlanXml } from './session-prompts'
+import { detectPlanLocale, normalizePlanResult } from './plan-normalizer'
 import type { KovaRunMode } from './session-prompts'
 import {
   buildContextEngine, contextBudgetFor, contextBuildOptions, contextEventPayload,
@@ -71,15 +72,17 @@ export interface StartTaskParams {
 // session completes. Centralised so translations and tweaks stay together.
 const RESULT_COPY = {
   diffReviewMessage: (count: number) => `${count} file${count === 1 ? '' : 's'} awaiting review`,
-  contextLoaded: (count: number) => `${count} file${count === 1 ? '' : 's'} in context`,
-  titleCompleted: 'Task complete',
-  titlePaused: 'Awaiting review',
-  titleFailed: 'Repair needed',
-  summaryCompleted: 'Changes applied successfully.',
-  summaryPaused: 'Review required before applying.',
+  contextLoaded: (count: number) => count > 0
+    ? `${count} arquivo${count === 1 ? '' : 's'} usado${count === 1 ? '' : 's'} como contexto`
+    : 'Projeto vazio detectado',
+  titleCompleted: 'Concluido',
+  titlePaused: 'Revisao disponivel',
+  titleFailed: 'Revisao recomendada',
+  summaryCompleted: 'Alteracoes concluidas.',
+  summaryPaused: 'Revise antes de aplicar, se necessario.',
   summaryMaxIterationsReached: 'Maximum repair attempts reached.',
   summaryFailedLayers: (layers: string, attempts: number) =>
-    `${layers} failed after ${attempts} attempt${attempts === 1 ? '' : 's'}.`,
+    `Validacao parcial: ${layers} precisa de revisao apos ${attempts} tentativa${attempts === 1 ? '' : 's'}.`,
 } as const
 
 // ——— Engine Manager ——————————————————————————————————————————————————————————
@@ -453,7 +456,7 @@ export class EngineManager {
       const output = await provider.runAgentLoop(messages, {
         system: chatOnlyPrompt(adapter.name),
         tools: READ_ONLY_TOOLS,
-        executor: new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY),
+        executor: new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, { stackAdapter: adapter.name }),
         maxTurns: 6,
         signal,
         onToken: t => {
@@ -532,7 +535,10 @@ export class EngineManager {
         ...history,
         { role: 'user', content: `${userContent}\n\n---\nProject root: ${projectRoot}\nProject context:\n${contextText}`, ...(attachments ? { attachments } : {}) },
       ]
-      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, todoEmitter(todos => this.emit(todosEvent(todos))))
+      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, {
+        ...todoEmitter(todos => this.emit(todosEvent(todos))),
+        stackAdapter: adapter.name,
+      })
       reasoning.start()
       let usageReported = false
       const output = await provider.runAgentLoop(messages, {
@@ -637,7 +643,10 @@ export class EngineManager {
       const planTools = ctx.files.length > 0 || explicitFiles.length > 0 || openedFiles.length > 0 || !projectLooksBlank(projectRoot)
         ? READ_ONLY_TOOLS
         : []
-      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, todoEmitter(todos => this.emit(todosEvent(todos))))
+      const executor = new ToolExecutor(projectRoot, signal, READ_ONLY_PERMISSION_POLICY, undefined, undefined, {
+        ...todoEmitter(todos => this.emit(todosEvent(todos))),
+        stackAdapter: adapter.name,
+      })
       reasoning.start()
       let usageReported = false
       // FIX-005: suppress raw <plan_result> XML from leaking into the chat as tokens.
@@ -684,8 +693,16 @@ export class EngineManager {
 
       // FIX-005: robust 3-tier parser (strict XML → markdown → minimal). Always produces
       // a card so /plan never fails silently when the model deviates from the XML format.
-      const planMsg = parsePlanResultRobust(output.thought, userContent)
-      this.emit({ type: 'stream_end', structuredMessage: planMsg })
+      const planMsg = normalizePlanResult(parsePlanResultRobust(output.thought, userContent), {
+        objective: userContent,
+        contextFilePaths: [
+          ...explicitFiles,
+          ...openedFiles,
+          ...ctx.files.map(f => f.path),
+        ],
+        locale: detectPlanLocale(userContent),
+      })
+      this.emit({ type: 'stream_end', mode: 'plan', structuredMessage: planMsg })
       streamEndEmitted = true
     } catch (err) {
       if (!signal?.aborted) {
@@ -864,7 +881,7 @@ export class EngineManager {
           ],
           proofPackRef: proof ? 'executionState.proofPack' : undefined,
         }
-        emitFinal({ type: 'stream_end', structuredMessage: structuredMsg })
+        emitFinal({ type: 'stream_end', mode: 'unified', structuredMessage: structuredMsg })
         engineStreamEndObserved = true
       } else {
         // No files changed (analysis-only run, or agent replied with text only).
@@ -1057,8 +1074,9 @@ function buildRunReport(
   const evidence = [
     `${proof.iterations} iteration${proof.iterations === 1 ? '' : 's'} recorded`,
     `${proof.changes.length} file${proof.changes.length === 1 ? '' : 's'} changed`,
-    `final decision ${proof.finalDecision}; score ${proof.finalScore}`,
-    proof.results?.validationConfidence ? `validation confidence ${proof.results.validationConfidence}` : undefined,
+    proof.results?.validationConfidence === 'none' ? 'validacao nao configurada'
+      : proof.results?.validationConfidence === 'partial' ? 'validacao parcial'
+      : undefined,
   ].filter((item): item is string => Boolean(item))
   const nextSteps = unique([
     proof.nextStepRecommended,

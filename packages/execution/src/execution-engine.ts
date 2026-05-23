@@ -842,10 +842,10 @@ function mergeCompletionLayer(
           },
           blockers: completionLayer.passed
             ? harness.evidenceScore.blockers
-            : [...new Set(['completion failed', ...harness.evidenceScore.blockers])],
+            : [...new Set(['completion evidence incomplete', ...harness.evidenceScore.blockers])],
           notes: completionLayer.passed
             ? harness.evidenceScore.notes
-            : [...new Set(['completion proof failed', ...harness.evidenceScore.notes])],
+            : [...new Set(['completion evidence incomplete', ...harness.evidenceScore.notes])],
         }
       : harness.evidenceScore,
   }

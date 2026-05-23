@@ -24,7 +24,7 @@ export function getValidationConfidenceCopy(confidence: ValidationConfidence | u
     return {
       show: true,
       tone: 'warning',
-      text: 'Score capped at 75 - no build/test commands detected for this project. Add them in your stack config to unlock full auto-apply.',
+      text: 'Validacao nao configurada: nao ha build, typecheck ou testes para rodar neste projeto.',
     }
   }
 
@@ -32,6 +32,6 @@ export function getValidationConfidenceCopy(confidence: ValidationConfidence | u
   return {
     show: true,
     tone: 'info',
-    text: 'Score capped - only partial validation ran (some layers were skipped). Configure missing build/test/lint commands to unlock full auto-apply.',
+    text: 'Validacao parcial: algumas verificacoes nao rodaram ou nao estao configuradas.',
   }
 }

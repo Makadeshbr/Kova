@@ -14,4 +14,4 @@ export {
 export type { ProviderId, ModelInfo, ProviderDefaults, DetectedCapabilities } from './providers/model-catalog'
 export { MODE_PROMPTS } from './modes'
 export type { KovaTool, PermissionAction, PermissionKey, PermissionPolicy, PermissionRule, InteractiveRunner } from './tools'
-export { AGENT_TOOLS, ASK_PERMISSION_POLICY, DEFAULT_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor } from './tools'
+export { AGENT_TOOLS, ASK_PERMISSION_POLICY, DEFAULT_PERMISSION_POLICY, READ_ONLY_PERMISSION_POLICY, READ_ONLY_TOOLS, ToolExecutor, type ToolExecutorOptions } from './tools'

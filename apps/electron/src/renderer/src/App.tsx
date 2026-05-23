@@ -5,6 +5,7 @@ import type { ExecutionEvent, ExecutionState, TaskDefinition, StartTaskParams } 
 import type { KovaSettings } from '../../main/ipc-handlers'
 import { buildTokenBudgetedHistory } from '../../main/history-utils'
 import { parseUserInput, type UserCommand } from './lib/parse-user-input'
+import { collectOpenedFiles } from './lib/opened-files'
 import { createChatMessageId } from './lib/message-ids'
 import { detectVisionSupport } from './lib/vision-detection'
 import { TitleBar } from './components/TitleBar'
@@ -196,7 +197,7 @@ export function App(): React.ReactElement {
   // it carries the full intent (text + mode) atomically through the pipeline.
   // No downstream code reads `state.activeMode` to "guess" mode â€” eliminates the
   // entire class of stale-closure bugs that affected slash command dispatch.
-  const buildTaskParams = useCallback((cmd: UserCommand, sessionId: string): StartTaskParams => {
+  const buildTaskParams = useCallback((cmd: UserCommand, sessionId: string, openedFiles: string[]): StartTaskParams => {
     const s = state.settings!
     return {
       objective: cmd.text,
@@ -210,13 +211,13 @@ export function App(): React.ReactElement {
       model: state.activeModel || s.model || undefined,
       autoApply: s.autoApply,
       maxIterations: s.maxIterations,
-      mode: cmd.mode,                  // â† from atomic command, never stale
+      mode: cmd.mode,                  // from atomic command, never stale
       permissionMode: s.permissionMode ?? 'auto-review',
       includeProjectContext: Boolean(state.projectRoot),
       queuedCount: state.queuedMessages.length,
-      openedFiles: state.openFilePath ? [state.openFilePath] : [],
+      openedFiles,
     }
-  }, [state.settings, state.projectRoot, state.activeModel, state.queuedMessages.length, state.openFilePath])
+  }, [state.settings, state.projectRoot, state.activeModel, state.queuedMessages.length])
 
   const sendNow = useCallback(async (cmd: UserCommand) => {
     if (!state.settings) return
@@ -235,6 +236,10 @@ export function App(): React.ReactElement {
     const taskOnly = cmd.mode === 'review' || cmd.mode === 'plan'
     const history = buildTokenBudgetedHistory(state.messages, { taskOnly })
     const sessionId = state.sessionId ?? createChatMessageId('session')
+    const openedFiles = collectOpenedFiles({
+      openFilePath: state.openFilePath,
+      iterationHistory: state.executionState?.iterationHistory,
+    })
     setState(prev => ({
       ...prev, isThinking: true, executionState: null, task: null,
       executionEvents: [], streamingText: '', reasoning: EMPTY_REASONING,
@@ -245,8 +250,8 @@ export function App(): React.ReactElement {
         attachments: cmd.attachments,
       }],
     }))
-    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd, sessionId), cmd.attachments)
-  }, [state.settings, state.projectRoot, state.messages, state.sessionId, buildTaskParams])
+    await window.kova.sendMessage(cmd.text, history, buildTaskParams(cmd, sessionId, openedFiles), cmd.attachments)
+  }, [state.settings, state.projectRoot, state.messages, state.sessionId, state.openFilePath, state.executionState, buildTaskParams])
 
   const handleSend = useCallback(async (rawText: string, modeOverride?: ChatMode, attachments?: import('@kova/shared').Attachment[]) => {
     if (!state.settings) return
@@ -284,6 +289,9 @@ export function App(): React.ReactElement {
       return
     }
     await sendNow(cmd)
+    if ((cmd.mode === 'plan' || cmd.mode === 'review') && state.projectRoot) {
+      setState(prev => ({ ...prev, activeMode: 'patch' }))
+    }
   }, [state.settings, state.projectRoot, state.isThinking, state.executionState, state.activeMode, sendNow])
 
   useEffect(() => {
@@ -433,7 +441,11 @@ export function App(): React.ReactElement {
               todos={state.todos}
               reviewChangeCount={reviewChanges.length}
               onReviewChanges={hasChanges ? () => setReviewOpen(true) : undefined}
-              onApplyChanges={hasChanges ? () => window.kova.forceApply() : undefined}
+              onApplyChanges={
+                state.executionState?.status === 'paused' && hasChanges
+                  ? () => window.kova.forceApply()
+                  : undefined
+              }
               onPauseRun={() => window.kova.pause()}
               onCancelRun={() => {
                 window.kova.abort()

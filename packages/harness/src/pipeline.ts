@@ -47,7 +47,7 @@ export async function runPipeline(
     results.push(result)
 
     const hasCritical = result.errors.some(e => e.severity === 'critical')
-    if ((layer.hardFail && !result.passed) || hasCritical) break
+    if (hasCritical) break
   }
 
   const activeResults = results.filter(r => !r.skipped)
@@ -79,7 +79,7 @@ export async function runPipeline(
   }
 
   const evidenceScore = computeEvidenceScore(results, validationConfidence, config.changes ?? [])
-  const passed = !noValidation && results.every(r => r.passed || r.skipped)
+  const passed = results.every(r => r.passed || r.skipped)
 
   return {
     passed,
@@ -114,9 +114,21 @@ function computeEvidenceScore(
   let score = validationScore - completeness.penalty - risk.penalty
   if (validationConfidence === 'none') score = Math.min(score, 55)
   if (validationConfidence === 'partial') score = Math.min(score, 85)
-  if (failedLayers.some(name => VALIDATION_LAYERS.has(name as LayerResult['name']) || COMPLETION_LAYERS.has(name as LayerResult['name']))) score = Math.min(score, 55)
-  if (active.some(layer => layer.name === 'security' && layer.errors.some(error => error.severity === 'critical'))) score = 0
-  if (active.some(layer => layer.name === 'build' && !layer.passed)) score = 0
+  // Evidence caps (agent-first): validation failures cap at 75; completion at 55; security critical zeros out.
+  const hasSecurityCritical = active.some(
+    layer => layer.name === 'security' && layer.errors.some(error => error.severity === 'critical'),
+  )
+  if (failedLayers.some(name => COMPLETION_LAYERS.has(name as LayerResult['name']))) score = Math.min(score, 55)
+  if (failedLayers.some(name => VALIDATION_LAYERS.has(name as LayerResult['name']))) score = Math.min(score, 75)
+  if (hasSecurityCritical) score = 0
+  // Failed build/tests/lint alone must not zero the score — keep a non-zero evidence band (e.g. partial validation).
+  if (
+    score <= 0
+    && failedLayers.some(name => VALIDATION_LAYERS.has(name as LayerResult['name']))
+    && !hasSecurityCritical
+  ) {
+    score = 55
+  }
   score = Math.max(0, Math.min(100, score))
 
   return {

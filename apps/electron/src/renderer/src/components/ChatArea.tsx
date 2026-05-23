@@ -9,6 +9,9 @@ import { contextualStatusLabel } from '../lib/status-context'
 import { shouldRenderFloatingResultCard } from '../lib/chat-ordering'
 import { shouldRenderRunOverlay } from '../lib/run-overlay'
 import { buildContextContinuitySummary, type ContextContinuitySummary } from '../lib/context-continuity'
+import { detectPlanLocale, planCardLabels } from '../lib/plan-locale'
+import { deriveProductStatus, layerStatusLabel, productValidationSummary } from '../lib/product-status'
+import { shouldRenderPlanResultCard } from '../lib/plan-card-visibility'
 import kovaLogo from '../assets/Logo_Kova.png'
 
 // Per-attachment cap (10 MB) and per-message cap (50 MB total). Enforced
@@ -312,8 +315,9 @@ function UserBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
 function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactElement {
   const [expandV, setExpandV] = useState(false)
   const ok = msg.decision === 'apply'
-  const statusColor = ok ? 'var(--teal)' : msg.decision === 'needs_review' ? 'var(--yellow)' : 'var(--red)'
-  const statusIcon  = ok ? '✓' : msg.decision === 'needs_review' ? '⏸' : '✗'
+  const reviewable = msg.decision === 'needs_review' || msg.decision === 'suggest'
+  const statusColor = ok ? 'var(--teal)' : reviewable ? 'var(--yellow)' : 'var(--red)'
+  const statusIcon  = ok ? 'OK' : reviewable ? '!' : 'x'
 
   const report = msg.report
   const created  = msg.filesChanged.filter(f => f.status === 'created').length
@@ -403,7 +407,7 @@ function AgentResultCard({ msg }: { msg: AgentResultMessage }): React.ReactEleme
                 fontSize: 10, padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)',
                 color: v.status === 'passed' ? 'var(--teal)' : v.status === 'failed' ? 'var(--red)' : 'var(--text-3)',
                 background: v.status === 'passed' ? 'var(--teal-dim)' : v.status === 'failed' ? 'var(--red-dim)' : 'var(--bg-active)',
-              }}>{v.command} {v.status === 'passed' ? '✓' : v.status === 'failed' ? '✗' : '—'}</span>
+              }}>{v.command} {v.status === 'passed' ? 'OK' : v.status === 'failed' ? 'revisar' : 'nao configurado'}</span>
             ))}
             {msg.validations.length > 5 && (
               <button onClick={() => setExpandV(e => !e)} style={{ fontSize: 10, color: 'var(--text-3)', background: 'transparent' }}>
@@ -478,10 +482,10 @@ function parseApproachSteps(approach: string): string[] {
 }
 
 function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage }): React.ReactElement {
+  const labels = planCardLabels(detectPlanLocale(msg.objective))
   const riskColor = msg.risk === 'low' ? 'var(--teal)' : msg.risk === 'medium' ? 'var(--yellow)' : 'var(--red)'
   const riskBg = msg.risk === 'low' ? 'var(--teal-dim)' : msg.risk === 'medium' ? 'var(--yellow-dim)' : 'var(--red-dim)'
   const steps = parseApproachSteps(msg.approach)
-  const hasContent = msg.files.length > 0 || steps.length > 0 || msg.validations.length > 0
 
   return (
     <div className="animate-fade-in" style={{ marginBottom: 18 }}>
@@ -511,7 +515,11 @@ function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage
             <div style={{
               color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
               textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4,
-            }}>Implementation Plan</div>
+            }}>{labels.title}</div>
+            <div style={{
+              color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4,
+            }}>{labels.objective}</div>
             <div style={{
               color: 'var(--text-1)', fontSize: 14, fontWeight: 500,
               lineHeight: 1.45, wordBreak: 'break-word',
@@ -522,18 +530,18 @@ function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage
             padding: '4px 10px', borderRadius: 8, fontFamily: 'var(--font-mono)',
             fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
             flexShrink: 0, alignSelf: 'flex-start', marginTop: 2,
-          }}>{msg.risk} risk</span>
+          }}>{labels.riskLabel(msg.risk)}</span>
         </div>
 
         {/* FILES */}
         {msg.files.length > 0 && (
-          <div style={{ padding: '14px 18px', borderBottom: hasContent ? '1px solid var(--border)' : undefined }}>
+          <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
             <div style={{
               color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
               textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10,
               display: 'flex', alignItems: 'center', gap: 8,
             }}>
-              <span>Files</span>
+              <span>{labels.files}</span>
               <span style={{
                 fontSize: 9, padding: '1px 6px', borderRadius: 8,
                 background: 'var(--bg-active)', color: 'var(--text-3)',
@@ -578,7 +586,7 @@ function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage
             <div style={{
               color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
               textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10,
-            }}>Approach</div>
+            }}>{labels.steps}</div>
             {steps.length > 1 ? (
               <ol style={{ margin: 0, padding: 0, listStyle: 'none' }}>
                 {steps.map((step, i) => (
@@ -610,11 +618,11 @@ function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage
 
         {/* VALIDATIONS */}
         {msg.validations.length > 0 && (
-          <div style={{ padding: '12px 18px', background: 'var(--bg-2)' }}>
+          <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-2)' }}>
             <div style={{
               color: 'var(--text-3)', fontSize: 10, fontWeight: 700,
               textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8,
-            }}>Validation</div>
+            }}>{labels.validation}</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               {msg.validations.map((v, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -629,20 +637,23 @@ function PlanResultCard({ msg }: { msg: import('@kova/shared').PlanResultMessage
           </div>
         )}
 
-        {/* Empty-plan hint: model failed to produce structured content. */}
-        {!hasContent && (
-          <div style={{ padding: '14px 18px', color: 'var(--text-3)', fontSize: 12, fontStyle: 'italic' }}>
-            The model did not produce a structured plan. Try rephrasing the request or switch to a stronger model.
-          </div>
-        )}
+        <div style={{
+          padding: '12px 18px',
+          borderTop: '1px solid var(--border)',
+          color: 'var(--text-3)',
+          fontSize: 11.5,
+          lineHeight: 1.5,
+        }}>
+          {labels.footer}
+        </div>
       </div>
     </div>
   )
 }
 
-function AssistantBubble({ msg }: { msg: ChatMessage }): React.ReactElement {
+function AssistantBubble({ msg, showPlanCard }: { msg: ChatMessage; showPlanCard: boolean }): React.ReactElement | null {
   if (msg.structured?.kind === 'agent_result') return <AgentResultCard msg={msg.structured} />
-  if (msg.structured?.kind === 'plan_result') return <PlanResultCard msg={msg.structured} />
+  if (msg.structured?.kind === 'plan_result') return showPlanCard ? <PlanResultCard msg={msg.structured} /> : null
   return (
     <div style={{ display: 'flex', gap: 10, marginBottom: 20 }} className="animate-fade-in">
       <div style={{ flex: 1, minWidth: 0, color: 'var(--text-1)', fontSize: 13.5, lineHeight: 1.7, wordBreak: 'break-word' }}>
@@ -699,10 +710,10 @@ function ContextContinuityPanel({ summary }: { summary: ContextContinuitySummary
       <div className="kova-context-continuity-head">
         <div>
           <span>Context</span>
-          <strong>{summary.fileCount} file{summary.fileCount === 1 ? '' : 's'}</strong>
+          <strong>{summary.headline}</strong>
         </div>
         <div className="kova-context-continuity-badges">
-          <span>{summary.tokenLabel}</span>
+          {summary.tokenLabel !== '0 ctx' && <span>{summary.tokenLabel}</span>}
           {summary.reused && <span>reused</span>}
           {summary.memoryLabel && <span>{summary.memoryLabel}</span>}
           {summary.safetyLabel && <span>{summary.safetyLabel}</span>}
@@ -767,9 +778,9 @@ function runTitle(executionState: ExecutionState | null, isThinking: boolean): s
   if (isThinking && !executionState) return 'Thinking'
   const status = executionState?.status
   if (!status) return 'Ready'
-  if (status === 'paused') return 'Review required'
+  if (status === 'paused') return 'Revisao disponivel'
   if (status === 'completed') return 'Completed'
-  if (status === 'failed') return 'Needs attention'
+  if (status === 'failed') return 'Revisao recomendada'
   return status.replace(/_/g, ' ')
 }
 
@@ -818,10 +829,19 @@ function buildCommandBlocks(events: ExecutionEvent[]): CommandBlock[] {
     }
     if (event.type === 'validation_completed') {
       const block = [...blocks].reverse().find(item => item.status === 'running')
-      if (block) block.status = event.harnessResult?.passed ? 'success' : 'failed'
+      if (block) block.status = validationHasBlockingFailure(event.harnessResult) ? 'failed' : 'success'
     }
   }
   return blocks.slice(-3).map(block => ({ ...block, lines: block.lines.slice(-24) }))
+}
+
+function validationHasBlockingFailure(harness: ExecutionEvent['harnessResult']): boolean {
+  return Boolean(harness?.layers.some(layer =>
+    !layer.skipped
+    && !layer.passed
+    && layer.name === 'security'
+    && layer.errors.some(error => error.severity === 'critical'),
+  ))
 }
 
 function RunControlOverlay({
@@ -849,9 +869,9 @@ function RunControlOverlay({
   const completionStop = last?.decision.completion
   const failedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && !layer.passed) ?? []
   const passedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && layer.passed) ?? []
-  const score = last?.decision.score ?? last?.harnessResult.score
   const status = executionState?.status ?? null
-  const canApply = (status === 'paused' || status === 'completed') && reviewChangeCount > 0 && !!onApplyChanges
+  const productStatus = deriveProductStatus({ executionState, isRunning, isThinking, reviewChangeCount })
+  const canApply = status === 'paused' && reviewChangeCount > 0 && !!onApplyChanges
   const hasActions = isRunning || reviewChangeCount > 0
   const changedSummary = counts.total > 0
     ? [
@@ -871,16 +891,15 @@ function RunControlOverlay({
         <div className="kova-run-summary-main">
           <div className="kova-run-summary-title">
             <span className={`kova-run-dot ${isRunning ? 'running' : status === 'failed' ? 'failed' : status === 'paused' ? 'paused' : ''}`} />
-            <strong>{runTitle(executionState, isThinking)}</strong>
-            {score !== undefined && <span className="kova-run-score">score {score}</span>}
+            <strong>{productStatus.title || runTitle(executionState, isThinking)}</strong>
           </div>
           <div className="kova-run-summary-meta">
             {todos.length > 0 && <span>Plan {todos.filter(todo => todo.status === 'completed').length}/{todos.length}</span>}
             {counts.total > 0 && <span>{changedSummary}</span>}
             {passedLayers.length > 0 && <span>{passedLayers.length} checks passed</span>}
-            {failedLayers.length > 0 && <span className="danger">{failedLayers.map(layer => layer.name).join(', ')} failed</span>}
+            {failedLayers.length > 0 && <span className={productStatus.status === 'blocked' ? 'danger' : ''}>{failedLayers.map(layer => layerStatusLabel(layer)).join(', ')}</span>}
             {completionStop && <span>{completionStopLabel(completionStop.reason)}</span>}
-            {nonTokenEvents.length > 0 && <span>{nonTokenEvents.length} events</span>}
+            {productStatus.summary && <span>{productStatus.summary}</span>}
           </div>
         </div>
         <div className="kova-run-summary-actions">
@@ -893,7 +912,7 @@ function RunControlOverlay({
           {canApply && (
             <button className="primary" onClick={() => onApplyChanges?.()}>
               <span className="material-symbols-outlined">check</span>
-              {status === 'completed' ? 'Approve' : 'Apply'}
+              Apply
             </button>
           )}
           {hasActions && isRunning && <button className="secondary" onClick={onPauseRun}>Pause</button>}
@@ -916,7 +935,8 @@ function RunControlOverlay({
       )}
 
       {!minimized && todos.length === 0 && nonTokenEvents.length > 0 && (
-        <div className="kova-run-overlay-log">
+        <details className="kova-run-overlay-log">
+          <summary>Detalhes tecnicos</summary>
           {completionStop && (
             <div>
               <span>{completionStopLabel(completionStop.reason)}</span>
@@ -929,7 +949,7 @@ function RunControlOverlay({
               <p>{event.message ?? event.toolName ?? 'Working'}</p>
             </div>
           ))}
-        </div>
+        </details>
       )}
     </section>
   )
@@ -969,8 +989,8 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
 
   const { changes, harnessResult, decision } = last
   const score  = decision.score ?? harnessResult.score
-  const status = executionState.status
   const iters  = executionState.iterationHistory.length
+  const productStatus = deriveProductStatus({ executionState })
 
   const created  = changes.filter(c => c.type === 'create').length
   const modified = changes.filter(c => c.type === 'modify').length
@@ -981,21 +1001,20 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
     deleted  > 0 && `-${deleted} deleted`,
   ].filter(Boolean) as string[]
 
-  const statusColor = status === 'completed' ? 'var(--teal)' : status === 'paused' ? 'var(--yellow)' : 'var(--red)'
-  const statusLabel = status === 'completed' ? 'Applied'
-    : status === 'paused' ? 'Awaiting review'
-    : decision.reason || 'Repair needed'
+  const statusColor = productStatus.tone === 'success' ? 'var(--teal)'
+    : productStatus.tone === 'warning' ? 'var(--yellow)'
+    : productStatus.tone === 'danger' ? 'var(--red)'
+    : 'var(--text-2)'
+  const statusLabel = productStatus.summary
 
   const passedLayers = harnessResult.layers.filter(l =>  l.passed && !l.skipped)
   const failedLayers = harnessResult.layers.filter(l => !l.passed && !l.skipped)
   const scoreColor   = score >= 90 ? 'var(--teal)' : score >= 70 ? 'var(--yellow)' : 'var(--red)'
   const validationCopy = getValidationConfidenceCopy(harnessResult.validationConfidence)
-  const statusTitle = status === 'completed' ? 'Changes ready' : status === 'paused' ? 'Review required' : 'Repair needed'
-  const statusMark = status === 'completed' ? 'OK' : status === 'paused' ? '!' : 'x'
+  const statusTitle = productStatus.title
+  const statusMark = productStatus.tone === 'success' ? 'OK' : productStatus.tone === 'warning' ? '!' : productStatus.tone === 'danger' ? 'x' : '-'
   const summaryText = parts.length > 0 ? parts.join(' / ') : 'No file changes'
-  const repairHint = status === 'failed' && failedLayers.length > 0
-    ? `Kova is using ${failedLayers.map(layer => layer.name).join(', ')} output as repair context.`
-    : null
+  const validationSummary = productValidationSummary(harnessResult)
 
   return (
     <div className="animate-fade-in" style={{ marginBottom: 16 }}>
@@ -1007,7 +1026,7 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
             borderRadius: 8,
             display: 'grid',
             placeItems: 'center',
-            background: status === 'completed' ? 'var(--teal-dim)' : status === 'paused' ? 'var(--yellow-dim)' : 'var(--red-dim)',
+            background: productStatus.tone === 'success' ? 'var(--teal-dim)' : productStatus.tone === 'warning' ? 'var(--yellow-dim)' : productStatus.tone === 'danger' ? 'var(--red-dim)' : 'var(--bg-3)',
             color: statusColor,
             fontSize: 11,
             fontWeight: 800,
@@ -1026,24 +1045,16 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
             </div>
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
-            {iters > 1 && (
-              <span style={{ fontSize: 10, color: 'var(--yellow)', background: 'var(--yellow-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
-                iter {iters}
-              </span>
-            )}
-            {passedLayers.map(l => (
+            {passedLayers.slice(0, 2).map(l => (
               <span key={l.name} style={{ fontSize: 10, color: 'var(--teal)', background: 'var(--teal-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
                 {l.name} ok
               </span>
             ))}
-            {failedLayers.map(l => (
-              <span key={l.name} style={{ fontSize: 10, color: 'var(--red)', background: 'var(--red-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
-                {l.name} failed
+            {failedLayers.slice(0, 2).map(l => (
+              <span key={l.name} style={{ fontSize: 10, color: productStatus.status === 'blocked' ? 'var(--red)' : 'var(--yellow)', background: productStatus.status === 'blocked' ? 'var(--red-dim)' : 'var(--yellow-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
+                {layerStatusLabel(l)}
               </span>
             ))}
-            {harnessResult.layers.length > 0 && (
-              <span style={{ fontSize: 11, color: scoreColor, fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{score}</span>
-            )}
           </div>
         </div>
 
@@ -1057,11 +1068,10 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
           </div>
         )}
 
-        {status !== 'completed' && (
-          <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', fontSize: 11.5, color: statusColor, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', background: status === 'failed' ? 'rgba(226,75,74,0.045)' : 'transparent' }}>
+        {productStatus.status !== 'completed' && (
+          <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', fontSize: 11.5, color: statusColor, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', background: productStatus.status === 'blocked' || productStatus.status === 'failed' ? 'rgba(226,75,74,0.045)' : 'transparent' }}>
             <span style={{ width: 6, height: 6, borderRadius: 999, background: statusColor, flexShrink: 0 }} />
-            <span>{status === 'failed' ? 'Repair context' : statusLabel}</span>
-            {repairHint && <span style={{ color: 'var(--text-3)' }}>{repairHint}</span>}
+            <span>{validationSummary ?? statusLabel}</span>
           </div>
         )}
 
@@ -1096,6 +1106,18 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
             </div>
           )}
         </div>
+
+        <details style={{ padding: '8px 14px', borderTop: '1px solid var(--border)', background: 'var(--bg-1)', fontSize: 11, color: 'var(--text-3)' }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 700 }}>Detalhes tecnicos</summary>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+            {iters > 1 && <span>iteracoes {iters}</span>}
+            {harnessResult.layers.length > 0 && <span style={{ color: scoreColor }}>score {score}</span>}
+            {harnessResult.layers.map(layer => (
+              <span key={layer.name}>{layer.name}: {layerStatusLabel(layer)}</span>
+            ))}
+            {decision.reason && <span>{decision.reason}</span>}
+          </div>
+        </details>
       </div>
     </div>
   )
@@ -1225,17 +1247,12 @@ export function ChatArea({
     const t = value.trim()
     // Allow sending with attachments but no text (e.g. "what's in this screenshot?")
     if (!t && attachments.length === 0) return
-    // The slash command parsing happens canonically inside handleSend (parseUserInput).
-    // We still update the pinned-mode pill visually so subsequent messages without a
-    // slash prefix continue in the same mode. This setState is for UI state only —
-    // the dispatch decision is owned by handleSend.
-    if (/^\/plan(\s|$)/i.test(t)) onModeChange('plan')
-    else if (/^\/review(\s|$)/i.test(t)) onModeChange('review')
+    // Mode for this turn is resolved in handleSend (parseUserInput); App resets activeMode after one-shot slash.
     onSend(t, undefined, attachments.length > 0 ? attachments : undefined)
     setValue('')
     setAttachments([])
     setAttachmentError(null)
-  }, [value, attachments, onSend, onModeChange])
+  }, [value, attachments, onSend])
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() }
@@ -1342,7 +1359,7 @@ export function ChatArea({
         {messages.map(msg =>
           msg.role === 'user'
             ? <UserBubble key={msg.id} msg={msg} />
-            : <AssistantBubble key={msg.id} msg={msg} />
+            : <AssistantBubble key={msg.id} msg={msg} showPlanCard={shouldRenderPlanResultCard(msg.mode, activeMode)} />
         )}
 
         {showResultCard && <TaskResultCard executionState={executionState!} />}

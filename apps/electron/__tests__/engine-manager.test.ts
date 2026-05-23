@@ -829,20 +829,18 @@ Use LRU pattern.
   })
 })
 
-describe('EngineManager — English UI copy (FIX-004)', () => {
-  it('emits context_loaded with English copy (Portuguese strings are not leaked)', async () => {
+describe('EngineManager — product UI copy', () => {
+  it('emits context_loaded with the empty-project product label', async () => {
     const provider = makeMockProvider({ emitTokens: ['ok'] })
     const [manager, { events }] = makeManager(provider)
 
     // Use /chat so we hit runChatSession; otherwise patch routes through the
-    // ExecutionEngine which uses different context-loaded copy. The point of
-    // this test is the English UI invariant, not which code path emits it.
+    // ExecutionEngine which uses different context-loaded copy.
     await manager.sendMessage('/chat hi', [], makeParams(projectRoot))
 
     const ctxLoaded = events.find(e => e.type === 'context_loaded')
     if (ctxLoaded) {
-      expect(ctxLoaded.message).toMatch(/file(s)? in context|context files?/i)
-      expect(ctxLoaded.message).not.toMatch(/arquivo|contexto/)
+      expect(ctxLoaded.message).toBe('Projeto vazio detectado')
     }
   })
 

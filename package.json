@@ -1,7 +1,7 @@
 {
   "name": "kova",
   "version": "0.1.0",
-  "description": "Kova — harness-driven coding agent",
+  "description": "Kova — AI coding agent with atomic git checkpoints and multi-provider support",
   "private": true,
   "type": "module",
   "scripts": {

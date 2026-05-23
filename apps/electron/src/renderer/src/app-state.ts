@@ -29,6 +29,7 @@ export interface ChatMessage {
   content: string
   isTask: boolean
   structured?: StructuredAgentMessage
+  mode?: ChatMode
   /** Files/images attached by the user when sending this message. */
   attachments?: Attachment[]
 }
