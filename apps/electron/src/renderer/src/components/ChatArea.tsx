@@ -12,6 +12,13 @@ import { buildContextContinuitySummary, type ContextContinuitySummary } from '..
 import { detectPlanLocale, planCardLabels } from '../lib/plan-locale'
 import { deriveProductStatus, layerStatusLabel, productValidationSummary } from '../lib/product-status'
 import { shouldRenderPlanResultCard } from '../lib/plan-card-visibility'
+import {
+  isTerminalExecutionStatus,
+  reviewActivityLabel,
+  shouldAutoCollapseRunPanel,
+  shouldExpandRunPanelForActiveRun,
+  shouldShowActivityArchive,
+} from '../lib/run-lifecycle'
 import kovaLogo from '../assets/Logo_Kova.png'
 
 // Per-attachment cap (10 MB) and per-message cap (50 MB total). Enforced
@@ -791,7 +798,7 @@ function completionStopLabel(reason: NonNullable<ExecutionState['iterationHistor
   return 'Continuing next turn'
 }
 
-function buildCommandBlocks(events: ExecutionEvent[]): CommandBlock[] {
+function buildCommandBlocks(events: ExecutionEvent[], executionStatus?: ExecutionState['status'] | null): CommandBlock[] {
   const blocks: CommandBlock[] = []
   for (const event of events) {
     if (event.type === 'tool_call' && event.toolName === 'run_command') {
@@ -830,6 +837,11 @@ function buildCommandBlocks(events: ExecutionEvent[]): CommandBlock[] {
     if (event.type === 'validation_completed') {
       const block = [...blocks].reverse().find(item => item.status === 'running')
       if (block) block.status = validationHasBlockingFailure(event.harnessResult) ? 'failed' : 'success'
+    }
+  }
+  if (isTerminalExecutionStatus(executionStatus)) {
+    for (const block of blocks) {
+      if (block.status === 'running') block.status = 'success'
     }
   }
   return blocks.slice(-3).map(block => ({ ...block, lines: block.lines.slice(-24) }))
@@ -871,6 +883,10 @@ function RunControlOverlay({
   const passedLayers = last?.harnessResult.layers.filter(layer => !layer.skipped && layer.passed) ?? []
   const status = executionState?.status ?? null
   const productStatus = deriveProductStatus({ executionState, isRunning, isThinking, reviewChangeCount })
+  const isTerminal = isTerminalExecutionStatus(status)
+  const reviewProgress = activeMode === 'review' && productStatus.status === 'running'
+    ? reviewActivityLabel(events)
+    : null
   const canApply = status === 'paused' && reviewChangeCount > 0 && !!onApplyChanges
   const hasActions = isRunning || reviewChangeCount > 0
   const changedSummary = counts.total > 0
@@ -880,6 +896,9 @@ function RunControlOverlay({
       counts.deleted > 0 ? `${counts.deleted} deleted` : null,
     ].filter(Boolean).join(' / ')
     : 'No file changes'
+  const compactTitle = counts.total > 0 && isTerminal
+    ? `${counts.total} arquivo${counts.total === 1 ? '' : 's'} alterado${counts.total === 1 ? '' : 's'}`
+    : productStatus.title || runTitle(executionState, isThinking)
   const visibleTodos = todos.slice(0, 5)
   const hiddenTodoCount = Math.max(0, todos.length - visibleTodos.length)
   const completedTodoCount = todos.filter(todo => todo.status === 'completed').length
@@ -890,23 +909,26 @@ function RunControlOverlay({
       <div className="kova-run-overlay-top">
         <div className="kova-run-summary-main">
           <div className="kova-run-summary-title">
-            <span className={`kova-run-dot ${isRunning ? 'running' : status === 'failed' ? 'failed' : status === 'paused' ? 'paused' : ''}`} />
-            <strong>{productStatus.title || runTitle(executionState, isThinking)}</strong>
+            <span className={`kova-run-dot ${productStatus.status === 'running' ? 'running' : productStatus.status === 'blocked' || productStatus.status === 'failed' ? 'failed' : status === 'paused' ? 'paused' : ''}`} />
+            <strong>{compactTitle}</strong>
           </div>
           <div className="kova-run-summary-meta">
+            {reviewProgress && <span>{reviewProgress}</span>}
+            {isTerminal && productStatus.title && <span>{productStatus.title}</span>}
             {todos.length > 0 && <span>Plan {todos.filter(todo => todo.status === 'completed').length}/{todos.length}</span>}
-            {counts.total > 0 && <span>{changedSummary}</span>}
-            {passedLayers.length > 0 && <span>{passedLayers.length} checks passed</span>}
+            {counts.total > 0 && !isTerminal && <span>{changedSummary}</span>}
+            {reviewChangeCount > 0 && <span>Review disponivel</span>}
+            {!isTerminal && passedLayers.length > 0 && <span>{passedLayers.length} checks passed</span>}
             {failedLayers.length > 0 && <span className={productStatus.status === 'blocked' ? 'danger' : ''}>{failedLayers.map(layer => layerStatusLabel(layer)).join(', ')}</span>}
-            {completionStop && <span>{completionStopLabel(completionStop.reason)}</span>}
+            {!isTerminal && completionStop && <span>{completionStopLabel(completionStop.reason)}</span>}
             {productStatus.summary && <span>{productStatus.summary}</span>}
           </div>
         </div>
         <div className="kova-run-summary-actions">
           {hasActions && reviewChangeCount > 0 && onReviewChanges && (
-            <button className="secondary" onClick={onReviewChanges}>
+            <button className="secondary review" onClick={onReviewChanges}>
               <span className="material-symbols-outlined">difference</span>
-              Review {reviewChangeCount}
+              Revisar aqui
             </button>
           )}
           {canApply && (
@@ -918,7 +940,7 @@ function RunControlOverlay({
           {hasActions && isRunning && <button className="secondary" onClick={onPauseRun}>Pause</button>}
           {hasActions && (isRunning || status === 'paused') && <button className="danger" onClick={onCancelRun}>Reject</button>}
           <button className="icon" onClick={onToggleMinimized} title={minimized ? 'Expand run details' : 'Minimize run details'}>
-            <span className="material-symbols-outlined">{minimized ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}</span>
+            <span className="material-symbols-outlined">{minimized ? 'keyboard_arrow_up' : 'expand_more'}</span>
           </button>
         </div>
       </div>
@@ -934,9 +956,26 @@ function RunControlOverlay({
         </div>
       )}
 
-      {!minimized && todos.length === 0 && nonTokenEvents.length > 0 && (
-        <details className="kova-run-overlay-log">
+      {!minimized && (
+        <details className="kova-run-overlay-log" open={!isTerminal}>
           <summary>Detalhes tecnicos</summary>
+          <div>
+            <span>status</span>
+            <p>{status ?? 'none'} - events {nonTokenEvents.length}</p>
+          </div>
+          {last?.harnessResult && (
+            <div>
+              <span>harness</span>
+              <p>
+                score {last.harnessResult.score}; iteration {last.harnessResult.iteration}; confidence {last.harnessResult.validationConfidence}
+              </p>
+              {last.harnessResult.layers.map(layer => (
+                <p key={layer.name}>
+                  {layer.name}: {layer.command ?? layer.name}; passed={String(layer.passed)}; skipped={String(layer.skipped)}; reason={layer.skippedReason ?? 'none'}
+                </p>
+              ))}
+            </div>
+          )}
           {completionStop && (
             <div>
               <span>{completionStopLabel(completionStop.reason)}</span>
@@ -955,8 +994,8 @@ function RunControlOverlay({
   )
 }
 
-function CommandOutputPanel({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
-  const blocks = buildCommandBlocks(events)
+function CommandOutputPanel({ events, executionStatus }: { events: ExecutionEvent[]; executionStatus?: ExecutionState['status'] | null }): React.ReactElement | null {
+  const blocks = buildCommandBlocks(events, executionStatus)
   if (blocks.length === 0) return null
   return (
     <div className="kova-command-panel">
@@ -983,7 +1022,28 @@ function CommandOutputPanel({ events }: { events: ExecutionEvent[] }): React.Rea
 
 // ─── Task result card ─────────────────────────────────────────────────────────
 
-function TaskResultCard({ executionState }: { executionState: ExecutionState }): React.ReactElement | null {
+function diffLineStats(changes: ExecutionState['iterationHistory'][number]['changes']): { added: number; removed: number } {
+  let added = 0
+  let removed = 0
+  for (const change of changes) {
+    for (const line of change.diff.split('\n')) {
+      if (line.startsWith('+++') || line.startsWith('---')) continue
+      if (line.startsWith('+')) added += 1
+      if (line.startsWith('-')) removed += 1
+    }
+  }
+  return { added, removed }
+}
+
+function TaskResultCard({
+  executionState,
+  reviewChangeCount,
+  onReviewChanges,
+}: {
+  executionState: ExecutionState
+  reviewChangeCount: number
+  onReviewChanges?: () => void
+}): React.ReactElement | null {
   const last = executionState.iterationHistory.at(-1)
   if (!last || last.changes.length === 0) return null
 
@@ -1015,10 +1075,12 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
   const statusMark = productStatus.tone === 'success' ? 'OK' : productStatus.tone === 'warning' ? '!' : productStatus.tone === 'danger' ? 'x' : '-'
   const summaryText = parts.length > 0 ? parts.join(' / ') : 'No file changes'
   const validationSummary = productValidationSummary(harnessResult)
+  const lineStats = diffLineStats(changes)
+  const canReview = reviewChangeCount > 0 && !!onReviewChanges
 
   return (
-    <div className="animate-fade-in" style={{ marginBottom: 16 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-1)' }}>
+    <div className="animate-fade-in" style={{ marginBottom: 16, display: 'flex', justifyContent: 'center' }}>
+      <div className="kova-history-result-card">
         <div style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid var(--border)' }}>
           <span style={{
             width: 26,
@@ -1037,14 +1099,28 @@ function TaskResultCard({ executionState }: { executionState: ExecutionState }):
           </span>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: 'var(--text-1)', fontSize: 13.5, fontWeight: 700 }}>{statusTitle}</span>
+              <span style={{ color: 'var(--text-1)', fontSize: 13.5, fontWeight: 760 }}>
+                {changes.length} arquivo{changes.length === 1 ? '' : 's'} editado{changes.length === 1 ? '' : 's'}
+              </span>
+              {(lineStats.added > 0 || lineStats.removed > 0) && (
+                <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+                  {lineStats.added > 0 && <span style={{ color: 'var(--teal)' }}>+{lineStats.added}</span>}
+                  {lineStats.added > 0 && lineStats.removed > 0 && <span style={{ color: 'var(--text-3)' }}> </span>}
+                  {lineStats.removed > 0 && <span style={{ color: 'var(--red)' }}>-{lineStats.removed}</span>}
+                </span>
+              )}
               <span style={{ color: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>{summaryText}</span>
             </div>
             <div style={{ color: 'var(--text-3)', fontSize: 11.5, lineHeight: 1.45, marginTop: 2 }}>
-              {statusLabel}
+              {statusTitle} · {statusLabel}
             </div>
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+            {canReview && (
+              <button className="kova-history-review-button" onClick={onReviewChanges}>
+                Revisar
+              </button>
+            )}
             {passedLayers.slice(0, 2).map(l => (
               <span key={l.name} style={{ fontSize: 10, color: 'var(--teal)', background: 'var(--teal-dim)', padding: '1px 6px', borderRadius: 8, fontFamily: 'var(--font-mono)' }}>
                 {l.name} ok
@@ -1146,6 +1222,7 @@ export function ChatArea({
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [runOverlayMinimized, setRunOverlayMinimized] = useState(false)
+  const lastAutoCollapsedRunRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1273,7 +1350,13 @@ export function ChatArea({
   const hasResult = !!lastIter && lastIter.changes.length > 0
   const isActive  = !!executionState && !['completed', 'failed', 'paused'].includes(executionState.status)
   const showLive  = (isRunning || isThinking || reasoning.active) && !hasResult
-  const showActivityArchive = !showLive && events.length > 0
+  const productStatus = deriveProductStatus({ executionState, isRunning, isThinking, reviewChangeCount })
+  const showActivityArchive = shouldShowActivityArchive({
+    hasResult,
+    showLive,
+    eventsLength: events.length,
+    executionStatus: executionState?.status,
+  })
   const hasStructuredTaskResult = messages.some(msg => msg.structured?.kind === 'agent_result')
   const showResultCard = shouldRenderFloatingResultCard({
     hasResult,
@@ -1289,6 +1372,24 @@ export function ChatArea({
   const contextContinuity = buildContextContinuitySummary(sessionUsage, events)
 
   const isNonDefaultMode = activeMode === 'plan' || activeMode === 'review'
+
+  useEffect(() => {
+    if (shouldExpandRunPanelForActiveRun({ executionStatus: executionState?.status, isRunning, isThinking })) {
+      setRunOverlayMinimized(false)
+      return
+    }
+    if (!shouldAutoCollapseRunPanel({
+      executionStatus: executionState?.status,
+      productStatus: productStatus.status,
+      isRunning,
+      isThinking,
+    })) return
+
+    const collapseKey = `${executionState?.taskId ?? 'run'}:${executionState?.status ?? 'none'}:${executionState?.iterationHistory.length ?? 0}`
+    if (lastAutoCollapsedRunRef.current === collapseKey) return
+    lastAutoCollapsedRunRef.current = collapseKey
+    setRunOverlayMinimized(true)
+  }, [executionState?.taskId, executionState?.status, executionState?.iterationHistory.length, isRunning, isThinking, productStatus.status])
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -1362,14 +1463,20 @@ export function ChatArea({
             : <AssistantBubble key={msg.id} msg={msg} showPlanCard={shouldRenderPlanResultCard(msg.mode, activeMode)} />
         )}
 
-        {showResultCard && <TaskResultCard executionState={executionState!} />}
+        {showResultCard && (
+          <TaskResultCard
+            executionState={executionState!}
+            reviewChangeCount={reviewChangeCount}
+            onReviewChanges={onReviewChanges}
+          />
+        )}
 
         {contextContinuity.visible && <ContextContinuityPanel summary={contextContinuity} />}
 
         {showActivityArchive && (
           <>
-            <CommandOutputPanel events={events} />
-            <ActivityFeed events={events} />
+            <CommandOutputPanel events={events} executionStatus={executionState?.status} />
+            <ActivityFeed events={events} executionStatus={executionState?.status} />
           </>
         )}
 
@@ -1393,8 +1500,21 @@ export function ChatArea({
                   }} />
                 </div>
               )}
-              <CommandOutputPanel events={events} />
-              {events.length > 0 && <ActivityFeed events={events} />}
+              {activeMode === 'review' && !streamingText && (
+                <div style={{
+                  padding: '8px 12px',
+                  marginBottom: 6,
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  background: 'var(--bg-2)',
+                  color: 'var(--text-2)',
+                  fontSize: 12,
+                }}>
+                  {reviewActivityLabel(events)}
+                </div>
+              )}
+              <CommandOutputPanel events={events} executionStatus={executionState?.status} />
+              {events.length > 0 && <ActivityFeed events={events} executionStatus={executionState?.status} />}
               {isActive && (
                 <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span className="kova-shimmer-text" style={{ fontSize: 12, fontWeight: 500 }}>
@@ -1483,9 +1603,10 @@ export function ChatArea({
           />
 
           <div
+            className="kova-composer-shell"
             style={{
               border: `1px solid ${isDragging ? 'var(--cyan)' : 'var(--border)'}`,
-              borderRadius: 12,
+              borderRadius: 18,
               background: isDragging ? 'var(--cyan-dim)' : 'var(--bg-2)',
               overflow: 'hidden',
               transition: 'border-color 0.15s, background 0.15s',
@@ -1529,7 +1650,7 @@ export function ChatArea({
                 isRunning || isThinking ? 'Message will be queued...'
                 : !projectRoot ? 'Ask anything. Attach a project when you need code changes...'
                 : isDragging ? 'Drop files here...'
-                : 'Ask, analyze, or request code changes. Use @file or /plan, /review'
+                : 'Pedir alteracoes adicionais'
               }
               rows={1}
               style={{
@@ -1541,7 +1662,7 @@ export function ChatArea({
             />
 
             {/* Bottom toolbar */}
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 10px 8px', gap: 6 }}>
+            <div className="kova-composer-toolbar" style={{ display: 'flex', alignItems: 'center', padding: '6px 10px 8px', gap: 6 }}>
               {/* Attach button */}
               <button
                 type="button"

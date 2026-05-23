@@ -67,6 +67,10 @@ describe('contextualStatusLabel', () => {
     expect(contextualStatusLabel('validating', events)).toBe('Validating: build')
   })
 
+  it('does not show validation as running after completion', () => {
+    expect(contextualStatusLabel('completed', [event('validation_started')])).toBe('Validacao concluida.')
+  })
+
   it('reports apply count from prior write events', () => {
     const events = [
       toolCall('write_file', { path: 'a.ts', content: '1' }),
@@ -87,5 +91,9 @@ describe('contextualStatusLabel', () => {
 
   it('falls back to "Generating code..." when coding has no events yet', () => {
     expect(contextualStatusLabel('coding', [])).toBe('Generating code...')
+  })
+
+  it('uses product copy while validation has no layer yet', () => {
+    expect(contextualStatusLabel('validating', [])).toBe('Validando projeto...')
   })
 })

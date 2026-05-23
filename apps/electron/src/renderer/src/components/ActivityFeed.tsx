@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
-import type { ExecutionEvent } from '../types'
+import type { ExecutionEvent, ExecutionState } from '../types'
 import { serverActivityLabel } from '../lib/task-activity'
+import { isTerminalExecutionStatus, validationLifecycleView } from '../lib/run-lifecycle'
 
 // ─── Status icons (kept minimal — colour conveys the kind) ───────────────────
 const Spinner = (): React.ReactElement => (
@@ -38,9 +39,10 @@ function shortCommand(value: string): string {
   return `${trimmed.slice(0, 93)}...`
 }
 
-export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.ReactElement | null {
+export function ActivityFeed({ events, executionStatus }: { events: ExecutionEvent[]; executionStatus?: ExecutionState['status'] | null }): React.ReactElement | null {
   const activities = useMemo(() => {
     const list: Activity[] = []
+    const isTerminal = isTerminalExecutionStatus(executionStatus)
     
     // Processa eventos agrupando chamadas e resultados
     for (let i = 0; i < events.length; i++) {
@@ -114,14 +116,17 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
         })
       }
       else if (e.type === 'validation_started') {
-        list.push({ id: `val_${i}`, type: 'validate', status: 'pending', label: 'Running harness validation' })
+        const view = validationLifecycleView({ executionStatus, harness: undefined, isValidationStarted: true })
+        list.push({ id: `val_${i}`, type: 'validate', status: view.status, label: view.label, detail: view.detail ?? undefined })
       }
       else if (e.type === 'harness_layer_start') {
+        if (isTerminal) continue
         const layer = e.harnessLayer ?? 'harness'
         const cmd = e.message ? e.message.slice(0, 60) : layer
         list.push({ id: `hl_${i}`, type: 'command', status: 'pending', label: `${layer}: ${cmd}`, detail: e.message })
       }
       else if (e.type === 'harness_line') {
+        if (isTerminal) continue
         // Update the most recent pending harness entry with the latest output line
         const lastHarness = [...list].reverse().find(a => a.type === 'command' && a.status === 'pending')
         if (lastHarness) lastHarness.detail = e.harnessLine?.slice(0, 120)
@@ -151,17 +156,29 @@ export function ActivityFeed({ events }: { events: ExecutionEvent[] }): React.Re
       else if (e.type === 'validation_completed') {
         const lastVal = [...list].reverse().find(a => a.type === 'validate' && a.status === 'pending')
         if (lastVal) {
-          lastVal.status = e.harnessResult?.passed ? 'success' : 'error'
-          const failed = e.harnessResult?.layers.filter(layer => !layer.skipped && !layer.passed).map(layer => layer.command || layer.name)
-          lastVal.detail = failed?.length ? `Failed: ${failed.join(', ')}` : `Score: ${e.harnessResult?.score ?? 0}/100`
+          const view = validationLifecycleView({ executionStatus, harness: e.harnessResult, isValidationStarted: true })
+          lastVal.status = view.status
+          lastVal.label = view.label
+          lastVal.detail = view.detail ?? undefined
         }
+      }
+    }
+
+    if (isTerminal) {
+      const harness = [...events].reverse().find(event => event.type === 'validation_completed')?.harnessResult
+      for (const activity of list) {
+        if (activity.type !== 'validate' || activity.status !== 'pending') continue
+        const view = validationLifecycleView({ executionStatus, harness, isValidationStarted: true })
+        activity.status = view.status
+        activity.label = view.label
+        activity.detail = view.detail ?? undefined
       }
     }
     
     // Manter a lista curta visualmente mas não perder histórico: mostramos os últimos 5
     // Para um visual premium, se houver muitos, mostramos que estão "agrupados"
     return list
-  }, [events])
+  }, [events, executionStatus])
 
   return <ActivityFeedView activities={activities} />
 }

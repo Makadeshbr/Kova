@@ -144,7 +144,7 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 24px 28px 12px;
+  padding: 24px 28px 22px;
   scrollbar-width: thin;
 }
 
@@ -156,13 +156,59 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
 
 .kova-composer-dock {
   flex-shrink: 0;
-  padding: 0 16px 14px;
-  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--bg-1) 88%, #000 12%) 22%);
+  padding: 18px 16px 14px;
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(10, 11, 11, 0.78) 20%, color-mix(in srgb, var(--bg-1) 88%, #000 12%) 100%);
 }
 
 .kova-composer-column {
-  width: min(100%, 760px);
+  width: min(100%, 736px);
   margin: 0 auto;
+}
+
+.kova-composer-shell {
+  min-height: 94px;
+  background: rgba(42, 43, 43, 0.98) !important;
+  border-color: rgba(255,255,255,0.105) !important;
+  box-shadow: 0 18px 54px rgba(0,0,0,0.36), 0 1px 0 rgba(255,255,255,0.045) inset;
+}
+
+.kova-run-overlay + * .kova-composer-shell,
+.kova-run-overlay ~ .kova-composer-shell {
+  border-top-left-radius: 18px;
+  border-top-right-radius: 18px;
+}
+
+.kova-composer-shell textarea::placeholder {
+  color: rgba(196, 202, 204, 0.34);
+}
+
+.kova-composer-toolbar {
+  min-height: 42px;
+}
+
+.kova-history-result-card {
+  width: min(100%, 590px);
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.105);
+  border-radius: 10px;
+  background: rgba(30,31,31,0.96);
+  box-shadow: 0 16px 44px rgba(0,0,0,0.30), 0 1px 0 rgba(255,255,255,0.035) inset;
+}
+
+.kova-history-review-button {
+  min-height: 26px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.055);
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.kova-history-review-button:hover {
+  background: rgba(255,255,255,0.085);
 }
 
 .kova-sidebar {
@@ -1450,29 +1496,29 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
 .kova-run-overlay {
   position: relative;
   z-index: 5;
-  width: 100%;
-  margin: 0 auto 8px;
-  transform: translateY(-10px);
+  width: calc(100% - 38px);
+  margin: 0 auto -1px;
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,0.09);
-  border-radius: 14px;
-  background: rgba(34,35,35,0.95);
-  box-shadow: 0 18px 50px rgba(0,0,0,0.38), 0 1px 0 rgba(255,255,255,0.05) inset;
-  backdrop-filter: blur(18px);
+  border: 1px solid rgba(255,255,255,0.105);
+  border-bottom-color: rgba(255,255,255,0.075);
+  border-radius: 18px 18px 0 0;
+  background: rgba(24,25,25,0.96);
+  box-shadow: 0 -18px 54px rgba(0,0,0,0.28), 0 1px 0 rgba(255,255,255,0.045) inset;
+  backdrop-filter: blur(20px);
 }
 
 .kova-run-overlay[data-minimized="true"] {
-  margin-bottom: -2px;
+  margin-bottom: -1px;
 }
 
 .kova-run-overlay-top {
-  min-height: 44px;
-  padding: 8px 10px 8px 12px;
+  min-height: 32px;
+  padding: 5px 8px 5px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.065);
+  gap: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.055);
 }
 
 .kova-run-overlay[data-minimized="true"] .kova-run-overlay-top {
@@ -1480,13 +1526,22 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
 }
 
 .kova-run-overlay-plan {
-  padding: 0 10px 10px;
+  padding: 8px 10px 10px;
 }
 
 .kova-run-overlay-log {
   display: grid;
   gap: 5px;
-  padding: 0 12px 11px;
+  padding: 8px 12px 11px;
+  border-top: 1px solid rgba(255,255,255,0.055);
+  background: rgba(0,0,0,0.13);
+}
+
+.kova-run-overlay-log summary {
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .kova-run-overlay-log div {
@@ -1720,21 +1775,23 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
 .kova-run-summary-main {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
 }
 
 .kova-run-summary-title {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  flex-shrink: 0;
 }
 
 .kova-run-summary-title strong {
   color: var(--text-1);
-  font-size: 13px;
-  font-weight: 800;
+  font-size: 12.5px;
+  font-weight: 760;
 }
 
 .kova-run-dot {
@@ -1775,9 +1832,15 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   color: var(--text-3);
   font-size: 11px;
+}
+
+.kova-run-summary-meta span::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-ghost);
 }
 
 .kova-run-summary-meta span {
@@ -1795,21 +1858,26 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .kova-run-summary-actions button {
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 8px;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 7px;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 760;
 }
 
 .kova-run-summary-actions .secondary {
-  background: rgba(255,255,255,0.045);
-  border: 1px solid rgba(255,255,255,0.09);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.085);
   color: var(--text-2);
+}
+
+.kova-run-summary-actions .secondary.review {
+  background: rgba(255,255,255,0.055);
+  color: var(--text-1);
 }
 
 .kova-run-summary-actions .primary {
@@ -1825,7 +1893,7 @@ input:focus, textarea:focus { border-color: var(--border-focus); }
 }
 
 .kova-run-summary-actions .icon {
-  width: 28px;
+  width: 24px;
   padding: 0;
   justify-content: center;
   color: var(--text-3);

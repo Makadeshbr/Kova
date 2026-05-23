@@ -23,10 +23,10 @@ function event(type: ExecutionEvent['type'], extra: Partial<ExecutionEvent> = {}
   }
 }
 
-function stateWithChanges(): ExecutionState {
+function stateWithChanges(status: ExecutionState['status'] = 'completed'): ExecutionState {
   return {
     taskId: 't',
-    status: 'completed',
+    status,
     currentIteration: 0,
     maxIterations: 1,
     totalTokens: 0,
@@ -86,11 +86,18 @@ describe('shouldRenderRunOverlay', () => {
     expect(shouldRenderRunOverlay(baseInput({ activeMode: 'review', isThinking: true }))).toBe(true)
   })
 
-  it('shows for file changes, writable tools, commands, and validation', () => {
-    expect(shouldRenderRunOverlay(baseInput({ executionState: stateWithChanges() }))).toBe(true)
+  it('shows for active file changes, writable tools, commands, and validation', () => {
+    expect(shouldRenderRunOverlay(baseInput({ executionState: stateWithChanges('coding') }))).toBe(true)
     expect(shouldRenderRunOverlay(baseInput({ events: [event('tool_call', { toolName: 'write_file' })] }))).toBe(true)
     expect(shouldRenderRunOverlay(baseInput({ events: [event('tool_call', { toolName: 'run_command' })] }))).toBe(true)
     expect(shouldRenderRunOverlay(baseInput({ events: [event('validation_started')] }))).toBe(true)
+  })
+
+  it('hides completed file changes because they render as chat history', () => {
+    expect(shouldRenderRunOverlay(baseInput({
+      executionState: stateWithChanges('completed'),
+      reviewChangeCount: 1,
+    }))).toBe(false)
   })
 
   it('does not show for read-only chat tool calls', () => {

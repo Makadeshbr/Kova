@@ -90,6 +90,9 @@ export function skippedReasonLabel(reason: string | undefined): string {
 
 export function productValidationSummary(harness: HarnessResult | undefined): string | null {
   if (!harness) return null
+  if (harness.layers.some(layer => layer.name === 'completion' && !layer.skipped && !layer.passed)) {
+    return 'Evidencia incompleta.'
+  }
   if (harness.validationConfidence === 'none') return 'Validacao nao configurada neste projeto.'
   if (harness.validationConfidence === 'partial') return 'Validacao parcial.'
   return null

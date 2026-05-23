@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ExecutionState, HarnessResult, LayerResult } from '../src/renderer/src/types'
-import { deriveProductStatus, layerStatusLabel, skippedReasonLabel } from '../src/renderer/src/lib/product-status'
+import { deriveProductStatus, layerStatusLabel, productValidationSummary, skippedReasonLabel } from '../src/renderer/src/lib/product-status'
 
 function layer(overrides: Partial<LayerResult>): LayerResult {
   return {
@@ -96,5 +96,8 @@ describe('product status copy helpers', () => {
 
   it('maps completion failure to evidence copy', () => {
     expect(layerStatusLabel(layer({ name: 'completion', passed: false }))).toBe('Evidencia incompleta')
+    expect(productValidationSummary(harness({
+      layers: [layer({ name: 'completion', passed: false, command: 'completion-proof' })],
+    }))).toBe('Evidencia incompleta.')
   })
 })

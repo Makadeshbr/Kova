@@ -42,13 +42,15 @@ export interface RunOverlayVisibilityInput {
 }
 
 export function shouldRenderRunOverlay(input: RunOverlayVisibilityInput): boolean {
+  const changes = input.executionState?.iterationHistory.flatMap(iteration => iteration.changes) ?? []
+  if (input.executionState?.status === 'completed' && changes.length > 0) return false
+
   if (input.reviewChangeCount > 0) return true
   if (input.todos.length > 0) return true
   if (input.activeMode === 'plan' || input.activeMode === 'review') {
     return input.isThinking || input.events.some(isAgenticOverlayEvent)
   }
 
-  const changes = input.executionState?.iterationHistory.flatMap(iteration => iteration.changes) ?? []
   if (changes.length > 0) return true
 
   return input.events.some(isAgenticOverlayEvent)

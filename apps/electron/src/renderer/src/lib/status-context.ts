@@ -8,6 +8,7 @@
  * the indicator never flashes empty.
  */
 import type { ExecutionEvent, ExecutionState } from '../types'
+import { isTerminalExecutionStatus } from './run-lifecycle'
 
 const MAX_FILES_IN_LABEL = 2
 
@@ -91,6 +92,13 @@ export function contextualStatusLabel(
   events: ExecutionEvent[],
 ): string {
   if (!status) return 'Processing...'
+  if (isTerminalExecutionStatus(status)) {
+    if (status === 'completed') return 'Validacao concluida.'
+    if (status === 'paused') return 'Revisao disponivel.'
+    if (status === 'blocked') return 'Bloqueado por seguranca ou permissao.'
+    if (status === 'failed') return 'Execucao encerrada.'
+    if (status === 'server_ready') return 'Dev server is ready.'
+  }
 
   const recent = summarizeRecent(events)
 
@@ -130,7 +138,7 @@ export function contextualStatusLabel(
 
   if (status === 'validating') {
     if (recent.lastHarnessLayer) return `Validating: ${recent.lastHarnessLayer}`
-    return 'Running harness validation...'
+    return 'Validando projeto...'
   }
 
   if (status === 'deciding') return 'Reviewing changes...'
